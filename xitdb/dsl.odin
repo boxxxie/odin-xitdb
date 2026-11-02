@@ -462,6 +462,7 @@ get_float :: proc(db: ^Database, selector: string) -> (res: f64, err: Error) {
 // Auto-vivify intermediate collections along `steps` and return the target `Write_Cursor`.
 write_steps_cursor :: proc(start: Write_Cursor, steps: []Path_Step) -> (res: Write_Cursor, err: Error) {
 	cur := start
+	cursor_reload_slot(&cur) or_return
 	for step in steps {
 		switch step.kind {
 		case .Hash_Map_Key:
@@ -810,6 +811,8 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 	// Only compute the structural diff when __tx metadata or change tracking is requested
 	wants_tx_meta := len(tx.doc) > 0 || tx.instant != nil || len(tx.meta) > 0 || tx.track_changes
 	if wants_tx_meta {
+		cursor_reload_slot(&moment.write_cursor) or_return
+		moment.read_hash_map.cursor = moment.write_cursor.read_cursor
 		if ectx.has_parent {
 			base_cur := Read_Cursor{
 				slot_ptr = Slot_Pointer{position = nil, slot = ectx.base_slot},
