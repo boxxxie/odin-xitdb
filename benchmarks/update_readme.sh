@@ -81,19 +81,19 @@ def fmt_si2($v):
   else ($v | round | tostring)
   end;
 
-def fmt_ops_range($min_ns; $max_ns):
+def fmt_ops_bounds($min_ns; $max_ns):
   (1e9 / ([$max_ns, 1] | max)) as $lo_ops |
   (1e9 / ([$min_ns, 1] | max)) as $hi_ops |
   fmt_si1($lo_ops) as $lo1 |
   fmt_si1($hi_ops) as $hi1 |
   if $min_ns == $max_ns then
-    $lo1
+    [$lo1, $hi1]
   elif $lo1 != $hi1 then
-    "\($lo1)–\($hi1)"
+    [$lo1, $hi1]
   else
     fmt_si2($lo_ops) as $lo2 |
     fmt_si2($hi_ops) as $hi2 |
-    if $lo2 != $hi2 then "\($lo2)–\($hi2)" else $lo1 end
+    if $lo2 != $hi2 then [$lo2, $hi2] else [$lo1, $hi1] end
   end;
 
 def fmt_ms($ms):
@@ -192,17 +192,19 @@ def filter_and_pool_commit($all; $lang; $sha):
   ($filtered | group_by(.name) | map(pool_records(.)) | sort_by(.rank));
 
 def tier_table_ns($list):
-  "| # | Benchmark | Ops | Med\u00a0(`ns`) | Mean\u00a0±\u00a0σ | CV | IQR | `p95` | `p99` | Min | Max | `ops/s` | Size |",
+  "| # | Benchmark | Med\u00a0(`ns`) | Mean\u00a0±\u00a0σ | CV | Min\u00a0`ops/s` | Max\u00a0`ops/s` | IQR | `p95` | `p99` | Min | Max | Ops |",
   "| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ($list[] |
-    "| \(.rank) | `\(.name | nbsp)` | \(fmt_ops_count(.ops)) | **\(.ns_per_op | commify)** | \(.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma(.stddev_ns)) | \(fmt_dec1(.cv_pct))% | \(.iqr_ns | round | commify) | \(.p95_ns | commify) | \(.p99_ns | commify) | \(.min_ns | commify) | \(.max_ns | commify) | \(fmt_ops_range(.min_ns; .max_ns)) | \(fmt_kb(.bytes_used)) |"
+    fmt_ops_bounds(.min_ns; .max_ns) as $ops_b |
+    "| \(.rank) | `\(.name | nbsp)` | **\(.ns_per_op | commify)** | \(.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma(.stddev_ns)) | \(fmt_dec1(.cv_pct))% | \($ops_b[0]) | \($ops_b[1]) | \(.iqr_ns | round | commify) | \(.p95_ns | commify) | \(.p99_ns | commify) | \(.min_ns | commify) | \(.max_ns | commify) | \(fmt_ops_count(.ops)) |"
   );
 
 def tier_table_us($list):
-  "| # | Benchmark | Ops | Med\u00a0(`µs`) | Mean\u00a0±\u00a0σ | CV | IQR | `p95` | `p99` | Min | Max | `ops/s` | Size |",
+  "| # | Benchmark | Med\u00a0(`µs`) | Mean\u00a0±\u00a0σ | CV | Min\u00a0`ops/s` | Max\u00a0`ops/s` | IQR | `p95` | `p99` | Min | Max | Ops |",
   "| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ($list[] |
-    "| \(.rank) | `\(.name | nbsp)` | \(fmt_ops_count(.ops)) | **\(fmt_us(.median_ns))** | \(fmt_us(.mean_ns))\u00a0±\u00a0\(fmt_us(.stddev_ns)) | \(fmt_dec1(.cv_pct))% | \(fmt_us(.iqr_ns)) | \(fmt_us(.p95_ns)) | \(fmt_us(.p99_ns)) | \(fmt_us(.min_ns)) | \(fmt_us(.max_ns)) | \(fmt_ops_range(.min_ns; .max_ns)) | \(fmt_kb(.bytes_used)) |"
+    fmt_ops_bounds(.min_ns; .max_ns) as $ops_b |
+    "| \(.rank) | `\(.name | nbsp)` | **\(fmt_us(.median_ns))** | \(fmt_us(.mean_ns))\u00a0±\u00a0\(fmt_us(.stddev_ns)) | \(fmt_dec1(.cv_pct))% | \($ops_b[0]) | \($ops_b[1]) | \(fmt_us(.iqr_ns)) | \(fmt_us(.p95_ns)) | \(fmt_us(.p99_ns)) | \(fmt_us(.min_ns)) | \(fmt_us(.max_ns)) | \(fmt_ops_count(.ops)) |"
   );
 
 def single_lang_section($sec_num; $lang_label; $flags; $sha; $list):
@@ -217,6 +219,52 @@ def single_lang_section($sec_num; $lang_label; $flags; $sha; $list):
   "\n#### \($sec_num).3 Multi-Microsecond Transactions, Compaction & Queries (`≥ 1 µs` · `1.7K–1M ops/s`, \($heavy | length) tests)\n",
   tier_table_us($heavy);
 
+def compare_1v1_table($list; $zig_map; $unit):
+  "| # | Benchmark | Speedup | Odin\u00a0Med\u00a0(`\($unit)`) | Zig\u00a0Med\u00a0(`\($unit)`) | Welch\u00a0$z$ | Odin\u00a0Mean\u00a0±\u00a0σ | Odin\u00a0CV | Odin\u00a0`p95` | Zig\u00a0Mean\u00a0±\u00a0σ | Zig\u00a0CV | Zig\u00a0`p95` |",
+  "| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  ($list[] | . as $o | $zig_map[$o.name] as $z |
+    ($o.ns_per_op <= $z.ns_per_op) as $odin_wins |
+    welch_z($o; $z) as $wz |
+    (if $wz >= 1.96 then "`\(fmt_dec1($wz))`\u00a0★" else "`\(fmt_dec1($wz))`\u00a0~" end) as $sig_col |
+    (if $unit == "µs" then
+      (if $odin_wins then "**\(fmt_us($o.median_ns))**" else fmt_us($o.median_ns) end) as $o_med |
+      (if $odin_wins then fmt_us($z.median_ns) else "**\(fmt_us($z.median_ns))**" end) as $z_med |
+      "\(fmt_us($o.mean_ns))\u00a0±\u00a0\(fmt_us($o.stddev_ns))" as $o_ms |
+      "\(fmt_us($z.mean_ns))\u00a0±\u00a0\(fmt_us($z.stddev_ns))" as $z_ms |
+      fmt_us($o.p95_ns) as $o_p95 |
+      fmt_us($z.p95_ns) as $z_p95 |
+      "| \($o.rank) | `\($o.name | nbsp)` | \(if $odin_wins then "**\(fmt_speedup($o.ns_per_op; $z.ns_per_op))**" else fmt_speedup($o.ns_per_op; $z.ns_per_op) end) | \($o_med) | \($z_med) | \($sig_col) | \($o_ms) | \(fmt_dec1($o.cv_pct))% | \($o_p95) | \($z_ms) | \(fmt_dec1($z.cv_pct))% | \($z_p95) |"
+     else
+      (if $odin_wins then "**\($o.ns_per_op | commify)**" else ($o.ns_per_op | commify) end) as $o_med |
+      (if $odin_wins then ($z.ns_per_op | commify) else "**\($z.ns_per_op | commify)**" end) as $z_med |
+      "\($o.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma($o.stddev_ns))" as $o_ms |
+      "\($z.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma($z.stddev_ns))" as $z_ms |
+      ($o.p95_ns | commify) as $o_p95 |
+      ($z.p95_ns | commify) as $z_p95 |
+      "| \($o.rank) | `\($o.name | nbsp)` | \(if $odin_wins then "**\(fmt_speedup($o.ns_per_op; $z.ns_per_op))**" else fmt_speedup($o.ns_per_op; $z.ns_per_op) end) | \($o_med) | \($z_med) | \($sig_col) | \($o_ms) | \(fmt_dec1($o.cv_pct))% | \($o_p95) | \($z_ms) | \(fmt_dec1($z.cv_pct))% | \($z_p95) |"
+     end)
+  );
+
+def compare_commits_table($list; $prev_map; $prev_sha; $curr_sha; $unit):
+  "| # | Benchmark | Verdict | Delta | Speedup | Base\u00a0`\($prev_sha[0:7])`\u00a0(`\($unit)`) | Curr\u00a0`\($curr_sha[0:7])`\u00a0(`\($unit)`) | Welch\u00a0$z$ | Base\u00a0Mean\u00a0±\u00a0σ | Curr\u00a0Mean\u00a0±\u00a0σ |",
+  "| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  ($list[] | . as $curr | $prev_map[$curr.name] as $base |
+    ([$base.median_ns, 1.0] | max) as $med_a |
+    ([$curr.median_ns, 1.0] | max) as $med_b |
+    ((($med_b - $med_a) / $med_a) * 100.0) as $delta_pct |
+    welch_z($base; $curr) as $wz |
+    (($wz >= 1.96) and (($delta_pct | fabs) >= 3.0) and ((($med_b - $med_a) | fabs) >= 2.0)) as $is_sig |
+    (if ($is_sig and ($med_b < $med_a)) then "**FASTER**"
+     elif ($is_sig and ($med_b > $med_a)) then "**REGRESSION**"
+     else "`~NOISE`" end) as $verdict |
+    (if $delta_pct >= 0 then "+\(fmt_dec1($delta_pct))%" else "\(fmt_dec1($delta_pct))%" end) as $delta_str |
+    (if $unit == "µs" then
+      "| \($curr.rank) | `\($curr.name | nbsp)` | \($verdict) | `\($delta_str)` | \(fmt_speedup($curr.ns_per_op; $base.ns_per_op)) | \(fmt_us($base.median_ns)) | **\(fmt_us($curr.median_ns))** | `\(fmt_dec1($wz))` | \(fmt_us($base.mean_ns))\u00a0±\u00a0\(fmt_us($base.stddev_ns)) | \(fmt_us($curr.mean_ns))\u00a0±\u00a0\(fmt_us($curr.stddev_ns)) |"
+     else
+      "| \($curr.rank) | `\($curr.name | nbsp)` | \($verdict) | `\($delta_str)` | \(fmt_speedup($curr.ns_per_op; $base.ns_per_op)) | \($base.ns_per_op | commify) | **\($curr.ns_per_op | commify)** | `\(fmt_dec1($wz))` | \($base.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma($base.stddev_ns)) | \($curr.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma($curr.stddev_ns)) |"
+     end)
+  );
+
 [inputs] as $all |
 distinct_commits($all; "odin") as $odin_commits |
 distinct_commits($all; "zig") as $zig_commits |
@@ -227,39 +275,43 @@ filter_and_pool_commit($all; "zig"; $zig_target) as $zig_list |
 (reduce $zig_list[] as $z ({}; .[$z.name] = $z)) as $zig_map |
 ($odin_list[0].commit // "unknown") as $odin_sha |
 ($zig_list[0].commit // "unknown") as $zig_sha |
+($odin_list | map(select($zig_map[.name] != null))) as $paired_list |
+($paired_list | map(select(.ns_per_op < 100))) as $paired_fast |
+($paired_list | map(select(.ns_per_op >= 100 and .ns_per_op < 1000))) as $paired_mid |
+($paired_list | map(select(.ns_per_op >= 1000))) as $paired_heavy |
 
 single_lang_section("1"; "Odin"; "-o:speed -microarch:native"; $odin_sha; $odin_list),
 "\n",
 single_lang_section("2"; "Zig"; "-Doptimize=ReleaseFast -Dcpu=native"; $zig_sha; $zig_list),
 "\n### 3. 1v1 Statistical Comparison (Odin vs. Zig, Commit `\($odin_sha)`)\n",
-"| # | Benchmark | Odin\u00a0(`Med\u00a0±\u00a0σ`\u00a0·\u00a0`CV`\u00a0·\u00a0`p95`) | Zig\u00a0(`Med\u00a0±\u00a0σ`\u00a0·\u00a0`CV`\u00a0·\u00a0`p95`) | Speedup | Welch\u00a0$z$ | Size |",
-"| ---: | :--- | ---: | ---: | ---: | ---: | ---: |",
-($odin_list[] | select($zig_map[.name] != null) | . as $o | $zig_map[$o.name] as $z |
-  ($o.ns_per_op <= $z.ns_per_op) as $odin_wins |
-  welch_z($o; $z) as $wz |
-  (if $wz >= 1.96 then "`\(fmt_dec1($wz))`\u00a0★" else "`\(fmt_dec1($wz))`\u00a0~" end) as $sig_col |
-  "| \($o.rank) | `\($o.name | nbsp)` | \(if $odin_wins then "**\($o.ns_per_op | commify)**" else ($o.ns_per_op | commify) end)\u00a0±\u00a0\(fmt_sigma($o.stddev_ns))\u00a0(`\(fmt_dec1($o.cv_pct))%`,\u00a0p95\u00a0`\($o.p95_ns | commify)`) | \(if $odin_wins then ($z.ns_per_op | commify) else "**\($z.ns_per_op | commify)**" end)\u00a0±\u00a0\(fmt_sigma($z.stddev_ns))\u00a0(`\(fmt_dec1($z.cv_pct))%`,\u00a0p95\u00a0`\($z.p95_ns | commify)`) | \(if $odin_wins then "**\(fmt_speedup($o.ns_per_op; $z.ns_per_op))**" else fmt_speedup($o.ns_per_op; $z.ns_per_op) end) | \($sig_col) | \(fmt_kb($o.bytes_used)) |"
-),
+"#### 3.1 Sub-100ns Fast Path (`ns`, \($paired_fast | length) tests)\n",
+compare_1v1_table($paired_fast; $zig_map; "ns"),
+"\n#### 3.2 Sub-Microsecond Collection & Cursor Ops (`ns`, \($paired_mid | length) tests)\n",
+compare_1v1_table($paired_mid; $zig_map; "ns"),
+"\n#### 3.3 Multi-Microsecond Transactions & Compaction (`µs`, \($paired_heavy | length) tests)\n",
+compare_1v1_table($paired_heavy; $zig_map; "µs"),
 (if ($odin_commits | length) >= 2 then
   ($odin_commits[-2]) as $prev_sha |
   filter_and_pool_commit($all; "odin"; $prev_sha) as $prev_list |
   (reduce $prev_list[] as $p ({}; .[$p.name] = $p)) as $prev_map |
+  ($odin_list | map(select($prev_map[.name] != null))) as $prog_list |
+  ($prog_list | map(select(.ns_per_op < 100))) as $prog_fast |
+  ($prog_list | map(select(.ns_per_op >= 100 and .ns_per_op < 1000))) as $prog_mid |
+  ($prog_list | map(select(.ns_per_op >= 1000))) as $prog_heavy |
   "\n### 4. Commit-vs-Commit Progression (`\($prev_sha)` → `\($odin_sha)`, Odin)\n",
-  "| # | Benchmark | Baseline\u00a0`\($prev_sha[0:7])`\u00a0(`Med\u00a0±\u00a0σ`) | Current\u00a0`\($odin_sha[0:7])`\u00a0(`Med\u00a0±\u00a0σ`) | Delta\u00a0(%) | Speedup | Welch\u00a0$z$ | Verdict |",
-  "| ---: | :--- | ---: | ---: | ---: | ---: | ---: | :--- |",
-  ($odin_list[] | select($prev_map[.name] != null) | . as $curr | $prev_map[$curr.name] as $base |
-    ([$base.median_ns, 1.0] | max) as $med_a |
-    ([$curr.median_ns, 1.0] | max) as $med_b |
-    ((($med_b - $med_a) / $med_a) * 100.0) as $delta_pct |
-    welch_z($base; $curr) as $wz |
-    (($wz >= 1.96) and (($delta_pct | fabs) >= 3.0) and ((($med_b - $med_a) | fabs) >= 2.0)) as $is_sig |
-    (if ($is_sig and ($med_b < $med_a)) then "**FASTER**"
-     elif ($is_sig and ($med_b > $med_a)) then "**REGRESSION**"
-     else "`~NOISE`" end) as $verdict |
-    (if $delta_pct >= 0 then "+\(fmt_dec1($delta_pct))%" else "\(fmt_dec1($delta_pct))%" end) as $delta_str |
-    "| \($curr.rank) | `\($curr.name | nbsp)` | \($base.ns_per_op | commify)\u00a0±\u00a0\(fmt_sigma($base.stddev_ns)) | **\($curr.ns_per_op | commify)**\u00a0±\u00a0\(fmt_sigma($curr.stddev_ns)) | `\($delta_str)` | \(fmt_speedup($curr.ns_per_op; $base.ns_per_op)) | `\(fmt_dec1($wz))` | \($verdict) |"
-  )
- else empty end)
+  "#### 4.1 Sub-100ns Fast Path (`ns`, \($prog_fast | length) tests)\n",
+  compare_commits_table($prog_fast; $prev_map; $prev_sha; $odin_sha; "ns"),
+  "\n#### 4.2 Sub-Microsecond Collection & Cursor Ops (`ns`, \($prog_mid | length) tests)\n",
+  compare_commits_table($prog_mid; $prev_map; $prev_sha; $odin_sha; "ns"),
+  "\n#### 4.3 Multi-Microsecond Transactions, Compaction & Queries (`µs`, \($prog_heavy | length) tests)\n",
+  compare_commits_table($prog_heavy; $prev_map; $prev_sha; $odin_sha; "µs")
+ else empty end),
+"\n### 5. Database Storage Footprint (`bytes_used > 0`)\n",
+"| # | Benchmark | Ops | Odin\u00a0Size | Zig\u00a0Size |",
+"| ---: | :--- | ---: | ---: | ---: |",
+($odin_list[] | select(.bytes_used > 0) | . as $o | ($zig_map[$o.name] // null) as $z |
+  "| \($o.rank) | `\($o.name | nbsp)` | \(fmt_ops_count($o.ops)) | \(fmt_kb($o.bytes_used)) | \(if $z != null and $z.bytes_used > 0 then fmt_kb($z.bytes_used) else "—" end) |"
+)
 ' "${INPUT_FILES[@]}")
 
 AWK_SCRIPT='
