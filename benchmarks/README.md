@@ -99,12 +99,32 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 ## Reference Results (`-o:speed -microarch:native`, `Core_Memory`)
 
 <!-- BEGIN_BENCHMARK_TABLE -->
-### 1. Odin Results (`-o:speed -microarch:native`, Commit `40c719e2b02d`, 5 samples across 1 run(s))
+### 1. Latest Code-Change Impact & Affected Benchmarks (`2d6f9a7120f3` → `40c719e2b02d`, Odin, 8 / 75 tests re-run)
 
-> **Selective update (`40c719e`):** Re-ran **8 / 75** affected benchmarks (marked with `↻` in `#` below; see Section 4 for commit-vs-commit deltas). Unchanged benchmarks retain their prior baseline.
+- **Code Diff Inspected:** `f7c2d56~1..f7c2d56` · **Changed Files:** `xitdb/dsl.odin`
+- **Modified Procedures:** `_diff_recursive`, `_eval_pattern_steps`, `_evict_stale_secondary_index_entries`, `_execute_remove_steps`, `_execute_tx_cb`, `_pull_cursor_value`, `_pull_scalar_slot`, `pull`
+- **Mapped Benchmark Scope:** Odin groups=`dsl` · filter=`Cyclic|Datalog|Secondary Index|Tx Commit|diff_moments|pull` (**8 / 75** Odin benchmarks executed; **67** unchanged benchmarks retained from `2d6f9a7`)
+
+#### 1.3 Multi-Microsecond Transactions, Compaction & Queries (`µs`, 8 affected tests)
+
+| # | Benchmark | Verdict | Delta | Speedup | Base `2d6f9a7` (`µs`) | Curr `40c719e` (`µs`) | Welch $z$ | Base Mean ± σ | Curr Mean ± σ |
+| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | `DSL Layer 2: Tx Commit + Secondary Index (N=500)` | `~NOISE` | `-5.2%` | 1.06x | 4.56 | **4.32** | `0.9` | 4.71 ± 0.39 | 4.48 ± 0.37 |
+| 68 | `DSL Layer 3: Datomic pull projection (N=200)` | `~NOISE` | `+11.5%` | 0.90x | 1.53 | **1.71** | `2.7` | 1.54 ± 0.03 | 1.84 ± 0.25 |
+| 69 | `DSL Layer 4: diff_moments (1 of 700 mutated)` | `~NOISE` | `+9.5%` | 0.91x | 261.7 | **286.6** | `11.2` | 263.4 ± 4.24 | 287.0 ± 2.01 |
+| 71 | `DSL Layer 5: Datalog B+Tree Prefix + Join` | `~NOISE` | `-5.5%` | 1.06x | 15.4 | **14.5** | `1.3` | 15.6 ± 0.68 | 14.9 ± 0.97 |
+| 72 | `DSL Layer 5: Datalog Grouped Aggs (N=500)` | **FASTER** | `-26.6%` | 1.36x | 855.4 | **628.2** | `16.1` | 842.9 ± 25.0 | 620.2 ± 18.3 |
+| 73 | `DSL Layer 5: Datalog Cycle-Safe reach (32-ring)` | `~NOISE` | `+3.9%` | 0.96x | 27.1 | **28.2** | `1.4` | 27.7 ± 1.17 | 28.8 ± 1.43 |
+| 74 | `DSL Layer 2: Secondary Index Evict+Update (N=200)` | **NEW** | `—` | — | — | **3.17** | `—` | — | 3.22 ± 0.13 |
+| 75 | `DSL Layer 3/4: Cyclic Graph pull + diff (N=200)` | **NEW** | `—` | — | — | **7.46** | `—` | — | 7.48 ± 0.13 |
 
 
-#### 1.1 Sub-100ns Fast Path (`< 100 ns` · `10M–167M ops/s`, 20 tests)
+### 2. Odin Full Suite Results (`-o:speed -microarch:native`, Commit `40c719e2b02d`, 5 samples across 1 run(s))
+
+> **Selective update (`40c719e`):** Re-ran **8 / 75** affected benchmarks (marked with `↻` in `#` below; see Section 1 above for the code-change impact & progression table). Unchanged benchmarks retain their prior baseline.
+
+
+#### 2.1 Sub-100ns Fast Path (`< 100 ns` · `10M–167M ops/s`, 20 tests)
 
 | # | Benchmark | Med (`ns`) | Mean ± σ | CV | Min `ops/s` | Max `ops/s` | IQR | `p95` | `p99` | Min | Max | Ops |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -129,7 +149,7 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 57 | `Cursor: Full KV-pair scan (read_kv_pair)` | **97** | 97 ± 2.1 | 2.1% | 10.0M | 10.5M | 3 | 100 | 100 | 95 | 100 | 2K |
 | 63 | `DB: Re-open & trailer checksum verify` | **56** | 56 ± 0.5 | 1.0% | 17.5M | 17.9M | 1 | 57 | 57 | 56 | 57 | 5K |
 
-#### 1.2 Sub-Microsecond Collection & Cursor Ops (`100–999 ns` · `1M–10M ops/s`, 36 tests)
+#### 2.2 Sub-Microsecond Collection & Cursor Ops (`100–999 ns` · `1M–10M ops/s`, 36 tests)
 
 | # | Benchmark | Med (`ns`) | Mean ± σ | CV | Min `ops/s` | Max `ops/s` | IQR | `p95` | `p99` | Min | Max | Ops |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -170,7 +190,7 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 62 | `Tx: Aborted transaction rollback truncate` | **693** | 693 ± 3.5 | 0.5% | 1.4M | 1.5M | 3 | 696 | 696 | 687 | 696 | 500 |
 | 65 | `DSL Layer 1: String Selector get_uint (N=500)` | **540** | 540 ± 10.9 | 2.0% | 1.8M | 1.9M | 11 | 554 | 556 | 530 | 557 | 500 |
 
-#### 1.3 Multi-Microsecond Transactions, Compaction & Queries (`≥ 1 µs` · `1.7K–1M ops/s`, 19 tests)
+#### 2.3 Multi-Microsecond Transactions, Compaction & Queries (`≥ 1 µs` · `1.7K–1M ops/s`, 19 tests)
 
 | # | Benchmark | Med (`µs`) | Mean ± σ | CV | Min `ops/s` | Max `ops/s` | IQR | `p95` | `p99` | Min | Max | Ops |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -195,9 +215,9 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 75 ↻ | `DSL Layer 3/4: Cyclic Graph pull + diff (N=200)` | **7.46** | 7.48 ± 0.13 | 1.7% | 130K | 136K | 0.07 | 7.65 | 7.69 | 7.36 | 7.70 | 200 |
 
 
-### 2. Zig Results (`-Doptimize=ReleaseFast -Dcpu=native`, Commit `40c719e2b02d`, 5 samples across 1 run(s))
+### 3. Zig Full Suite Results (`-Doptimize=ReleaseFast -Dcpu=native`, Commit `40c719e2b02d`, 5 samples across 1 run(s))
 
-#### 2.1 Sub-100ns Fast Path (`< 100 ns` · `10M–167M ops/s`, 10 tests)
+#### 3.1 Sub-100ns Fast Path (`< 100 ns` · `10M–167M ops/s`, 10 tests)
 
 | # | Benchmark | Med (`ns`) | Mean ± σ | CV | Min `ops/s` | Max `ops/s` | IQR | `p95` | `p99` | Min | Max | Ops |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -212,7 +232,7 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 53 | `Stream: Cursor_Reader random seek + 64B read` | **28** | 28 ± 0.4 | 1.6% | 34.5M | 35.7M | 0 | 29 | 29 | 28 | 29 | 2K |
 | 54 | `Stream: Cursor_Writer random seek + 16B patch` | **30** | 34 ± 7.4 | 21.4% | 21.3M | 33.3M | 5 | 45 | 47 | 30 | 47 | 2K |
 
-#### 2.2 Sub-Microsecond Collection & Cursor Ops (`100–999 ns` · `1M–10M ops/s`, 16 tests)
+#### 3.2 Sub-Microsecond Collection & Cursor Ops (`100–999 ns` · `1M–10M ops/s`, 16 tests)
 
 | # | Benchmark | Med (`ns`) | Mean ± σ | CV | Min `ops/s` | Max `ops/s` | IQR | `p95` | `p99` | Min | Max | Ops |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -233,7 +253,7 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 57 | `Cursor: Full KV-pair scan (read_kv_pair)` | **259** | 259 ± 1.9 | 0.7% | 3.8M | 3.9M | 2 | 262 | 262 | 257 | 262 | 2K |
 | 63 | `DB: Re-open & trailer checksum verify` | **249** | 249 ± 3.9 | 1.6% | 4.0M | 4.1M | 6 | 253 | 253 | 244 | 253 | 5K |
 
-#### 2.3 Multi-Microsecond Transactions, Compaction & Queries (`≥ 1 µs` · `1.7K–1M ops/s`, 37 tests)
+#### 3.3 Multi-Microsecond Transactions, Compaction & Queries (`≥ 1 µs` · `1.7K–1M ops/s`, 37 tests)
 
 | # | Benchmark | Med (`µs`) | Mean ± σ | CV | Min `ops/s` | Max `ops/s` | IQR | `p95` | `p99` | Min | Max | Ops |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -275,9 +295,9 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 61 | `Tx: Mid-tx database_freeze + CoW clone` | **1.96** | 1.97 ± 0.09 | 4.4% | 480K | 531K | 0.14 | 2.07 | 2.08 | 1.89 | 2.09 | 500 |
 | 62 | `Tx: Aborted transaction rollback truncate` | **1.93** | 1.94 ± 0.03 | 1.6% | 502K | 523K | 0.02 | 1.98 | 1.99 | 1.91 | 1.99 | 500 |
 
-### 3. 1v1 Statistical Comparison (Odin vs. Zig, Commit `40c719e2b02d`)
+### 4. 1v1 Statistical Comparison (Odin vs. Zig, Commit `40c719e2b02d`)
 
-#### 3.1 Sub-100ns Fast Path (`ns`, 20 tests)
+#### 4.1 Sub-100ns Fast Path (`ns`, 20 tests)
 
 | # | Benchmark | Speedup | Odin Med (`ns`) | Zig Med (`ns`) | Welch $z$ | Odin Mean ± σ | Odin CV | Odin `p95` | Zig Mean ± σ | Zig CV | Zig `p95` |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -302,7 +322,7 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 57 | `Cursor: Full KV-pair scan (read_kv_pair)` | **2.67x** | **97** | 259 | `127.9` ★ | 97 ± 2.1 | 2.1% | 100 | 259 ± 1.9 | 0.7% | 262 |
 | 63 | `DB: Re-open & trailer checksum verify` | **4.45x** | **56** | 249 | `109.5` ★ | 56 ± 0.5 | 1.0% | 57 | 249 ± 3.9 | 1.6% | 253 |
 
-#### 3.2 Sub-Microsecond Collection & Cursor Ops (`ns`, 35 tests)
+#### 4.2 Sub-Microsecond Collection & Cursor Ops (`ns`, 35 tests)
 
 | # | Benchmark | Speedup | Odin Med (`ns`) | Zig Med (`ns`) | Welch $z$ | Odin Mean ± σ | Odin CV | Odin `p95` | Zig Mean ± σ | Zig CV | Zig `p95` |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -342,7 +362,7 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 56 | `Path: 4-level nested cursor_read_path` | **8.74x** | **148** | 1,293 | `242.2` ★ | 148 ± 4.2 | 2.8% | 152 | 1,293 ± 9.7 | 0.8% | 1,305 |
 | 62 | `Tx: Aborted transaction rollback truncate` | **2.78x** | **693** | 1,930 | `87.6` ★ | 693 ± 3.5 | 0.5% | 696 | 1,941 ± 31.7 | 1.6% | 1,984 |
 
-#### 3.3 Multi-Microsecond Transactions & Compaction (`µs`, 8 tests)
+#### 4.3 Multi-Microsecond Transactions & Compaction (`µs`, 8 tests)
 
 | # | Benchmark | Speedup | Odin Med (`µs`) | Zig Med (`µs`) | Welch $z$ | Odin Mean ± σ | Odin CV | Odin `p95` | Zig Mean ± σ | Zig CV | Zig `p95` |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -354,21 +374,6 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 59 | `Backend: Core_Buffered_File commits` | **4.06x** | **4.58** | 18.6 | `50.1` ★ | 4.58 ± 0.02 | 0.3% | 4.59 | 18.7 ± 0.63 | 3.4% | 19.6 |
 | 60 | `Backend: Core_File (unbuffered) commits` | **1.10x** | **44.1** | 48.5 | `10.8` ★ | 44.1 ± 0.19 | 0.4% | 44.4 | 48.9 ± 0.97 | 2.0% | 50.2 |
 | 61 | `Tx: Mid-tx database_freeze + CoW clone` | **1.75x** | **1.12** | 1.96 | `21.8` ★ | 1.11 ± 0.01 | 0.8% | 1.12 | 1.97 ± 0.09 | 4.4% | 2.07 |
-
-### 4. Commit-vs-Commit Progression (`2d6f9a7120f3` → `40c719e2b02d`, Odin, 8 affected/executed tests)
-
-#### 4.3 Multi-Microsecond Transactions, Compaction & Queries (`µs`, 8 tests)
-
-| # | Benchmark | Verdict | Delta | Speedup | Base `2d6f9a7` (`µs`) | Curr `40c719e` (`µs`) | Welch $z$ | Base Mean ± σ | Curr Mean ± σ |
-| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 64 | `DSL Layer 2: Tx Commit + Secondary Index (N=500)` | `~NOISE` | `-5.2%` | 1.06x | 4.56 | **4.32** | `0.9` | 4.71 ± 0.39 | 4.48 ± 0.37 |
-| 68 | `DSL Layer 3: Datomic pull projection (N=200)` | `~NOISE` | `+11.5%` | 0.90x | 1.53 | **1.71** | `2.7` | 1.54 ± 0.03 | 1.84 ± 0.25 |
-| 69 | `DSL Layer 4: diff_moments (1 of 700 mutated)` | `~NOISE` | `+9.5%` | 0.91x | 261.7 | **286.6** | `11.2` | 263.4 ± 4.24 | 287.0 ± 2.01 |
-| 71 | `DSL Layer 5: Datalog B+Tree Prefix + Join` | `~NOISE` | `-5.5%` | 1.06x | 15.4 | **14.5** | `1.3` | 15.6 ± 0.68 | 14.9 ± 0.97 |
-| 72 | `DSL Layer 5: Datalog Grouped Aggs (N=500)` | **FASTER** | `-26.6%` | 1.36x | 855.4 | **628.2** | `16.1` | 842.9 ± 25.0 | 620.2 ± 18.3 |
-| 73 | `DSL Layer 5: Datalog Cycle-Safe reach (32-ring)` | `~NOISE` | `+3.9%` | 0.96x | 27.1 | **28.2** | `1.4` | 27.7 ± 1.17 | 28.8 ± 1.43 |
-| 74 | `DSL Layer 2: Secondary Index Evict+Update (N=200)` | **NEW** | `—` | — | — | **3.17** | `—` | — | 3.22 ± 0.13 |
-| 75 | `DSL Layer 3/4: Cyclic Graph pull + diff (N=200)` | **NEW** | `—` | — | — | **7.46** | `—` | — | 7.48 ± 0.13 |
 
 ### 5. Database Storage Footprint (`bytes_used > 0`)
 

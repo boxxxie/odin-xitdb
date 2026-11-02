@@ -24,7 +24,9 @@ if [[ -f "${HISTORY_JSONL}" ]]; then
 fi
 INPUT_FILES+=("${ODIN_JSONL}" "${ZIG_JSONL}")
 
-TABLES=$(jq -rn --arg target_commit "${TARGET_COMMIT}" '
+PLAN_JSON="$("${SCRIPT_DIR}/compare_1v1.py" --plan-json)"
+
+TABLES=$(jq -rn --arg target_commit "${TARGET_COMMIT}" --argjson plan "${PLAN_JSON}" '
 def commify:
   tostring |
   if test("^-?[0-9]+$") then
@@ -248,7 +250,7 @@ def single_lang_section($sec_num; $lang_label; $flags; $sha; $list):
   ($list | map(select(.ns_per_op >= 1000))) as $heavy |
   "### \($sec_num). \($lang_label) Results (`\($flags)`, Commit `\($sha)`, \($list[0].runs) samples across \($list[0].invocations) run(s))\n",
   (if $is_selective then
-    "> **Selective update (`\($sha[0:7])`):** Re-ran **\($updated_cnt) / \($total_cnt)** affected benchmarks (marked with `↻` in `#` below; see Section 4 for commit-vs-commit deltas). Unchanged benchmarks retain their prior baseline.\n\n"
+    "> **Selective update (`\($sha[0:7])`):** Re-ran **\($updated_cnt) / \($total_cnt)** affected benchmarks (marked with `↻` in `#` below; see Section 1 above for the code-change impact & progression table). Unchanged benchmarks retain their prior baseline.\n\n"
    else empty end),
   "#### \($sec_num).1 Sub-100ns Fast Path (`< 100 ns` · `10M–167M ops/s`, \($fast | length) tests)\n",
   tier_table_ns($fast; $sha; $is_selective),
@@ -327,16 +329,6 @@ distinct_commits($all; "zig") as $zig_commits |
 ($paired_list | map(select(.ns_per_op >= 100 and .ns_per_op < 1000))) as $paired_mid |
 ($paired_list | map(select(.ns_per_op >= 1000))) as $paired_heavy |
 
-single_lang_section("1"; "Odin"; "-o:speed -microarch:native"; $odin_sha; $odin_list),
-"\n",
-single_lang_section("2"; "Zig"; "-Doptimize=ReleaseFast -Dcpu=native"; $zig_sha; $zig_list),
-"\n### 3. 1v1 Statistical Comparison (Odin vs. Zig, Commit `\($odin_sha)`)\n",
-"#### 3.1 Sub-100ns Fast Path (`ns`, \($paired_fast | length) tests)\n",
-compare_1v1_table($paired_fast; $zig_map; "ns"),
-"\n#### 3.2 Sub-Microsecond Collection & Cursor Ops (`ns`, \($paired_mid | length) tests)\n",
-compare_1v1_table($paired_mid; $zig_map; "ns"),
-"\n#### 3.3 Multi-Microsecond Transactions & Compaction (`µs`, \($paired_heavy | length) tests)\n",
-compare_1v1_table($paired_heavy; $zig_map; "µs"),
 (if ($odin_commits | length) >= 2 then
   ($odin_commits[-2]) as $prev_sha |
   filter_and_pool_commit($all; "odin"; $odin_sha) as $curr_exec_list |
@@ -346,20 +338,37 @@ compare_1v1_table($paired_heavy; $zig_map; "µs"),
   ($prog_list | map(select(.ns_per_op < 100))) as $prog_fast |
   ($prog_list | map(select(.ns_per_op >= 100 and .ns_per_op < 1000))) as $prog_mid |
   ($prog_list | map(select(.ns_per_op >= 1000))) as $prog_heavy |
-  "\n### 4. Commit-vs-Commit Progression (`\($prev_sha)` → `\($odin_sha)`, Odin, \($prog_list | length) affected/executed tests)\n",
+  ([$plan.changed_files[]? | "`\(.)`"] | join(", ")) as $files_md |
+  ([($plan.procs_by_file // {} | to_entries[] | .value[]? | "`\(.)`")] | unique | join(", ")) as $procs_md |
+  ([$plan.odin_groups[]? | "`\(.)`"] | join(", ")) as $ogroups_md |
+  "### 1. Latest Code-Change Impact & Affected Benchmarks (`\($prev_sha)` → `\($odin_sha)`, Odin, \($prog_list | length) / \($odin_list | length) tests re-run)\n",
+  "- **Code Diff Inspected:** `\($plan.diff_label // "HEAD~1..HEAD")` · **Changed Files:** \(if $files_md != "" then $files_md else "`(none)`" end)",
+  (if $procs_md != "" then "- **Modified Procedures:** \($procs_md)" else empty end),
+  "- **Mapped Benchmark Scope:** Odin groups=\(if $ogroups_md != "" then $ogroups_md else "`all`" end)\(if ($plan.filter // "") != "" then " · filter=`\($plan.filter)`" else "" end) (**\($prog_list | length) / \($odin_list | length)** Odin benchmarks executed; **\(($odin_list | length) - ($prog_list | length))** unchanged benchmarks retained from `\($prev_sha[0:7])`)\n",
   (if ($prog_fast | length) > 0 then
-    "#### 4.1 Sub-100ns Fast Path (`ns`, \($prog_fast | length) tests)\n",
+    "#### 1.1 Sub-100ns Fast Path (`ns`, \($prog_fast | length) affected tests)\n",
     compare_commits_table($prog_fast; $prev_map; $prev_sha; $odin_sha; "ns")
    else empty end),
   (if ($prog_mid | length) > 0 then
-    (if ($prog_fast | length) > 0 then "\n" else "" end) + "#### 4.2 Sub-Microsecond Collection & Cursor Ops (`ns`, \($prog_mid | length) tests)\n",
+    (if ($prog_fast | length) > 0 then "\n" else "" end) + "#### 1.2 Sub-Microsecond Collection & Cursor Ops (`ns`, \($prog_mid | length) affected tests)\n",
     compare_commits_table($prog_mid; $prev_map; $prev_sha; $odin_sha; "ns")
    else empty end),
   (if ($prog_heavy | length) > 0 then
-    (if (($prog_fast | length) + ($prog_mid | length)) > 0 then "\n" else "" end) + "#### 4.3 Multi-Microsecond Transactions, Compaction & Queries (`µs`, \($prog_heavy | length) tests)\n",
+    (if (($prog_fast | length) + ($prog_mid | length)) > 0 then "\n" else "" end) + "#### 1.3 Multi-Microsecond Transactions, Compaction & Queries (`µs`, \($prog_heavy | length) affected tests)\n",
     compare_commits_table($prog_heavy; $prev_map; $prev_sha; $odin_sha; "µs")
-   else empty end)
+   else empty end),
+  "\n"
  else empty end),
+single_lang_section("2"; "Odin Full Suite"; "-o:speed -microarch:native"; $odin_sha; $odin_list),
+"\n",
+single_lang_section("3"; "Zig Full Suite"; "-Doptimize=ReleaseFast -Dcpu=native"; $zig_sha; $zig_list),
+"\n### 4. 1v1 Statistical Comparison (Odin vs. Zig, Commit `\($odin_sha)`)\n",
+"#### 4.1 Sub-100ns Fast Path (`ns`, \($paired_fast | length) tests)\n",
+compare_1v1_table($paired_fast; $zig_map; "ns"),
+"\n#### 4.2 Sub-Microsecond Collection & Cursor Ops (`ns`, \($paired_mid | length) tests)\n",
+compare_1v1_table($paired_mid; $zig_map; "ns"),
+"\n#### 4.3 Multi-Microsecond Transactions & Compaction (`µs`, \($paired_heavy | length) tests)\n",
+compare_1v1_table($paired_heavy; $zig_map; "µs"),
 "\n### 5. Database Storage Footprint (`bytes_used > 0`)\n",
 "| # | Benchmark | Ops | Odin\u00a0Size | Zig\u00a0Size |",
 "| ---: | :--- | ---: | ---: | ---: |",

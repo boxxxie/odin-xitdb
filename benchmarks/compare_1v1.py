@@ -486,7 +486,8 @@ def resolve_diff_target(git_ref: Optional[str]) -> Tuple[List[str], str]:
        - Check if `xitdb/` or `reference/xitdb-zig/src/` has uncommitted changes vs `HEAD`.
        - Otherwise find the most recent commit touching `xitdb/` or `reference/xitdb-zig/src/` and diff `<sha>~1..<sha>`.
     """
-    code_paths = ["xitdb/", "reference/xitdb-zig/src/", "benchmarks/bench_xitdb.odin", "benchmarks/bench_xitdb.zig"]
+    lib_paths = ["xitdb/", "reference/xitdb-zig/src/"]
+    code_paths = lib_paths + ["benchmarks/bench_xitdb.odin", "benchmarks/bench_xitdb.zig"]
     if git_ref and git_ref != "auto":
         if git_ref.upper() == "WORKTREE":
             return ["HEAD"], "working tree vs HEAD"
@@ -495,7 +496,7 @@ def resolve_diff_target(git_ref: Optional[str]) -> Tuple[List[str], str]:
         return [f"{git_ref}~1..{git_ref}"], f"{git_ref}~1..{git_ref}"
 
     status_out = subprocess.check_output(
-        ["git", "status", "--porcelain", "--"] + code_paths,
+        ["git", "status", "--porcelain", "--"] + lib_paths,
         cwd=ROOT_DIR,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -504,13 +505,22 @@ def resolve_diff_target(git_ref: Optional[str]) -> Tuple[List[str], str]:
         return ["HEAD"], "working tree vs HEAD"
 
     log_out = subprocess.check_output(
-        ["git", "log", "-n", "1", "--format=%h", "--"] + code_paths,
+        ["git", "log", "-n", "1", "--format=%h", "--"] + lib_paths,
         cwd=ROOT_DIR,
         stderr=subprocess.DEVNULL,
         text=True,
     ).strip()
     if log_out:
         return [f"{log_out}~1..{log_out}"], f"{log_out}~1..{log_out}"
+
+    log_bench = subprocess.check_output(
+        ["git", "log", "-n", "1", "--format=%h", "--"] + code_paths,
+        cwd=ROOT_DIR,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).strip()
+    if log_bench:
+        return [f"{log_bench}~1..{log_bench}"], f"{log_bench}~1..{log_bench}"
     return ["HEAD~1..HEAD"], "HEAD~1..HEAD"
 
 
@@ -763,8 +773,20 @@ def main() -> None:
         metavar="GIT_REF",
         help="Dry-run: print the code-change-to-benchmark mapping plan for GIT_REF without executing benchmarks",
     )
+    parser.add_argument(
+        "--plan-json",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="GIT_REF",
+        help="Output the code-change-to-benchmark mapping plan as JSON",
+    )
 
     args = parser.parse_args()
+
+    if args.plan_json is not None:
+        print(json.dumps(map_changes_to_benchmarks(args.plan_json)))
+        return
 
     if args.plan is not None:
         plan = map_changes_to_benchmarks(args.plan)
