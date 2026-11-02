@@ -1696,6 +1696,239 @@ bench_backends :: proc(commits: int) {
 	free_all(context.temp_allocator)
 }
 
+// ----------------------------------------------------------------------------
+// 6. 5-Layer DSL & Datalog Engine Benchmarks
+// ----------------------------------------------------------------------------
+
+Bench_User_DTO :: struct {
+	username: string   `xitdb:"username"`,
+	dept:     string   `xitdb:"dept"`,
+	age:      u64      `xitdb:"age"`,
+	bio:      string   `xitdb:"bio,tag=md"`,
+	todos:    []string `xitdb:"[[todos]]"`,
+	tags:     []string `xitdb:"^tags"`,
+}
+
+run_dsl_benchmarks :: proc() {
+	core := xitdb.core_memory_init()
+	defer xitdb.core_destroy(&core)
+
+	db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
+	N :: 500
+
+	// 1. Layer 2: Datomic-style Tx commits with secondary index maintenance (`tx_index_on`)
+	{
+		t0 := time.now()
+		tx := xitdb.tx_init(&db, base_moment = nil, track_changes = false, allocator = context.temp_allocator)
+		xitdb.tx_doc(&tx, "Benchmark seed 500 indexed users and cyclic dependency graph")
+		xitdb.tx_index_on(&tx, "users", "username", "username->id")
+
+		for i in 0 ..< N {
+			id_str := fmt.tprintf("u%04d", i)
+			uname := fmt.tprintf("user_%04d", i)
+			dept := "eng" if (i % 3 != 0) else "design"
+			age := u64(22 + (i % 40))
+
+			_ = xitdb.tx_put(&tx, fmt.tprintf(".users[%q].username", id_str), uname)
+			_ = xitdb.tx_put(&tx, fmt.tprintf(".users[%q].dept", id_str), dept)
+			_ = xitdb.tx_put(&tx, fmt.tprintf(".users[%q].age", id_str), age)
+			if i % 10 == 0 {
+				_ = xitdb.tx_put(&tx, fmt.tprintf(".users[%q].roles%%\"suspended\"", id_str), "suspended")
+			}
+		}
+
+		// Seed a 32-node cyclic package graph for transitive `reach`
+		for i in 0 ..< 32 {
+			src := fmt.tprintf("pkg_%02d", i)
+			dst := fmt.tprintf("pkg_%02d", (i + 1) % 32)
+			_ = xitdb.tx_put(&tx, fmt.tprintf(".deps[%q]^%q", src, dst), dst)
+		}
+
+		rep0, err := xitdb.tx_commit(&tx)
+		assert(err == nil)
+		print_result(Bench_Result{
+			name       = "DSL Layer 2: Tx Commit + Secondary Index (N=500)",
+			ops        = N,
+			elapsed    = time.since(t0),
+			bytes_used = rep0.commit_size,
+		})
+		free_all(context.temp_allocator)
+	}
+
+	// 2. Layer 1: String Path Selector point lookups (`@-1.users["u0250"].age`)
+	{
+		t0 := time.now()
+		for i in 0 ..< N {
+			sel := fmt.tprintf("@-1.users[\"u%04d\"].age", i)
+			val, err := xitdb.get_uint(&db, sel)
+			assert(err == nil && val >= 22)
+		}
+		print_result(Bench_Result{
+			name    = "DSL Layer 1: String Selector get_uint (N=500)",
+			ops     = N,
+			elapsed = time.since(t0),
+		})
+		free_all(context.temp_allocator)
+	}
+
+	// 3. Layer 3: Odin Struct Reflection `marshal` & `unmarshal` + Datomic `pull`
+	{
+		dto := Bench_User_DTO{
+			username = "alice",
+			dept     = "eng",
+			age      = 31,
+			bio      = "# Principal Systems Engineer",
+			todos    = {"Design DSL", "Optimize B+Tree pushdown", "Write benchmarks"},
+			tags     = {"odin", "xitdb", "datalog"},
+		}
+		M :: 200
+		t0 := time.now()
+		tx := xitdb.tx_init(&db, base_moment = -1, allocator = context.temp_allocator)
+		Swap_Ctx :: struct {
+			dto:   ^Bench_User_DTO,
+			count: int,
+		}
+		sctx := Swap_Ctx{dto = &dto, count = M}
+		xitdb.tx_with_cursor(&tx, proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+			sc := (^Swap_Ctx)(user_data)
+			m := xitdb.write_hash_map_init(cursor^) or_return
+			profiles_cur := xitdb.hash_map_put_cursor(&m, "profiles") or_return
+			profiles := xitdb.write_hash_map_init(profiles_cur) or_return
+			for i in 0 ..< sc.count {
+				k := fmt.tprintf("p%03d", i)
+				pcur := xitdb.hash_map_put_cursor(&profiles, k) or_return
+				xitdb.marshal(&pcur, sc.dto^) or_return
+			}
+			return nil
+		}, &sctx)
+		rep, err := xitdb.tx_commit(&tx)
+		assert(err == nil)
+		print_result(Bench_Result{
+			name    = "DSL Layer 3: Struct marshal (N=200)",
+			ops     = M,
+			elapsed = time.since(t0),
+		})
+
+		t1 := time.now()
+		for i in 0 ..< M {
+			pcur_maybe, _ := xitdb.select_cursor(&db, fmt.tprintf("@-1.profiles[\"p%03d\"]", i))
+			out, u_err := xitdb.unmarshal(Bench_User_DTO, pcur_maybe.?, context.temp_allocator)
+			assert(u_err == nil && out.age == 31)
+		}
+		print_result(Bench_Result{
+			name    = "DSL Layer 3: Struct unmarshal (N=200)",
+			ops     = M,
+			elapsed = time.since(t1),
+		})
+
+		t2 := time.now()
+		for i in 0 ..< M {
+			pcur_maybe, _ := xitdb.select_cursor(&db, fmt.tprintf("@-1.profiles[\"p%03d\"]", i))
+			pv, p_err := xitdb.pull(pcur_maybe.?, "{username, age, todos[0..2]}", context.temp_allocator)
+			assert(p_err == nil && pv != nil)
+		}
+		print_result(Bench_Result{
+			name    = "DSL Layer 3: Datomic pull projection (N=200)",
+			ops     = M,
+			elapsed = time.since(t2),
+		})
+		_ = rep
+		free_all(context.temp_allocator)
+	}
+
+	// 4. Layer 4: O(1) Subtree-Skipping `diff_moments` & `history_of`
+	{
+		// Commit a small delta in Moment 2 (mutating 1 key out of 500 users + 200 profiles)
+		tx := xitdb.tx_init(&db, base_moment = -1, allocator = context.temp_allocator)
+		_ = xitdb.tx_put(&tx, ".users[\"u0042\"].age", u64(99))
+		_, _ = xitdb.tx_commit(&tx)
+
+		Q :: 200
+		t0 := time.now()
+		for _ in 0 ..< Q {
+			diffs, d_err := xitdb.diff_moments(&db, 1, 2, false, context.temp_allocator)
+			assert(d_err == nil && len(diffs) == 1)
+		}
+		print_result(Bench_Result{
+			name    = "DSL Layer 4: diff_moments (1 of 700 mutated)",
+			ops     = Q,
+			elapsed = time.since(t0),
+		})
+
+		t1 := time.now()
+		for _ in 0 ..< Q {
+			hist, h_err := xitdb.history_of(&db, ".users[\"u0042\"].age", context.temp_allocator)
+			assert(h_err == nil && len(hist) == 2)
+		}
+		print_result(Bench_Result{
+			name    = "DSL Layer 4: history_of lineage (3 moments)",
+			ops     = Q,
+			elapsed = time.since(t1),
+		})
+		free_all(context.temp_allocator)
+	}
+
+	// 5. Layer 5: Datalog B+Tree Prefix Pushdown, Grouped Aggregations & Cycle-Safe `reach`
+	{
+		Q :: 100
+		t0 := time.now()
+		for _ in 0 ..< Q {
+			// Prefix "user_025" matches 10 users ("user_0250".."user_0259") via B+Tree seek
+			res, err := xitdb.query_datalog(&db, `
+				find ?id, ?name, ?age
+				where
+					$username->id[?name] = ?id
+					starts_with(?name, "user_025")
+					.users[?id].age = ?age
+					not .users[?id].roles%"suspended"
+			`, -1, context.temp_allocator)
+			assert(err == nil && len(res.rows) == 9)
+		}
+		print_result(Bench_Result{
+			name    = "DSL Layer 5: Datalog B+Tree Prefix + Join",
+			ops     = Q,
+			elapsed = time.since(t0),
+		})
+		free_all(context.temp_allocator)
+
+		A :: 25
+		t1 := time.now()
+		for _ in 0 ..< A {
+			res, err := xitdb.query_datalog(&db, `
+				find ?dept, count(?id), min(?age), max(?age), sum(?age)
+				where
+					.users[?id].dept = ?dept
+					.users[?id].age = ?age
+			`, -1, context.temp_allocator)
+			assert(err == nil && len(res.rows) == 2)
+		}
+		print_result(Bench_Result{
+			name    = "DSL Layer 5: Datalog Grouped Aggs (N=500)",
+			ops     = A,
+			elapsed = time.since(t1),
+		})
+		free_all(context.temp_allocator)
+
+		R :: 100
+		t2 := time.now()
+		for _ in 0 ..< R {
+			res, err := xitdb.query_datalog(&db, `
+				find ?target, ?hops
+				where
+					?start == "pkg_00"
+					reach(?start, ?target, ?hops, .deps[?start]^?target)
+			`, -1, context.temp_allocator)
+			assert(err == nil && len(res.rows) == 32)
+		}
+		print_result(Bench_Result{
+			name    = "DSL Layer 5: Datalog Cycle-Safe reach (32-ring)",
+			ops     = R,
+			elapsed = time.since(t2),
+		})
+		free_all(context.temp_allocator)
+	}
+}
+
 main :: proc() {
 	print_header()
 	bench_hamt(2_000)
@@ -1704,5 +1937,6 @@ main :: proc() {
 	bench_compaction_and_replication(200)
 	bench_hashers_and_byte_streams(2_000)
 	bench_backends(500)
+	run_dsl_benchmarks()
 	fmt.println("========================================================================================================")
 }
