@@ -487,3 +487,54 @@ unit_user_dsl_datalog_predicates_pushdown_aggregations_and_reach :: proc(t: ^tes
 	driver_assert_string_slice(t, srcs, []string{"n1", "n2"})
 	driver_assert_string_slice(t, dsts, []string{"n3", "n4"})
 }
+
+@(test)
+unit_user_dsl_secondary_index_stale_key_eviction_and_heap_allocator_cleanup :: proc(t: ^testing.T) {
+	core := xitdb.core_memory_init()
+	defer xitdb.core_destroy(&core)
+	defer free_all(context.temp_allocator)
+
+	db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
+
+	// 1. Seed users with `tx_index_on` using explicit `context.allocator` (checked for leaks by `odin test`)
+	{
+		tx0 := xitdb.tx_init(&db, base_moment = nil, track_changes = true, allocator = context.allocator)
+		defer xitdb.tx_destroy(&tx0)
+
+		xitdb.tx_doc(&tx0, "Seed users with explicit heap allocator")
+		xitdb.tx_index_on(&tx0, "users", "username", "username->id")
+		_ = xitdb.tx_put(&tx0, ".users[\"101\"].username", "dan")
+		_ = xitdb.tx_put(&tx0, ".users[\"102\"].username", "dave")
+
+		rep0, err0 := xitdb.tx_commit(&tx0)
+		defer xitdb.tx_report_destroy(&rep0, context.allocator)
+		testing.expect_value(t, err0, nil)
+		testing.expect_value(t, len(rep0.changes), 2)
+	}
+
+	// 2. Rename "dan" -> "daniel" and remove user "102" ("dave")
+	{
+		tx1 := xitdb.tx_init(&db, base_moment = -1, track_changes = true, allocator = context.allocator)
+		defer xitdb.tx_destroy(&tx1)
+
+		xitdb.tx_doc(&tx1, "Rename dan to daniel and delete user 102")
+		xitdb.tx_index_on(&tx1, "users", "username", "username->id")
+		_ = xitdb.tx_put(&tx1, ".users[\"101\"].username", "daniel")
+		_ = xitdb.tx_rm(&tx1, ".users[\"102\"]")
+
+		rep1, err1 := xitdb.tx_commit(&tx1)
+		defer xitdb.tx_report_destroy(&rep1, context.allocator)
+		testing.expect_value(t, err1, nil)
+
+		// Verify stale keys "dan" and "dave" were evicted from `$username->id` and only "daniel" -> "101" remains
+		hits, q_err := xitdb.query_prefix(rep1.after, "username->id", "da", context.temp_allocator)
+		testing.expect_value(t, q_err, nil)
+		testing.expect_value(t, len(hits), 1)
+		testing.expect_value(t, hits[0].key, "daniel")
+
+		old_dan, _ := xitdb.select_cursor(&db, "@1$username->id[\"dan\"]")
+		old_dave, _ := xitdb.select_cursor(&db, "@1$username->id[\"dave\"]")
+		testing.expect(t, old_dan == nil, "Expected stale key 'dan' to be evicted from secondary index")
+		testing.expect(t, old_dave == nil, "Expected deleted user key 'dave' to be evicted from secondary index")
+	}
+}

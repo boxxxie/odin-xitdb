@@ -636,10 +636,37 @@ tx_init :: proc(db: ^Database, base_moment: Maybe(i64) = -1, track_changes := fa
 	}
 }
 
+// Free all internal slices and dynamic arrays owned by `tx`.
 tx_destroy :: proc(tx: ^Tx) {
+	for op in tx.ops {
+		if op.steps != nil {
+			delete(op.steps, tx.allocator)
+		}
+		if op.from_steps != nil {
+			delete(op.from_steps, tx.allocator)
+		}
+	}
 	delete(tx.meta)
 	delete(tx.ops)
 	delete(tx.index_rules)
+}
+
+// Free a `[]Tx_Change` slice (and its formatted path strings) when allocated with a persistent allocator.
+diff_changes_destroy :: proc(changes: []Tx_Change, allocator := context.allocator) {
+	for chg in changes {
+		if len(chg.path_str) > 0 {
+			delete(chg.path_str, allocator)
+		}
+	}
+	if changes != nil {
+		delete(changes, allocator)
+	}
+}
+
+// Free heap-allocated `changes` inside a `Tx_Report` when `tx_init` used a non-temporary allocator.
+tx_report_destroy :: proc(report: ^Tx_Report, allocator := context.allocator) {
+	diff_changes_destroy(report.changes, allocator)
+	report.changes = nil
 }
 
 tx_doc :: proc(tx: ^Tx, doc: string) {
@@ -746,6 +773,7 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 	for op in tx.ops {
 		switch op.kind {
 		case .Put:
+			_evict_stale_secondary_index_entries(tx, &moment, op) or_return
 			put_at_steps(moment.write_cursor, op.steps, op.val) or_return
 			_apply_secondary_index_rules(tx, &moment, op) or_return
 
@@ -769,8 +797,8 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 			linked_array_list_insert(&ll_col, op.offset, op.val) or_return
 
 		case .Remove:
+			_evict_stale_secondary_index_entries(tx, &moment, op) or_return
 			_execute_remove_steps(&moment, op.steps) or_return
-			_apply_secondary_index_rules(tx, &moment, op) or_return
 
 		case .Slice:
 			target_cur := write_steps_cursor(moment.write_cursor, op.steps) or_return
@@ -808,29 +836,19 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 		}
 	}
 
-	// Only compute the structural diff when __tx metadata or change tracking is requested
+	// Only compute structural diff when __tx metadata or change tracking is enabled
 	wants_tx_meta := len(tx.doc) > 0 || tx.instant != nil || len(tx.meta) > 0 || tx.track_changes
 	if wants_tx_meta {
 		cursor_reload_slot(&moment.write_cursor) or_return
 		moment.read_hash_map.cursor = moment.write_cursor.read_cursor
-		if ectx.has_parent {
-			base_cur := Read_Cursor{
-				slot_ptr = Slot_Pointer{position = nil, slot = ectx.base_slot},
-				db       = cursor.db,
-			}
-			diffs := diff_cursors(base_cur, moment.read_hash_map.cursor, false, tx.allocator) or_return
-			for d in diffs {
-				append(&ectx.recorded, d)
-			}
-		} else {
-			empty_cur := Read_Cursor{
-				slot_ptr = Slot_Pointer{position = nil, slot = Slot{}},
-				db       = cursor.db,
-			}
-			diffs := diff_cursors(empty_cur, moment.read_hash_map.cursor, false, tx.allocator) or_return
-			for d in diffs {
-				append(&ectx.recorded, d)
-			}
+		base_cur := Read_Cursor{
+			slot_ptr = Slot_Pointer{position = nil, slot = ectx.base_slot if ectx.has_parent else Slot{}},
+			db       = cursor.db,
+		}
+		diffs := diff_cursors(base_cur, moment.read_hash_map.cursor, false, tx.allocator) or_return
+		defer delete(diffs, tx.allocator)
+		for d in diffs {
+			append(&ectx.recorded, d)
 		}
 
 		tx_cur := hash_map_put_cursor(&moment, "__tx") or_return
@@ -941,8 +959,9 @@ _execute_remove_steps :: proc(moment: ^Write_Hash_Map, steps: []Path_Step) -> Er
 	return nil
 }
 
+// Before overwriting or removing an indexed field/record, remove its previous key from the secondary Sorted_Map.
 @(private = "file")
-_apply_secondary_index_rules :: proc(tx: ^Tx, moment: ^Write_Hash_Map, op: Tx_Op) -> Error {
+_evict_stale_secondary_index_entries :: proc(tx: ^Tx, moment: ^Write_Hash_Map, op: Tx_Op) -> Error {
 	if len(tx.index_rules) == 0 || len(op.steps) < 2 {
 		return nil
 	}
@@ -950,8 +969,46 @@ _apply_secondary_index_rules :: proc(tx: ^Tx, moment: ^Write_Hash_Map, op: Tx_Op
 		if op.steps[0].key != rule.source_map_key {
 			continue
 		}
+		// Match either a field-level Put/Remove (`.users["101"].username`) or a record-level Remove (`.users["101"]`)
+		is_field_op := len(op.steps) == 3 && op.steps[2].key == rule.field_key
+		is_record_rm := op.kind == .Remove && len(op.steps) == 2
+		if !is_field_op && !is_record_rm {
+			continue
+		}
+
 		record_id := op.steps[1].key
-		if op.kind == .Put && len(op.steps) == 3 && op.steps[2].key == rule.field_key {
+		lookup_steps := [3]Path_Step{
+			hm(rule.source_map_key),
+			hm(record_id),
+			hm(rule.field_key),
+		}
+		old_cur_maybe := read_steps_cursor(moment.read_hash_map.cursor, lookup_steps[:]) or_return
+		if old_cur, has_old := old_cur_maybe.?; has_old {
+			old_slot := cursor_slot(old_cur) or_return
+			if old_slot.tag == .Short_Bytes || old_slot.tag == .Bytes {
+				old_key := cursor_read_string(old_cur, 0, context.temp_allocator) or_return
+				if op.kind == .Put {
+					if new_key, is_str := op.val.(string); is_str && new_key == old_key {
+						continue
+					}
+				}
+				idx_cur := hash_map_put_cursor(moment, rule.index_map_key) or_return
+				idx_sm := write_sorted_map_init(idx_cur) or_return
+				_, _ = sorted_map_remove(&idx_sm, old_key)
+			}
+		}
+	}
+	return nil
+}
+
+@(private = "file")
+_apply_secondary_index_rules :: proc(tx: ^Tx, moment: ^Write_Hash_Map, op: Tx_Op) -> Error {
+	if len(tx.index_rules) == 0 || len(op.steps) != 3 || op.kind != .Put {
+		return nil
+	}
+	for rule in tx.index_rules {
+		if op.steps[0].key == rule.source_map_key && op.steps[2].key == rule.field_key {
+			record_id := op.steps[1].key
 			if idx_key, is_str := op.val.(string); is_str {
 				idx_cur := hash_map_put_cursor(moment, rule.index_map_key) or_return
 				idx_sm := write_sorted_map_init(idx_cur) or_return
@@ -971,6 +1028,9 @@ tx_commit :: proc(tx: ^Tx) -> (report: Tx_Report, err: Error) {
 	ectx := _Tx_Exec_Ctx{
 		tx       = tx,
 		recorded = make([dynamic]Tx_Change, 0, len(tx.ops), tx.allocator),
+	}
+	defer if err != nil {
+		diff_changes_destroy(ectx.recorded[:], tx.allocator)
 	}
 
 	if bm, has_bm := tx.base_moment.?; has_bm && hist_count > 0 {
@@ -1888,14 +1948,15 @@ _diff_recursive :: proc(
 			if !ok {
 				break
 			}
-			kv_b := cursor_read_kv_pair(cb, allocator) or_return
-			k_str := cursor_read_string(kv_b.key_cursor, 0, allocator) or_return
+			kv_b := cursor_read_kv_pair(cb, context.temp_allocator) or_return
+			k_str := cursor_read_string(kv_b.key_cursor, 0, context.temp_allocator) or_return
 			if !include_tx_meta && len(prefix) == 0 && k_str == "__tx" {
 				continue
 			}
 			child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
 			val_b_slot := cursor_slot(kv_b.value_cursor) or_return
-			if val_b_slot.tag == .Hash_Map || val_b_slot.tag == .Counted_Hash_Map || val_b_slot.tag == .Sorted_Map || val_b_slot.tag == .Array_List || val_b_slot.tag == .Linked_Array_List {
+			if len(prefix) == 0 && (val_b_slot.tag == .Array_List || val_b_slot.tag == .Linked_Array_List) {
+				defer delete(child_path, allocator)
 				empty_cur := Read_Cursor{slot_ptr = Slot_Pointer{position = nil, slot = Slot{}}, db = cur_b.db}
 				_diff_recursive(empty_cur, kv_b.value_cursor, child_path, include_tx_meta, changes, allocator) or_return
 			} else {
@@ -1932,14 +1993,15 @@ _diff_recursive :: proc(
 				if !ok {
 					break
 				}
-				kv_a := cursor_read_kv_pair(ca, allocator) or_return
-				k_str := cursor_read_string(kv_a.key_cursor, 0, allocator) or_return
+				kv_a := cursor_read_kv_pair(ca, context.temp_allocator) or_return
+				k_str := cursor_read_string(kv_a.key_cursor, 0, context.temp_allocator) or_return
 				if !include_tx_meta && len(prefix) == 0 && k_str == "__tx" {
 					continue
 				}
 				child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
 				vb_maybe := hash_map_get_cursor(map_b, k_str) or_return
 				if vb_cur, has_b := vb_maybe.?; has_b {
+					defer delete(child_path, allocator)
 					_diff_recursive(kv_a.value_cursor, vb_cur, child_path, include_tx_meta, changes, allocator) or_return
 				} else {
 					val_a_slot := cursor_slot(kv_a.value_cursor) or_return
@@ -1954,8 +2016,8 @@ _diff_recursive :: proc(
 				if !ok {
 					break
 				}
-				kv_b := cursor_read_kv_pair(cb, allocator) or_return
-				k_str := cursor_read_string(kv_b.key_cursor, 0, allocator) or_return
+				kv_b := cursor_read_kv_pair(cb, context.temp_allocator) or_return
+				k_str := cursor_read_string(kv_b.key_cursor, 0, context.temp_allocator) or_return
 				if !include_tx_meta && len(prefix) == 0 && k_str == "__tx" {
 					continue
 				}
@@ -1978,11 +2040,12 @@ _diff_recursive :: proc(
 				if !ok {
 					break
 				}
-				kv_a := cursor_read_kv_pair(ca, allocator) or_return
-				k_str := cursor_read_string(kv_a.key_cursor, 0, allocator) or_return
+				kv_a := cursor_read_kv_pair(ca, context.temp_allocator) or_return
+				k_str := cursor_read_string(kv_a.key_cursor, 0, context.temp_allocator) or_return
 				child_path := fmt.aprintf("%s$%s", prefix, k_str, allocator = allocator)
 				vb_maybe := sorted_map_get_cursor(sm_b, k_str) or_return
 				if vb_cur, has_b := vb_maybe.?; has_b {
+					defer delete(child_path, allocator)
 					_diff_recursive(kv_a.value_cursor, vb_cur, child_path, include_tx_meta, changes, allocator) or_return
 				} else {
 					val_a_slot := cursor_slot(kv_a.value_cursor) or_return
@@ -1996,8 +2059,8 @@ _diff_recursive :: proc(
 				if !ok {
 					break
 				}
-				kv_b := cursor_read_kv_pair(cb, allocator) or_return
-				k_str := cursor_read_string(kv_b.key_cursor, 0, allocator) or_return
+				kv_b := cursor_read_kv_pair(cb, context.temp_allocator) or_return
+				k_str := cursor_read_string(kv_b.key_cursor, 0, context.temp_allocator) or_return
 				va_maybe := sorted_map_get_cursor(sm_a, k_str) or_return
 				if va_maybe == nil {
 					child_path := fmt.aprintf("%s$%s", prefix, k_str, allocator = allocator)
@@ -2017,6 +2080,7 @@ _diff_recursive :: proc(
 				ea_maybe := read_steps_cursor(cur_a, []Path_Step{step}) or_return
 				eb_maybe := read_steps_cursor(cur_b, []Path_Step{step}) or_return
 				child_path := fmt.aprintf(is_linked ? "%s[[%d]]" : "%s[%d]", prefix, i, allocator = allocator)
+				defer delete(child_path, allocator)
 				_diff_recursive(ea_maybe.?, eb_maybe.?, child_path, include_tx_meta, changes, allocator) or_return
 			}
 			if cnt_b > cnt_a {
@@ -2028,7 +2092,8 @@ _diff_recursive :: proc(
 					append(changes, Tx_Change{op = .Append, path_str = child_path, old_slot = Slot{}, new_slot = eb_slot})
 				}
 			} else if cnt_b < cnt_a {
-				append(changes, Tx_Change{op = .Slice, path_str = prefix, old_slot = slot_a, new_slot = slot_b})
+				cloned_prefix := strings.clone(prefix, allocator)
+				append(changes, Tx_Change{op = .Slice, path_str = cloned_prefix, old_slot = slot_a, new_slot = slot_b})
 			}
 			return nil
 		}
@@ -2038,7 +2103,8 @@ _diff_recursive :: proc(
 	if slot_b.tag == .None && !slot_b.full {
 		op = .Remove
 	}
-	append(changes, Tx_Change{op = op, path_str = prefix, old_slot = slot_a, new_slot = slot_b})
+	cloned_prefix := strings.clone(prefix, allocator)
+	append(changes, Tx_Change{op = op, path_str = cloned_prefix, old_slot = slot_a, new_slot = slot_b})
 	return nil
 }
 
