@@ -81,219 +81,219 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 ## Reference Results (`-o:speed -microarch:native`, `Core_Memory`)
 
 <!-- BEGIN_BENCHMARK_TABLE -->
-### 1. Odin Results (`-o:speed -microarch:native`, Commit `cadcc64f08ac`)
+### 1. Odin Results (`-o:speed -microarch:native`, Commit `2d6f9a7120f3`)
 
 | # | Benchmark | Ops | Runs | Median (`ns/op`) | Mean ± σ (`ns`) | CV | Min..Max (`ns`) | `ops/sec` | Footprint |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | `HAMT Hash_Map bulk put (1 tx)` | 2,000 | 5 | **212** | 212 ± 6.9 | 3.3% | 204..222 | 4,716,981 | 214.5 KB |
-| 2 | `HAMT Hash_Map point lookup (with SHA-1)` | 2,000 | 5 | **96** | 97 ± 3.7 | 3.8% | 93..103 | 10,416,667 | — |
-| 3 | `HAMT Hash_Map lookup (pre-hashed digest)` | 2,000 | 5 | **58** | 58 ± 1.6 | 2.8% | 55..59 | 17,241,379 | — |
-| 4 | `HAMT CoW branched moment commits` | 500 | 5 | **990** | 1,034 ± 145.5 | 14.1% | 945..1,291 | 1,010,101 | 457.7 KB |
-| 5 | `HAMT Hash_Map remove & branch shortening` | 1,000 | 5 | **173** | 174 ± 4.7 | 2.7% | 170..182 | 5,780,347 | — |
-| 6 | `HAMT Hash_Map unordered iterator scan` | 2,000 | 5 | **38** | 38 ± 0.5 | 1.4% | 38..39 | 26,315,789 | — |
-| 7 | `HAMT Hash_Map in-place overwrite (1 tx)` | 2,000 | 5 | **203** | 207 ± 13.8 | 6.7% | 198..231 | 4,926,108 | — |
-| 8 | `HAMT Counted_Hash_Map bulk put (1 tx)` | 2,000 | 5 | **216** | 223 ± 15.9 | 7.1% | 213..251 | 4,629,630 | — |
-| 9 | `HAMT Counted_Hash_Map remove` | 1,000 | 5 | **171** | 176 ± 10.3 | 5.9% | 170..194 | 5,847,953 | — |
-| 10 | `HAMT deep suffix-collision put (depth 10+)` | 500 | 5 | **183** | 193 ± 19.5 | 10.1% | 181..227 | 5,464,481 | — |
-| 11 | `HAMT deep suffix-collision branch collapse` | 500 | 5 | **228** | 227 ± 2.9 | 1.3% | 222..229 | 4,385,965 | — |
-| 12 | `HAMT Counted_Hash_Set key-only put (1 tx)` | 2,000 | 5 | **233** | 244 ± 26.0 | 10.6% | 227..290 | 4,291,845 | — |
-| 13 | `HAMT Counted_Hash_Set membership check` | 2,000 | 5 | **96** | 97 ± 1.7 | 1.8% | 96..100 | 10,416,667 | — |
-| 14 | `Array_List (Radix Trie) append` | 2,000 | 5 | **117** | 122 ± 13.7 | 11.2% | 113..146 | 8,547,009 | 19.3 KB |
-| 15 | `Array_List (Radix Trie) random get` | 2,000 | 5 | **51** | 55 ± 7.0 | 12.7% | 49..64 | 19,607,843 | — |
-| 16 | `Array_List (Radix Trie) iterator scan` | 2,000 | 5 | **13** | 14 ± 1.9 | 14.3% | 12..17 | 76,923,077 | — |
-| 17 | `Array_List (Radix Trie) in-place put` | 2,000 | 5 | **100** | 103 ± 10.9 | 10.6% | 95..122 | 10,000,000 | — |
-| 18 | `Array_List (Radix Trie) index-seek page(10)` | 2,000 | 5 | **365** | 364 ± 12.4 | 3.4% | 346..379 | 2,739,726 | — |
-| 19 | `Array_List (Radix Trie) depth-collapse slice` | 500 | 5 | **740** | 742 ± 39.8 | 5.4% | 680..787 | 1,351,351 | — |
-| 20 | `Linked_Array_List (B-Tree) append` | 2,000 | 5 | **244** | 245 ± 10.8 | 4.4% | 232..262 | 4,098,361 | 45.3 KB |
-| 21 | `Linked_Array_List (B-Tree) random get` | 2,000 | 5 | **57** | 56 ± 1.9 | 3.4% | 53..58 | 17,543,860 | — |
-| 22 | `Linked_Array_List (B-Tree) iterator scan` | 2,000 | 5 | **15** | 15 ± 0.5 | 3.8% | 14..15 | 66,666,667 | — |
-| 23 | `Linked_Array_List (B-Tree) middle insert` | 500 | 5 | **281** | 277 ± 9.1 | 3.3% | 261..283 | 3,558,719 | — |
-| 24 | `Linked_Array_List (B-Tree) middle remove` | 500 | 5 | **375** | 365 ± 15.2 | 4.2% | 341..376 | 2,666,667 | — |
-| 25 | `Linked_Array_List (B-Tree) concat + slice` | 400 | 5 | **866** | 863 ± 23.8 | 2.8% | 827..891 | 1,154,734 | — |
-| 26 | `Linked_Array_List (B-Tree) in-place put` | 2,000 | 5 | **174** | 174 ± 4.8 | 2.7% | 167..179 | 5,747,126 | — |
-| 27 | `Linked_Array_List (B-Tree) index-seek page(10)` | 2,000 | 5 | **414** | 434 ± 45.5 | 10.5% | 407..515 | 2,415,459 | — |
-| 28 | `Sorted_Map (B+Tree) out-of-order put` | 2,000 | 5 | **391** | 391 ± 1.3 | 0.3% | 390..393 | 2,557,545 | 115.4 KB |
-| 29 | `Sorted_Map (B+Tree) key lookup` | 2,000 | 5 | **172** | 173 ± 1.3 | 0.8% | 171..174 | 5,813,953 | — |
-| 30 | `Sorted_Map (B+Tree) rank query` | 2,000 | 5 | **136** | 137 ± 2.3 | 1.7% | 135..141 | 7,352,941 | — |
+| 1 | `HAMT Hash_Map bulk put (1 tx)` | 2,000 | 5 | **202** | 241 ± 86.3 | 35.9% | 201..395 | 4,950,495 | 214.5 KB |
+| 2 | `HAMT Hash_Map point lookup (with SHA-1)` | 2,000 | 5 | **95** | 109 ± 31.4 | 28.8% | 93..165 | 10,526,316 | — |
+| 3 | `HAMT Hash_Map lookup (pre-hashed digest)` | 2,000 | 5 | **60** | 77 ± 27.4 | 35.4% | 56..116 | 16,666,667 | — |
+| 4 | `HAMT CoW branched moment commits` | 500 | 5 | **923** | 1,138 ± 307.2 | 27.0% | 902..1,483 | 1,083,424 | 457.7 KB |
+| 5 | `HAMT Hash_Map remove & branch shortening` | 1,000 | 5 | **167** | 173 ± 16.6 | 9.6% | 161..201 | 5,988,024 | — |
+| 6 | `HAMT Hash_Map unordered iterator scan` | 2,000 | 5 | **37** | 37 ± 0.8 | 2.3% | 36..38 | 27,027,027 | — |
+| 7 | `HAMT Hash_Map in-place overwrite (1 tx)` | 2,000 | 5 | **192** | 201 ± 16.6 | 8.3% | 191..230 | 5,208,333 | — |
+| 8 | `HAMT Counted_Hash_Map bulk put (1 tx)` | 2,000 | 5 | **210** | 218 ± 22.8 | 10.4% | 205..259 | 4,761,905 | — |
+| 9 | `HAMT Counted_Hash_Map remove` | 1,000 | 5 | **165** | 172 ± 11.7 | 6.8% | 162..188 | 6,060,606 | — |
+| 10 | `HAMT deep suffix-collision put (depth 10+)` | 500 | 5 | **193** | 202 ± 24.8 | 12.3% | 187..246 | 5,181,347 | — |
+| 11 | `HAMT deep suffix-collision branch collapse` | 500 | 5 | **211** | 212 ± 3.8 | 1.8% | 208..218 | 4,739,336 | — |
+| 12 | `HAMT Counted_Hash_Set key-only put (1 tx)` | 2,000 | 5 | **222** | 236 ± 32.9 | 13.9% | 220..295 | 4,504,505 | — |
+| 13 | `HAMT Counted_Hash_Set membership check` | 2,000 | 5 | **91** | 91 ± 1.5 | 1.7% | 90..94 | 10,989,011 | — |
+| 14 | `Array_List (Radix Trie) append` | 2,000 | 5 | **108** | 109 ± 0.9 | 0.8% | 108..110 | 9,259,259 | 19.3 KB |
+| 15 | `Array_List (Radix Trie) random get` | 2,000 | 5 | **46** | 46 ± 0.5 | 1.2% | 46..47 | 21,739,130 | — |
+| 16 | `Array_List (Radix Trie) iterator scan` | 2,000 | 5 | **13** | 13 ± 0.5 | 4.3% | 12..13 | 76,923,077 | — |
+| 17 | `Array_List (Radix Trie) in-place put` | 2,000 | 5 | **89** | 89 ± 1.1 | 1.3% | 88..91 | 11,235,955 | — |
+| 18 | `Array_List (Radix Trie) index-seek page(10)` | 2,000 | 5 | **347** | 349 ± 6.3 | 1.8% | 343..358 | 2,881,844 | — |
+| 19 | `Array_List (Radix Trie) depth-collapse slice` | 500 | 5 | **701** | 699 ± 8.6 | 1.2% | 688..711 | 1,426,534 | — |
+| 20 | `Linked_Array_List (B-Tree) append` | 2,000 | 5 | **231** | 231 ± 4.5 | 1.9% | 226..237 | 4,329,004 | 45.3 KB |
+| 21 | `Linked_Array_List (B-Tree) random get` | 2,000 | 5 | **53** | 54 ± 0.9 | 1.7% | 53..55 | 18,867,925 | — |
+| 22 | `Linked_Array_List (B-Tree) iterator scan` | 2,000 | 5 | **13** | 13 ± 0.5 | 4.1% | 13..14 | 76,923,077 | — |
+| 23 | `Linked_Array_List (B-Tree) middle insert` | 500 | 5 | **258** | 258 ± 2.9 | 1.1% | 256..263 | 3,875,969 | — |
+| 24 | `Linked_Array_List (B-Tree) middle remove` | 500 | 5 | **349** | 350 ± 6.4 | 1.8% | 344..360 | 2,865,330 | — |
+| 25 | `Linked_Array_List (B-Tree) concat + slice` | 400 | 5 | **807** | 812 ± 13.1 | 1.6% | 797..827 | 1,239,157 | — |
+| 26 | `Linked_Array_List (B-Tree) in-place put` | 2,000 | 5 | **161** | 162 ± 1.9 | 1.2% | 160..164 | 6,211,180 | — |
+| 27 | `Linked_Array_List (B-Tree) index-seek page(10)` | 2,000 | 5 | **394** | 395 ± 2.3 | 0.6% | 393..398 | 2,538,071 | — |
+| 28 | `Sorted_Map (B+Tree) out-of-order put` | 2,000 | 5 | **388** | 387 ± 1.7 | 0.4% | 384..388 | 2,577,320 | 115.4 KB |
+| 29 | `Sorted_Map (B+Tree) key lookup` | 2,000 | 5 | **163** | 163 ± 1.0 | 0.6% | 162..164 | 6,134,969 | — |
+| 30 | `Sorted_Map (B+Tree) rank query` | 2,000 | 5 | **131** | 131 ± 0.7 | 0.5% | 130..132 | 7,633,588 | — |
 | 31 | `Sorted_Map (B+Tree) ordered scan` | 2,000 | 5 | **13** | 13 ± 0.0 | 0.0% | 13..13 | 76,923,077 | — |
-| 32 | `Sorted_Map (B+Tree) lower-bound page(10)` | 2,000 | 5 | **472** | 472 ± 1.9 | 0.4% | 469..474 | 2,118,644 | — |
-| 33 | `Sorted_Map (B+Tree) remove & rebalance` | 1,000 | 5 | **247** | 248 ± 2.6 | 1.0% | 246..251 | 4,048,583 | — |
-| 34 | `Sorted_Map (B+Tree) get_index select` | 2,000 | 5 | **74** | 74 ± 1.1 | 1.5% | 73..76 | 13,513,514 | — |
-| 35 | `Sorted_Map (B+Tree) index-seek page(10)` | 2,000 | 5 | **413** | 414 ± 1.8 | 0.4% | 412..416 | 2,421,308 | — |
-| 36 | `Sorted_Map (B+Tree) in-place overwrite` | 2,000 | 5 | **370** | 370 ± 1.5 | 0.4% | 369..373 | 2,702,703 | — |
-| 37 | `Sorted_Set (B+Tree) key-only put (1 tx)` | 2,000 | 5 | **369** | 369 ± 2.2 | 0.6% | 366..372 | 2,710,027 | 80.0 KB |
-| 38 | `Sorted_Set (B+Tree) contains lookup` | 2,000 | 5 | **151** | 151 ± 1.3 | 0.9% | 149..152 | 6,622,517 | — |
-| 39 | `Replication (genesis -> 200 moments)` | 200 | 5 | **105** | 105 ± 1.1 | 1.0% | 104..107 | 9,523,810 | 250.9 KB |
-| 40 | `Replication (incremental 1-moment delta)` | 100 | 5 | **776** | 785 ± 29.9 | 3.8% | 761..837 | 1,288,660 | 132.7 KB |
-| 41 | `Compaction (Memory_Offset_Map, 200 -> 1)` | 1 | 5 | **3,747** | 3,695 ± 240.0 | 6.5% | 3,316..3,967 | 266,880 | 1.2 KB |
-| 42 | `Compaction (File_Offset_Map, 200 -> 1)` | 1 | 5 | **10,098** | 10,029 ± 269.3 | 2.7% | 9,668..10,390 | 99,030 | 1.2 KB |
-| 43 | `Compaction (Heterogeneous DAG + dedup)` | 1 | 5 | **107,262** | 108,295 ± 6465.1 | 6.0% | 100,418..117,390 | 9,323 | 23.4 KB |
-| 44 | `Replication (Post-compaction resync)` | 1 | 5 | **1,573** | 1,567 ± 35.8 | 2.3% | 1,513..1,613 | 635,728 | 23.4 KB |
-| 45 | `Hasher: SHA-1 (20B) HAMT put` | 2,000 | 5 | **225** | 225 ± 2.7 | 1.2% | 221..228 | 4,444,444 | 224.7 KB |
-| 46 | `Hasher: SHA-256 (32B) HAMT put` | 2,000 | 5 | **233** | 233 ± 1.1 | 0.5% | 232..235 | 4,291,845 | 248.7 KB |
+| 32 | `Sorted_Map (B+Tree) lower-bound page(10)` | 2,000 | 5 | **466** | 465 ± 1.5 | 0.3% | 463..467 | 2,145,923 | — |
+| 33 | `Sorted_Map (B+Tree) remove & rebalance` | 1,000 | 5 | **230** | 231 ± 2.6 | 1.1% | 228..234 | 4,347,826 | — |
+| 34 | `Sorted_Map (B+Tree) get_index select` | 2,000 | 5 | **64** | 65 ± 1.3 | 2.0% | 64..67 | 15,625,000 | — |
+| 35 | `Sorted_Map (B+Tree) index-seek page(10)` | 2,000 | 5 | **401** | 401 ± 1.5 | 0.4% | 399..403 | 2,493,766 | — |
+| 36 | `Sorted_Map (B+Tree) in-place overwrite` | 2,000 | 5 | **362** | 362 ± 1.3 | 0.4% | 360..363 | 2,762,431 | — |
+| 37 | `Sorted_Set (B+Tree) key-only put (1 tx)` | 2,000 | 5 | **343** | 343 ± 2.0 | 0.6% | 341..345 | 2,915,452 | 80.0 KB |
+| 38 | `Sorted_Set (B+Tree) contains lookup` | 2,000 | 5 | **144** | 145 ± 0.9 | 0.6% | 144..146 | 6,944,444 | — |
+| 39 | `Replication (genesis -> 200 moments)` | 200 | 5 | **104** | 107 ± 11.2 | 10.5% | 100..127 | 9,615,385 | 250.9 KB |
+| 40 | `Replication (incremental 1-moment delta)` | 100 | 5 | **743** | 752 ± 17.9 | 2.4% | 737..781 | 1,345,895 | 132.7 KB |
+| 41 | `Compaction (Memory_Offset_Map, 200 -> 1)` | 1 | 5 | **3,707** | 3,891 ± 324.4 | 8.3% | 3,587..4,358 | 269,760 | 1.2 KB |
+| 42 | `Compaction (File_Offset_Map, 200 -> 1)` | 1 | 5 | **9,347** | 9,491 ± 481.3 | 5.1% | 8,976..10,229 | 106,986 | 1.2 KB |
+| 43 | `Compaction (Heterogeneous DAG + dedup)` | 1 | 5 | **126,618** | 126,387 ± 4396.2 | 3.5% | 121,297..133,060 | 7,898 | 23.4 KB |
+| 44 | `Replication (Post-compaction resync)` | 1 | 5 | **1,462** | 1,463 ± 36.7 | 2.5% | 1,423..1,513 | 683,995 | 23.4 KB |
+| 45 | `Hasher: SHA-1 (20B) HAMT put` | 2,000 | 5 | **223** | 223 ± 2.9 | 1.3% | 218..225 | 4,484,305 | 224.7 KB |
+| 46 | `Hasher: SHA-256 (32B) HAMT put` | 2,000 | 5 | **233** | 233 ± 2.5 | 1.1% | 231..236 | 4,291,845 | 248.7 KB |
 | 47 | `Bytes: Inline Short_Bytes read_bytes_buf` | 10,000 | 5 | **6** | 6 ± 0.0 | 0.0% | 6..6 | 166,666,667 | — |
 | 48 | `Bytes: External Bytes read_bytes_buf` | 10,000 | 5 | **9** | 9 ± 0.0 | 0.0% | 9..9 | 111,111,111 | — |
 | 49 | `Bytes: Tagged Short_Bytes read_bytes_buf` | 10,000 | 5 | **6** | 6 ± 0.0 | 0.0% | 6..6 | 166,666,667 | — |
 | 50 | `Bytes: Tagged External Bytes read_bytes_buf` | 10,000 | 5 | **9** | 9 ± 0.4 | 4.9% | 9..10 | 111,111,111 | — |
-| 51 | `Stream: Cursor_Writer (256 x 4KB = 1MB)` | 256 | 5 | **295** | 305 ± 23.9 | 7.8% | 293..348 | 3,389,831 | 1024.1 KB |
-| 52 | `Stream: Cursor_Reader (256 x 4KB = 1MB)` | 256 | 5 | **53** | 53 ± 0.4 | 0.8% | 52..53 | 18,867,925 | — |
-| 53 | `Stream: Cursor_Reader random seek + 64B read` | 2,000 | 5 | **6** | 6 ± 0.0 | 0.0% | 6..6 | 166,666,667 | — |
-| 54 | `Stream: Cursor_Writer random seek + 16B patch` | 2,000 | 5 | **13** | 13 ± 0.5 | 4.1% | 13..14 | 76,923,077 | — |
-| 55 | `Path: 4-level nested cursor_write_path` | 500 | 5 | **249** | 249 ± 3.0 | 1.2% | 245..253 | 4,016,064 | — |
-| 56 | `Path: 4-level nested cursor_read_path` | 500 | 5 | **151** | 154 ± 6.4 | 4.2% | 150..165 | 6,622,517 | — |
-| 57 | `Cursor: Full KV-pair scan (read_kv_pair)` | 2,000 | 5 | **100** | 101 ± 1.9 | 1.9% | 99..103 | 10,000,000 | — |
-| 58 | `Backend: Core_Memory commits` | 500 | 5 | **1,234** | 1,481 ± 578.8 | 39.1% | 1,198..2,516 | 810,373 | 391.0 KB |
-| 59 | `Backend: Core_Buffered_File commits` | 500 | 5 | **4,684** | 4,704 ± 100.6 | 2.1% | 4,616..4,863 | 213,493 | 391.0 KB |
-| 60 | `Backend: Core_File (unbuffered) commits` | 500 | 5 | **44,717** | 46,073 ± 3218.2 | 7.0% | 44,270..51,807 | 22,363 | 391.0 KB |
-| 61 | `Tx: Mid-tx database_freeze + CoW clone` | 500 | 5 | **1,142** | 1,130 ± 64.5 | 5.7% | 1,050..1,204 | 875,657 | — |
-| 62 | `Tx: Aborted transaction rollback truncate` | 500 | 5 | **675** | 677 ± 10.6 | 1.6% | 664..693 | 1,481,481 | — |
-| 63 | `DB: Re-open & trailer checksum verify` | 5,000 | 5 | **57** | 59 ± 3.9 | 6.6% | 56..65 | 17,543,860 | — |
-| 64 | `DSL Layer 2: Tx Commit + Secondary Index (N=500)` | 500 | 5 | **4,642** | 4,647 ± 59.2 | 1.3% | 4,585..4,709 | 215,424 | 232.5 KB |
-| 65 | `DSL Layer 1: String Selector get_uint (N=500)` | 500 | 5 | **553** | 550 ± 14.9 | 2.7% | 531..567 | 1,808,318 | — |
-| 66 | `DSL Layer 3: Struct marshal (N=200)` | 200 | 5 | **4,242** | 4,259 ± 77.5 | 1.8% | 4,192..4,378 | 235,738 | — |
-| 67 | `DSL Layer 3: Struct unmarshal (N=200)` | 200 | 5 | **2,091** | 2,078 ± 36.4 | 1.8% | 2,021..2,117 | 478,240 | — |
-| 68 | `DSL Layer 3: Datomic pull projection (N=200)` | 200 | 5 | **1,575** | 1,566 ± 26.8 | 1.7% | 1,520..1,588 | 634,921 | — |
-| 69 | `DSL Layer 4: diff_moments (1 of 700 mutated)` | 200 | 5 | **278,457** | 280,083 ± 5028.5 | 1.8% | 277,148..288,995 | 3,591 | — |
-| 70 | `DSL Layer 4: history_of lineage (3 moments)` | 200 | 5 | **2,314** | 2,341 ± 70.8 | 3.0% | 2,289..2,464 | 432,152 | — |
-| 71 | `DSL Layer 5: Datalog B+Tree Prefix + Join` | 100 | 5 | **14,312** | 14,777 ± 1148.5 | 7.8% | 14,042..16,795 | 69,871 | — |
-| 72 | `DSL Layer 5: Datalog Grouped Aggs (N=500)` | 25 | 5 | **613,623** | 614,199 ± 5196.1 | 0.8% | 608,326..622,542 | 1,630 | — |
-| 73 | `DSL Layer 5: Datalog Cycle-Safe reach (32-ring)` | 100 | 5 | **27,683** | 27,558 ± 572.4 | 2.1% | 26,987..28,317 | 36,123 | — |
+| 51 | `Stream: Cursor_Writer (256 x 4KB = 1MB)` | 256 | 5 | **288** | 291 ± 9.9 | 3.4% | 285..309 | 3,472,222 | 1024.1 KB |
+| 52 | `Stream: Cursor_Reader (256 x 4KB = 1MB)` | 256 | 5 | **52** | 53 ± 0.9 | 1.7% | 52..54 | 19,230,769 | — |
+| 53 | `Stream: Cursor_Reader random seek + 64B read` | 2,000 | 5 | **6** | 6 ± 0.9 | 14.0% | 6..8 | 166,666,667 | — |
+| 54 | `Stream: Cursor_Writer random seek + 16B patch` | 2,000 | 5 | **13** | 13 ± 0.4 | 3.4% | 13..14 | 76,923,077 | — |
+| 55 | `Path: 4-level nested cursor_write_path` | 500 | 5 | **230** | 231 ± 1.9 | 0.8% | 229..234 | 4,347,826 | — |
+| 56 | `Path: 4-level nested cursor_read_path` | 500 | 5 | **148** | 148 ± 4.2 | 2.8% | 141..152 | 6,756,757 | — |
+| 57 | `Cursor: Full KV-pair scan (read_kv_pair)` | 2,000 | 5 | **97** | 97 ± 2.1 | 2.1% | 95..100 | 10,309,278 | — |
+| 58 | `Backend: Core_Memory commits` | 500 | 5 | **1,216** | 1,218 ± 10.7 | 0.9% | 1,206..1,235 | 822,368 | 391.0 KB |
+| 59 | `Backend: Core_Buffered_File commits` | 500 | 5 | **4,579** | 4,578 ± 15.1 | 0.3% | 4,554..4,593 | 218,388 | 391.0 KB |
+| 60 | `Backend: Core_File (unbuffered) commits` | 500 | 5 | **44,053** | 44,127 ± 193.3 | 0.4% | 43,895..44,387 | 22,700 | 391.0 KB |
+| 61 | `Tx: Mid-tx database_freeze + CoW clone` | 500 | 5 | **1,118** | 1,114 ± 9.4 | 0.8% | 1,100..1,122 | 894,454 | — |
+| 62 | `Tx: Aborted transaction rollback truncate` | 500 | 5 | **693** | 693 ± 3.5 | 0.5% | 687..696 | 1,443,001 | — |
+| 63 | `DB: Re-open & trailer checksum verify` | 5,000 | 5 | **56** | 56 ± 0.5 | 1.0% | 56..57 | 17,857,143 | — |
+| 64 | `DSL Layer 2: Tx Commit + Secondary Index (N=500)` | 500 | 5 | **4,562** | 4,709 ± 386.4 | 8.2% | 4,505..5,398 | 219,202 | 232.5 KB |
+| 65 | `DSL Layer 1: String Selector get_uint (N=500)` | 500 | 5 | **540** | 540 ± 10.9 | 2.0% | 530..557 | 1,851,852 | — |
+| 66 | `DSL Layer 3: Struct marshal (N=200)` | 200 | 5 | **4,233** | 4,408 ± 282.4 | 6.4% | 4,161..4,735 | 236,239 | — |
+| 67 | `DSL Layer 3: Struct unmarshal (N=200)` | 200 | 5 | **1,977** | 1,972 ± 25.7 | 1.3% | 1,940..2,000 | 505,817 | — |
+| 68 | `DSL Layer 3: Datomic pull projection (N=200)` | 200 | 5 | **1,534** | 1,536 ± 31.0 | 2.0% | 1,491..1,566 | 651,890 | — |
+| 69 | `DSL Layer 4: diff_moments (1 of 700 mutated)` | 200 | 5 | **261,697** | 263,402 ± 4235.1 | 1.6% | 259,365..269,351 | 3,821 | — |
+| 70 | `DSL Layer 4: history_of lineage (3 moments)` | 200 | 5 | **1,880** | 1,834 ± 87.8 | 4.8% | 1,722..1,909 | 531,915 | — |
+| 71 | `DSL Layer 5: Datalog B+Tree Prefix + Join` | 100 | 5 | **15,366** | 15,610 ± 676.6 | 4.3% | 15,102..16,800 | 65,079 | — |
+| 72 | `DSL Layer 5: Datalog Grouped Aggs (N=500)` | 25 | 5 | **855,426** | 842,899 ± 25041.1 | 3.0% | 809,808..868,800 | 1,169 | — |
+| 73 | `DSL Layer 5: Datalog Cycle-Safe reach (32-ring)` | 100 | 5 | **27,103** | 27,651 ± 1173.0 | 4.2% | 26,620..29,021 | 36,896 | — |
 
-### 2. Zig Results (`-Doptimize=ReleaseFast -Dcpu=native`, Commit `cadcc64f08ac`)
+### 2. Zig Results (`-Doptimize=ReleaseFast -Dcpu=native`, Commit `2d6f9a7120f3`)
 
 | # | Benchmark | Ops | Runs | Median (`ns/op`) | Mean ± σ (`ns`) | CV | Min..Max (`ns`) | `ops/sec` | Footprint |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | `HAMT Hash_Map bulk put (1 tx)` | 2,000 | 5 | **786** | 793 ± 39.1 | 4.9% | 736..831 | 1,272,265 | 214.5 KB |
-| 2 | `HAMT Hash_Map point lookup (with SHA-1)` | 2,000 | 5 | **271** | 272 ± 8.3 | 3.0% | 261..281 | 3,690,037 | — |
-| 3 | `HAMT Hash_Map lookup (pre-hashed digest)` | 2,000 | 5 | **186** | 183 ± 5.8 | 3.2% | 173..187 | 5,376,344 | — |
-| 4 | `HAMT CoW branched moment commits` | 500 | 5 | **2,326** | 2,346 ± 112.2 | 4.8% | 2,196..2,484 | 429,923 | 457.7 KB |
-| 5 | `HAMT Hash_Map remove & branch shortening` | 1,000 | 5 | **949** | 951 ± 23.5 | 2.5% | 917..979 | 1,053,741 | — |
-| 6 | `HAMT Hash_Map unordered iterator scan` | 2,000 | 5 | **148** | 149 ± 4.6 | 3.1% | 143..155 | 6,756,757 | — |
-| 7 | `HAMT Hash_Map in-place overwrite (1 tx)` | 2,000 | 5 | **740** | 810 ± 174.3 | 21.5% | 711..1,121 | 1,351,351 | — |
-| 8 | `HAMT Counted_Hash_Map bulk put (1 tx)` | 2,000 | 5 | **791** | 806 ± 42.8 | 5.3% | 772..879 | 1,264,223 | — |
-| 9 | `HAMT Counted_Hash_Map remove` | 1,000 | 5 | **983** | 983 ± 26.7 | 2.7% | 943..1,015 | 1,017,294 | — |
-| 10 | `HAMT deep suffix-collision put (depth 10+)` | 500 | 5 | **1,234** | 1,225 ± 37.1 | 3.0% | 1,165..1,265 | 810,373 | — |
-| 11 | `HAMT deep suffix-collision branch collapse` | 500 | 5 | **2,741** | 2,725 ± 112.8 | 4.1% | 2,562..2,877 | 364,830 | — |
-| 12 | `HAMT Counted_Hash_Set key-only put (1 tx)` | 2,000 | 5 | **522** | 521 ± 18.5 | 3.6% | 499..549 | 1,915,709 | — |
-| 13 | `HAMT Counted_Hash_Set membership check` | 2,000 | 5 | **264** | 261 ± 10.8 | 4.2% | 243..272 | 3,787,879 | — |
-| 14 | `Array_List (Radix Trie) append` | 2,000 | 5 | **210** | 208 ± 4.4 | 2.1% | 201..212 | 4,761,905 | 19.3 KB |
-| 15 | `Array_List (Radix Trie) random get` | 2,000 | 5 | **128** | 128 ± 0.5 | 0.4% | 127..128 | 7,812,500 | — |
-| 16 | `Array_List (Radix Trie) iterator scan` | 2,000 | 5 | **32** | 32 ± 0.4 | 1.4% | 31..32 | 31,250,000 | — |
-| 17 | `Array_List (Radix Trie) in-place put` | 2,000 | 5 | **197** | 198 ± 2.6 | 1.3% | 195..202 | 5,076,142 | — |
-| 18 | `Array_List (Radix Trie) index-seek page(10)` | 2,000 | 5 | **1,527** | 1,529 ± 8.5 | 0.6% | 1,521..1,543 | 654,879 | — |
-| 19 | `Array_List (Radix Trie) depth-collapse slice` | 500 | 5 | **1,364** | 1,366 ± 27.4 | 2.0% | 1,340..1,410 | 733,138 | — |
-| 20 | `Linked_Array_List (B-Tree) append` | 2,000 | 5 | **2,807** | 2,804 ± 11.7 | 0.4% | 2,789..2,819 | 356,252 | 45.3 KB |
-| 21 | `Linked_Array_List (B-Tree) random get` | 2,000 | 5 | **2,145** | 2,149 ± 18.9 | 0.9% | 2,131..2,176 | 466,200 | — |
-| 22 | `Linked_Array_List (B-Tree) iterator scan` | 2,000 | 5 | **60** | 60 ± 1.6 | 2.6% | 58..62 | 16,666,667 | — |
-| 23 | `Linked_Array_List (B-Tree) middle insert` | 500 | 5 | **3,473** | 3,469 ± 18.8 | 0.5% | 3,443..3,491 | 287,936 | — |
-| 24 | `Linked_Array_List (B-Tree) middle remove` | 500 | 5 | **3,515** | 3,510 ± 10.3 | 0.3% | 3,493..3,518 | 284,495 | — |
-| 25 | `Linked_Array_List (B-Tree) concat + slice` | 400 | 5 | **33,325** | 33,379 ± 294.5 | 0.9% | 33,105..33,858 | 30,008 | — |
-| 26 | `Linked_Array_List (B-Tree) in-place put` | 2,000 | 5 | **2,288** | 2,285 ± 11.2 | 0.5% | 2,266..2,295 | 437,063 | — |
-| 27 | `Linked_Array_List (B-Tree) index-seek page(10)` | 2,000 | 5 | **3,288** | 3,286 ± 18.1 | 0.5% | 3,256..3,302 | 304,136 | — |
-| 28 | `Sorted_Map (B+Tree) out-of-order put` | 2,000 | 5 | **4,390** | 4,408 ± 29.9 | 0.7% | 4,383..4,442 | 227,790 | 115.4 KB |
-| 29 | `Sorted_Map (B+Tree) key lookup` | 2,000 | 5 | **4,307** | 4,325 ± 31.1 | 0.7% | 4,298..4,360 | 232,180 | — |
-| 30 | `Sorted_Map (B+Tree) rank query` | 2,000 | 5 | **4,150** | 4,135 ± 40.6 | 1.0% | 4,066..4,171 | 240,964 | — |
-| 31 | `Sorted_Map (B+Tree) ordered scan` | 2,000 | 5 | **51** | 51 ± 1.4 | 2.8% | 49..53 | 19,607,843 | — |
-| 32 | `Sorted_Map (B+Tree) lower-bound page(10)` | 2,000 | 5 | **5,340** | 5,335 ± 37.8 | 0.7% | 5,273..5,374 | 187,266 | — |
-| 33 | `Sorted_Map (B+Tree) remove & rebalance` | 1,000 | 5 | **5,793** | 5,796 ± 36.7 | 0.6% | 5,748..5,833 | 172,622 | — |
-| 34 | `Sorted_Map (B+Tree) get_index select` | 2,000 | 5 | **3,172** | 3,173 ± 17.5 | 0.6% | 3,148..3,190 | 315,259 | — |
-| 35 | `Sorted_Map (B+Tree) index-seek page(10)` | 2,000 | 5 | **4,284** | 4,282 ± 15.3 | 0.4% | 4,267..4,302 | 233,427 | — |
-| 36 | `Sorted_Map (B+Tree) in-place overwrite` | 2,000 | 5 | **4,618** | 4,624 ± 10.7 | 0.2% | 4,614..4,637 | 216,544 | — |
-| 37 | `Sorted_Set (B+Tree) key-only put (1 tx)` | 2,000 | 5 | **4,170** | 4,166 ± 10.0 | 0.2% | 4,155..4,175 | 239,808 | 80.0 KB |
-| 38 | `Sorted_Set (B+Tree) contains lookup` | 2,000 | 5 | **3,956** | 3,966 ± 64.5 | 1.6% | 3,910..4,076 | 252,781 | — |
-| 39 | `Replication (genesis -> 200 moments)` | 200 | 5 | **931** | 942 ± 41.3 | 4.4% | 899..1,010 | 1,074,114 | 250.9 KB |
-| 40 | `Replication (incremental 1-moment delta)` | 100 | 5 | **1,678** | 1,681 ± 17.1 | 1.0% | 1,660..1,704 | 595,948 | 132.7 KB |
-| 41 | `Compaction (Memory_Offset_Map, 200 -> 1)` | 1 | 5 | **7,043** | 8,272 ± 3192.5 | 38.6% | 6,161..13,936 | 141,985 | 1.2 KB |
-| 42 | `Compaction (File_Offset_Map, 200 -> 1)` | 1 | 5 | **13,856** | 13,707 ± 1208.9 | 8.8% | 12,293..15,428 | 72,171 | 1.2 KB |
-| 43 | `Compaction (Heterogeneous DAG + dedup)` | 1 | 5 | **108,664** | 111,052 ± 8474.1 | 7.6% | 101,410..124,524 | 9,203 | 23.4 KB |
-| 44 | `Replication (Post-compaction resync)` | 1 | 5 | **1,684** | 1,787 ± 233.0 | 13.0% | 1,673..2,204 | 593,824 | 23.4 KB |
-| 45 | `Hasher: SHA-1 (20B) HAMT put` | 2,000 | 5 | **786** | 788 ± 4.4 | 0.6% | 784..795 | 1,272,265 | 224.7 KB |
-| 46 | `Hasher: SHA-256 (32B) HAMT put` | 2,000 | 5 | **818** | 820 ± 5.2 | 0.6% | 816..829 | 1,222,494 | 248.7 KB |
-| 47 | `Bytes: Inline Short_Bytes read_bytes_buf` | 10,000 | 5 | **8** | 8 ± 1.7 | 19.9% | 7..11 | 125,000,000 | — |
-| 48 | `Bytes: External Bytes read_bytes_buf` | 10,000 | 5 | **38** | 38 ± 0.7 | 1.9% | 37..39 | 26,315,789 | — |
-| 49 | `Bytes: Tagged Short_Bytes read_bytes_buf` | 10,000 | 5 | **7** | 7 ± 0.4 | 6.2% | 7..8 | 142,857,143 | — |
-| 50 | `Bytes: Tagged External Bytes read_bytes_buf` | 10,000 | 5 | **56** | 55 ± 3.2 | 5.8% | 51..59 | 17,857,143 | — |
-| 51 | `Stream: Cursor_Writer (256 x 4KB = 1MB)` | 256 | 5 | **1,664** | 1,630 ± 55.0 | 3.4% | 1,567..1,677 | 600,962 | 1024.1 KB |
-| 52 | `Stream: Cursor_Reader (256 x 4KB = 1MB)` | 256 | 5 | **73** | 75 ± 5.5 | 7.3% | 72..85 | 13,698,630 | — |
-| 53 | `Stream: Cursor_Reader random seek + 64B read` | 2,000 | 5 | **28** | 28 ± 0.0 | 0.0% | 28..28 | 35,714,286 | — |
-| 54 | `Stream: Cursor_Writer random seek + 16B patch` | 2,000 | 5 | **29** | 29 ± 1.5 | 5.1% | 27..31 | 34,482,759 | — |
-| 55 | `Path: 4-level nested cursor_write_path` | 500 | 5 | **1,493** | 1,493 ± 11.2 | 0.7% | 1,483..1,510 | 669,792 | — |
-| 56 | `Path: 4-level nested cursor_read_path` | 500 | 5 | **1,258** | 1,260 ± 20.6 | 1.6% | 1,241..1,294 | 794,913 | — |
-| 57 | `Cursor: Full KV-pair scan (read_kv_pair)` | 2,000 | 5 | **265** | 265 ± 2.5 | 0.9% | 261..267 | 3,773,585 | — |
-| 58 | `Backend: Core_Memory commits` | 500 | 5 | **2,426** | 2,454 ± 50.3 | 2.0% | 2,413..2,523 | 412,201 | 391.0 KB |
-| 59 | `Backend: Core_Buffered_File commits` | 500 | 5 | **17,846** | 17,894 ± 159.4 | 0.9% | 17,770..18,168 | 56,035 | 391.0 KB |
-| 60 | `Backend: Core_File (unbuffered) commits` | 500 | 5 | **46,942** | 46,993 ± 480.9 | 1.0% | 46,456..47,766 | 21,303 | 391.0 KB |
-| 61 | `Tx: Mid-tx database_freeze + CoW clone` | 500 | 5 | **1,848** | 1,976 ± 266.9 | 13.5% | 1,793..2,442 | 541,126 | — |
-| 62 | `Tx: Aborted transaction rollback truncate` | 500 | 5 | **1,932** | 1,934 ± 20.8 | 1.1% | 1,909..1,967 | 517,598 | — |
-| 63 | `DB: Re-open & trailer checksum verify` | 5,000 | 5 | **236** | 238 ± 3.8 | 1.6% | 234..243 | 4,237,288 | — |
+| 1 | `HAMT Hash_Map bulk put (1 tx)` | 2,000 | 5 | **756** | 755 ± 8.3 | 1.1% | 744..765 | 1,322,751 | 214.5 KB |
+| 2 | `HAMT Hash_Map point lookup (with SHA-1)` | 2,000 | 5 | **257** | 256 ± 3.1 | 1.2% | 251..259 | 3,891,051 | — |
+| 3 | `HAMT Hash_Map lookup (pre-hashed digest)` | 2,000 | 5 | **175** | 177 ± 4.5 | 2.6% | 174..185 | 5,714,286 | — |
+| 4 | `HAMT CoW branched moment commits` | 500 | 5 | **2,206** | 2,204 ± 31.5 | 1.4% | 2,160..2,248 | 453,309 | 457.7 KB |
+| 5 | `HAMT Hash_Map remove & branch shortening` | 1,000 | 5 | **896** | 898 ± 5.4 | 0.6% | 893..905 | 1,116,071 | — |
+| 6 | `HAMT Hash_Map unordered iterator scan` | 2,000 | 5 | **135** | 135 ± 1.7 | 1.2% | 134..138 | 7,407,407 | — |
+| 7 | `HAMT Hash_Map in-place overwrite (1 tx)` | 2,000 | 5 | **693** | 692 ± 3.6 | 0.5% | 687..697 | 1,443,001 | — |
+| 8 | `HAMT Counted_Hash_Map bulk put (1 tx)` | 2,000 | 5 | **758** | 761 ± 7.1 | 0.9% | 758..774 | 1,319,261 | — |
+| 9 | `HAMT Counted_Hash_Map remove` | 1,000 | 5 | **927** | 928 ± 5.3 | 0.6% | 922..934 | 1,078,749 | — |
+| 10 | `HAMT deep suffix-collision put (depth 10+)` | 500 | 5 | **1,201** | 1,205 ± 10.8 | 0.9% | 1,198..1,224 | 832,639 | — |
+| 11 | `HAMT deep suffix-collision branch collapse` | 500 | 5 | **2,643** | 2,639 ± 23.1 | 0.9% | 2,610..2,667 | 378,358 | — |
+| 12 | `HAMT Counted_Hash_Set key-only put (1 tx)` | 2,000 | 5 | **516** | 514 ± 6.7 | 1.3% | 507..522 | 1,937,984 | — |
+| 13 | `HAMT Counted_Hash_Set membership check` | 2,000 | 5 | **255** | 254 ± 2.3 | 0.9% | 250..256 | 3,921,569 | — |
+| 14 | `Array_List (Radix Trie) append` | 2,000 | 5 | **200** | 202 ± 5.9 | 2.9% | 196..209 | 5,000,000 | 19.3 KB |
+| 15 | `Array_List (Radix Trie) random get` | 2,000 | 5 | **120** | 120 ± 1.8 | 1.5% | 118..122 | 8,333,333 | — |
+| 16 | `Array_List (Radix Trie) iterator scan` | 2,000 | 5 | **29** | 30 ± 1.4 | 4.7% | 29..32 | 34,482,759 | — |
+| 17 | `Array_List (Radix Trie) in-place put` | 2,000 | 5 | **192** | 196 ± 6.7 | 3.4% | 191..206 | 5,208,333 | — |
+| 18 | `Array_List (Radix Trie) index-seek page(10)` | 2,000 | 5 | **1,428** | 1,501 ± 113.5 | 7.6% | 1,421..1,680 | 700,280 | — |
+| 19 | `Array_List (Radix Trie) depth-collapse slice` | 500 | 5 | **1,321** | 1,468 ± 266.7 | 18.2% | 1,299..1,921 | 757,002 | — |
+| 20 | `Linked_Array_List (B-Tree) append` | 2,000 | 5 | **2,705** | 2,686 ± 44.9 | 1.7% | 2,627..2,729 | 369,686 | 45.3 KB |
+| 21 | `Linked_Array_List (B-Tree) random get` | 2,000 | 5 | **2,041** | 2,011 ± 47.7 | 2.4% | 1,951..2,050 | 489,956 | — |
+| 22 | `Linked_Array_List (B-Tree) iterator scan` | 2,000 | 5 | **54** | 54 ± 1.9 | 3.5% | 52..57 | 18,518,519 | — |
+| 23 | `Linked_Array_List (B-Tree) middle insert` | 500 | 5 | **3,315** | 3,314 ± 35.0 | 1.1% | 3,277..3,356 | 301,659 | — |
+| 24 | `Linked_Array_List (B-Tree) middle remove` | 500 | 5 | **3,380** | 3,377 ± 27.6 | 0.8% | 3,338..3,415 | 295,858 | — |
+| 25 | `Linked_Array_List (B-Tree) concat + slice` | 400 | 5 | **31,901** | 32,567 ± 1648.8 | 5.1% | 31,643..35,510 | 31,347 | — |
+| 26 | `Linked_Array_List (B-Tree) in-place put` | 2,000 | 5 | **2,197** | 2,231 ± 90.6 | 4.1% | 2,177..2,392 | 455,166 | — |
+| 27 | `Linked_Array_List (B-Tree) index-seek page(10)` | 2,000 | 5 | **3,141** | 3,148 ± 59.8 | 1.9% | 3,067..3,233 | 318,370 | — |
+| 28 | `Sorted_Map (B+Tree) out-of-order put` | 2,000 | 5 | **4,192** | 4,204 ± 23.0 | 0.5% | 4,181..4,235 | 238,550 | 115.4 KB |
+| 29 | `Sorted_Map (B+Tree) key lookup` | 2,000 | 5 | **3,999** | 4,203 ± 469.4 | 11.2% | 3,968..5,042 | 250,063 | — |
+| 30 | `Sorted_Map (B+Tree) rank query` | 2,000 | 5 | **3,928** | 3,941 ± 37.4 | 0.9% | 3,910..4,004 | 254,582 | — |
+| 31 | `Sorted_Map (B+Tree) ordered scan` | 2,000 | 5 | **49** | 49 ± 1.1 | 2.2% | 48..51 | 20,408,163 | — |
+| 32 | `Sorted_Map (B+Tree) lower-bound page(10)` | 2,000 | 5 | **5,080** | 5,162 ± 147.8 | 2.9% | 5,075..5,418 | 196,850 | — |
+| 33 | `Sorted_Map (B+Tree) remove & rebalance` | 1,000 | 5 | **5,692** | 5,728 ± 149.5 | 2.6% | 5,586..5,983 | 175,685 | — |
+| 34 | `Sorted_Map (B+Tree) get_index select` | 2,000 | 5 | **3,038** | 3,129 ± 157.9 | 5.0% | 3,032..3,399 | 329,164 | — |
+| 35 | `Sorted_Map (B+Tree) index-seek page(10)` | 2,000 | 5 | **4,094** | 4,124 ± 181.7 | 4.4% | 3,918..4,418 | 244,260 | — |
+| 36 | `Sorted_Map (B+Tree) in-place overwrite` | 2,000 | 5 | **4,566** | 4,552 ± 52.3 | 1.1% | 4,483..4,613 | 219,010 | — |
+| 37 | `Sorted_Set (B+Tree) key-only put (1 tx)` | 2,000 | 5 | **4,031** | 4,044 ± 56.9 | 1.4% | 3,991..4,140 | 248,077 | 80.0 KB |
+| 38 | `Sorted_Set (B+Tree) contains lookup` | 2,000 | 5 | **3,780** | 3,759 ± 84.6 | 2.3% | 3,615..3,824 | 264,550 | — |
+| 39 | `Replication (genesis -> 200 moments)` | 200 | 5 | **864** | 878 ± 49.4 | 5.6% | 830..960 | 1,157,407 | 250.9 KB |
+| 40 | `Replication (incremental 1-moment delta)` | 100 | 5 | **1,641** | 1,640 ± 40.1 | 2.4% | 1,579..1,691 | 609,385 | 132.7 KB |
+| 41 | `Compaction (Memory_Offset_Map, 200 -> 1)` | 1 | 5 | **6,552** | 7,664 ± 2939.1 | 38.4% | 5,570..12,854 | 152,625 | 1.2 KB |
+| 42 | `Compaction (File_Offset_Map, 200 -> 1)` | 1 | 5 | **11,702** | 12,391 ± 2055.9 | 16.6% | 10,820..15,859 | 85,455 | 1.2 KB |
+| 43 | `Compaction (Heterogeneous DAG + dedup)` | 1 | 5 | **106,439** | 108,583 ± 6364.1 | 5.9% | 103,965..119,554 | 9,395 | 23.4 KB |
+| 44 | `Replication (Post-compaction resync)` | 1 | 5 | **1,613** | 1,613 ± 18.7 | 1.2% | 1,593..1,643 | 619,963 | 23.4 KB |
+| 45 | `Hasher: SHA-1 (20B) HAMT put` | 2,000 | 5 | **756** | 756 ± 3.6 | 0.5% | 753..761 | 1,322,751 | 224.7 KB |
+| 46 | `Hasher: SHA-256 (32B) HAMT put` | 2,000 | 5 | **854** | 858 ± 8.1 | 0.9% | 853..872 | 1,170,960 | 248.7 KB |
+| 47 | `Bytes: Inline Short_Bytes read_bytes_buf` | 10,000 | 5 | **8** | 8 ± 1.3 | 15.9% | 7..10 | 125,000,000 | — |
+| 48 | `Bytes: External Bytes read_bytes_buf` | 10,000 | 5 | **37** | 37 ± 1.7 | 4.6% | 35..39 | 27,027,027 | — |
+| 49 | `Bytes: Tagged Short_Bytes read_bytes_buf` | 10,000 | 5 | **7** | 7 ± 0.0 | 0.0% | 7..7 | 142,857,143 | — |
+| 50 | `Bytes: Tagged External Bytes read_bytes_buf` | 10,000 | 5 | **48** | 48 ± 0.7 | 1.5% | 47..49 | 20,833,333 | — |
+| 51 | `Stream: Cursor_Writer (256 x 4KB = 1MB)` | 256 | 5 | **1,614** | 1,621 ± 36.4 | 2.2% | 1,593..1,684 | 619,579 | 1024.1 KB |
+| 52 | `Stream: Cursor_Reader (256 x 4KB = 1MB)` | 256 | 5 | **73** | 78 ± 12.7 | 16.1% | 72..101 | 13,698,630 | — |
+| 53 | `Stream: Cursor_Reader random seek + 64B read` | 2,000 | 5 | **27** | 27 ± 1.1 | 4.0% | 26..29 | 37,037,037 | — |
+| 54 | `Stream: Cursor_Writer random seek + 16B patch` | 2,000 | 5 | **29** | 29 ± 1.0 | 3.4% | 28..30 | 34,482,759 | — |
+| 55 | `Path: 4-level nested cursor_write_path` | 500 | 5 | **1,438** | 1,435 ± 9.6 | 0.7% | 1,420..1,446 | 695,410 | — |
+| 56 | `Path: 4-level nested cursor_read_path` | 500 | 5 | **1,233** | 1,228 ± 10.1 | 0.8% | 1,214..1,238 | 811,030 | — |
+| 57 | `Cursor: Full KV-pair scan (read_kv_pair)` | 2,000 | 5 | **246** | 246 ± 1.2 | 0.5% | 245..248 | 4,065,041 | — |
+| 58 | `Backend: Core_Memory commits` | 500 | 5 | **2,473** | 2,480 ± 22.9 | 0.9% | 2,455..2,513 | 404,367 | 391.0 KB |
+| 59 | `Backend: Core_Buffered_File commits` | 500 | 5 | **17,854** | 17,842 ± 79.1 | 0.4% | 17,746..17,957 | 56,010 | 391.0 KB |
+| 60 | `Backend: Core_File (unbuffered) commits` | 500 | 5 | **46,795** | 46,869 ± 352.1 | 0.8% | 46,407..47,254 | 21,370 | 391.0 KB |
+| 61 | `Tx: Mid-tx database_freeze + CoW clone` | 500 | 5 | **1,869** | 1,872 ± 42.7 | 2.3% | 1,824..1,925 | 535,045 | — |
+| 62 | `Tx: Aborted transaction rollback truncate` | 500 | 5 | **1,949** | 1,943 ± 22.2 | 1.1% | 1,904..1,961 | 513,084 | — |
+| 63 | `DB: Re-open & trailer checksum verify` | 5,000 | 5 | **236** | 237 ± 3.1 | 1.3% | 234..242 | 4,237,288 | — |
 
-### 3. 1v1 Comparison (Odin vs. Zig, Commit `cadcc64f08ac`)
+### 3. 1v1 Comparison (Odin vs. Zig, Commit `2d6f9a7120f3`)
 
 | # | Benchmark | Odin (`ns/op` ± σ) | Zig (`ns/op` ± σ) | Speedup vs. Zig | Footprint |
 | ---: | :--- | ---: | ---: | ---: | ---: |
-| 1 | `HAMT Hash_Map bulk put (1 tx)` | **212** ± 6.9 | 786 ± 39.1 | **3.71x** | 214.5 KB |
-| 2 | `HAMT Hash_Map point lookup (with SHA-1)` | **96** ± 3.7 | 271 ± 8.3 | **2.82x** | — |
-| 3 | `HAMT Hash_Map lookup (pre-hashed digest)` | **58** ± 1.6 | 186 ± 5.8 | **3.21x** | — |
-| 4 | `HAMT CoW branched moment commits` | **990** ± 145.5 | 2,326 ± 112.2 | **2.35x** | 457.7 KB |
-| 5 | `HAMT Hash_Map remove & branch shortening` | **173** ± 4.7 | 949 ± 23.5 | **5.49x** | — |
-| 6 | `HAMT Hash_Map unordered iterator scan` | **38** ± 0.5 | 148 ± 4.6 | **3.89x** | — |
-| 7 | `HAMT Hash_Map in-place overwrite (1 tx)` | **203** ± 13.8 | 740 ± 174.3 | **3.65x** | — |
-| 8 | `HAMT Counted_Hash_Map bulk put (1 tx)` | **216** ± 15.9 | 791 ± 42.8 | **3.66x** | — |
-| 9 | `HAMT Counted_Hash_Map remove` | **171** ± 10.3 | 983 ± 26.7 | **5.75x** | — |
-| 10 | `HAMT deep suffix-collision put (depth 10+)` | **183** ± 19.5 | 1,234 ± 37.1 | **6.74x** | — |
-| 11 | `HAMT deep suffix-collision branch collapse` | **228** ± 2.9 | 2,741 ± 112.8 | **12.02x** | — |
-| 12 | `HAMT Counted_Hash_Set key-only put (1 tx)` | **233** ± 26.0 | 522 ± 18.5 | **2.24x** | — |
-| 13 | `HAMT Counted_Hash_Set membership check` | **96** ± 1.7 | 264 ± 10.8 | **2.75x** | — |
-| 14 | `Array_List (Radix Trie) append` | **117** ± 13.7 | 210 ± 4.4 | **1.79x** | 19.3 KB |
-| 15 | `Array_List (Radix Trie) random get` | **51** ± 7.0 | 128 ± 0.5 | **2.51x** | — |
-| 16 | `Array_List (Radix Trie) iterator scan` | **13** ± 1.9 | 32 ± 0.4 | **2.46x** | — |
-| 17 | `Array_List (Radix Trie) in-place put` | **100** ± 10.9 | 197 ± 2.6 | **1.97x** | — |
-| 18 | `Array_List (Radix Trie) index-seek page(10)` | **365** ± 12.4 | 1,527 ± 8.5 | **4.18x** | — |
-| 19 | `Array_List (Radix Trie) depth-collapse slice` | **740** ± 39.8 | 1,364 ± 27.4 | **1.84x** | — |
-| 20 | `Linked_Array_List (B-Tree) append` | **244** ± 10.8 | 2,807 ± 11.7 | **11.50x** | 45.3 KB |
-| 21 | `Linked_Array_List (B-Tree) random get` | **57** ± 1.9 | 2,145 ± 18.9 | **37.63x** | — |
-| 22 | `Linked_Array_List (B-Tree) iterator scan` | **15** ± 0.5 | 60 ± 1.6 | **4.00x** | — |
-| 23 | `Linked_Array_List (B-Tree) middle insert` | **281** ± 9.1 | 3,473 ± 18.8 | **12.36x** | — |
-| 24 | `Linked_Array_List (B-Tree) middle remove` | **375** ± 15.2 | 3,515 ± 10.3 | **9.37x** | — |
-| 25 | `Linked_Array_List (B-Tree) concat + slice` | **866** ± 23.8 | 33,325 ± 294.5 | **38.48x** | — |
-| 26 | `Linked_Array_List (B-Tree) in-place put` | **174** ± 4.8 | 2,288 ± 11.2 | **13.15x** | — |
-| 27 | `Linked_Array_List (B-Tree) index-seek page(10)` | **414** ± 45.5 | 3,288 ± 18.1 | **7.94x** | — |
-| 28 | `Sorted_Map (B+Tree) out-of-order put` | **391** ± 1.3 | 4,390 ± 29.9 | **11.23x** | 115.4 KB |
-| 29 | `Sorted_Map (B+Tree) key lookup` | **172** ± 1.3 | 4,307 ± 31.1 | **25.04x** | — |
-| 30 | `Sorted_Map (B+Tree) rank query` | **136** ± 2.3 | 4,150 ± 40.6 | **30.51x** | — |
-| 31 | `Sorted_Map (B+Tree) ordered scan` | **13** ± 0.0 | 51 ± 1.4 | **3.92x** | — |
-| 32 | `Sorted_Map (B+Tree) lower-bound page(10)` | **472** ± 1.9 | 5,340 ± 37.8 | **11.31x** | — |
-| 33 | `Sorted_Map (B+Tree) remove & rebalance` | **247** ± 2.6 | 5,793 ± 36.7 | **23.45x** | — |
-| 34 | `Sorted_Map (B+Tree) get_index select` | **74** ± 1.1 | 3,172 ± 17.5 | **42.86x** | — |
-| 35 | `Sorted_Map (B+Tree) index-seek page(10)` | **413** ± 1.8 | 4,284 ± 15.3 | **10.37x** | — |
-| 36 | `Sorted_Map (B+Tree) in-place overwrite` | **370** ± 1.5 | 4,618 ± 10.7 | **12.48x** | — |
-| 37 | `Sorted_Set (B+Tree) key-only put (1 tx)` | **369** ± 2.2 | 4,170 ± 10.0 | **11.30x** | 80.0 KB |
-| 38 | `Sorted_Set (B+Tree) contains lookup` | **151** ± 1.3 | 3,956 ± 64.5 | **26.20x** | — |
-| 39 | `Replication (genesis -> 200 moments)` | **105** ± 1.1 | 931 ± 41.3 | **8.87x** | 250.9 KB |
-| 40 | `Replication (incremental 1-moment delta)` | **776** ± 29.9 | 1,678 ± 17.1 | **2.16x** | 132.7 KB |
-| 41 | `Compaction (Memory_Offset_Map, 200 -> 1)` | **3,747** ± 240.0 | 7,043 ± 3192.5 | **1.88x** | 1.2 KB |
-| 42 | `Compaction (File_Offset_Map, 200 -> 1)` | **10,098** ± 269.3 | 13,856 ± 1208.9 | **1.37x** | 1.2 KB |
-| 43 | `Compaction (Heterogeneous DAG + dedup)` | **107,262** ± 6465.1 | 108,664 ± 8474.1 | **1.01x** | 23.4 KB |
-| 44 | `Replication (Post-compaction resync)` | **1,573** ± 35.8 | 1,684 ± 233.0 | **1.07x** | 23.4 KB |
-| 45 | `Hasher: SHA-1 (20B) HAMT put` | **225** ± 2.7 | 786 ± 4.4 | **3.49x** | 224.7 KB |
-| 46 | `Hasher: SHA-256 (32B) HAMT put` | **233** ± 1.1 | 818 ± 5.2 | **3.51x** | 248.7 KB |
-| 47 | `Bytes: Inline Short_Bytes read_bytes_buf` | **6** ± 0.0 | 8 ± 1.7 | **1.33x** | — |
-| 48 | `Bytes: External Bytes read_bytes_buf` | **9** ± 0.0 | 38 ± 0.7 | **4.22x** | — |
-| 49 | `Bytes: Tagged Short_Bytes read_bytes_buf` | **6** ± 0.0 | 7 ± 0.4 | **1.17x** | — |
-| 50 | `Bytes: Tagged External Bytes read_bytes_buf` | **9** ± 0.4 | 56 ± 3.2 | **6.22x** | — |
-| 51 | `Stream: Cursor_Writer (256 x 4KB = 1MB)` | **295** ± 23.9 | 1,664 ± 55.0 | **5.64x** | 1024.1 KB |
-| 52 | `Stream: Cursor_Reader (256 x 4KB = 1MB)` | **53** ± 0.4 | 73 ± 5.5 | **1.38x** | — |
-| 53 | `Stream: Cursor_Reader random seek + 64B read` | **6** ± 0.0 | 28 ± 0.0 | **4.67x** | — |
-| 54 | `Stream: Cursor_Writer random seek + 16B patch` | **13** ± 0.5 | 29 ± 1.5 | **2.23x** | — |
-| 55 | `Path: 4-level nested cursor_write_path` | **249** ± 3.0 | 1,493 ± 11.2 | **6.00x** | — |
-| 56 | `Path: 4-level nested cursor_read_path` | **151** ± 6.4 | 1,258 ± 20.6 | **8.33x** | — |
-| 57 | `Cursor: Full KV-pair scan (read_kv_pair)` | **100** ± 1.9 | 265 ± 2.5 | **2.65x** | — |
-| 58 | `Backend: Core_Memory commits` | **1,234** ± 578.8 | 2,426 ± 50.3 | **1.97x** | 391.0 KB |
-| 59 | `Backend: Core_Buffered_File commits` | **4,684** ± 100.6 | 17,846 ± 159.4 | **3.81x** | 391.0 KB |
-| 60 | `Backend: Core_File (unbuffered) commits` | **44,717** ± 3218.2 | 46,942 ± 480.9 | **1.05x** | 391.0 KB |
-| 61 | `Tx: Mid-tx database_freeze + CoW clone` | **1,142** ± 64.5 | 1,848 ± 266.9 | **1.62x** | — |
-| 62 | `Tx: Aborted transaction rollback truncate` | **675** ± 10.6 | 1,932 ± 20.8 | **2.86x** | — |
-| 63 | `DB: Re-open & trailer checksum verify` | **57** ± 3.9 | 236 ± 3.8 | **4.14x** | — |
+| 1 | `HAMT Hash_Map bulk put (1 tx)` | **202** ± 86.3 | 756 ± 8.3 | **3.74x** | 214.5 KB |
+| 2 | `HAMT Hash_Map point lookup (with SHA-1)` | **95** ± 31.4 | 257 ± 3.1 | **2.71x** | — |
+| 3 | `HAMT Hash_Map lookup (pre-hashed digest)` | **60** ± 27.4 | 175 ± 4.5 | **2.92x** | — |
+| 4 | `HAMT CoW branched moment commits` | **923** ± 307.2 | 2,206 ± 31.5 | **2.39x** | 457.7 KB |
+| 5 | `HAMT Hash_Map remove & branch shortening` | **167** ± 16.6 | 896 ± 5.4 | **5.37x** | — |
+| 6 | `HAMT Hash_Map unordered iterator scan` | **37** ± 0.8 | 135 ± 1.7 | **3.65x** | — |
+| 7 | `HAMT Hash_Map in-place overwrite (1 tx)` | **192** ± 16.6 | 693 ± 3.6 | **3.61x** | — |
+| 8 | `HAMT Counted_Hash_Map bulk put (1 tx)` | **210** ± 22.8 | 758 ± 7.1 | **3.61x** | — |
+| 9 | `HAMT Counted_Hash_Map remove` | **165** ± 11.7 | 927 ± 5.3 | **5.62x** | — |
+| 10 | `HAMT deep suffix-collision put (depth 10+)` | **193** ± 24.8 | 1,201 ± 10.8 | **6.22x** | — |
+| 11 | `HAMT deep suffix-collision branch collapse` | **211** ± 3.8 | 2,643 ± 23.1 | **12.53x** | — |
+| 12 | `HAMT Counted_Hash_Set key-only put (1 tx)` | **222** ± 32.9 | 516 ± 6.7 | **2.32x** | — |
+| 13 | `HAMT Counted_Hash_Set membership check` | **91** ± 1.5 | 255 ± 2.3 | **2.80x** | — |
+| 14 | `Array_List (Radix Trie) append` | **108** ± 0.9 | 200 ± 5.9 | **1.85x** | 19.3 KB |
+| 15 | `Array_List (Radix Trie) random get` | **46** ± 0.5 | 120 ± 1.8 | **2.61x** | — |
+| 16 | `Array_List (Radix Trie) iterator scan` | **13** ± 0.5 | 29 ± 1.4 | **2.23x** | — |
+| 17 | `Array_List (Radix Trie) in-place put` | **89** ± 1.1 | 192 ± 6.7 | **2.16x** | — |
+| 18 | `Array_List (Radix Trie) index-seek page(10)` | **347** ± 6.3 | 1,428 ± 113.5 | **4.12x** | — |
+| 19 | `Array_List (Radix Trie) depth-collapse slice` | **701** ± 8.6 | 1,321 ± 266.7 | **1.88x** | — |
+| 20 | `Linked_Array_List (B-Tree) append` | **231** ± 4.5 | 2,705 ± 44.9 | **11.71x** | 45.3 KB |
+| 21 | `Linked_Array_List (B-Tree) random get` | **53** ± 0.9 | 2,041 ± 47.7 | **38.51x** | — |
+| 22 | `Linked_Array_List (B-Tree) iterator scan` | **13** ± 0.5 | 54 ± 1.9 | **4.15x** | — |
+| 23 | `Linked_Array_List (B-Tree) middle insert` | **258** ± 2.9 | 3,315 ± 35.0 | **12.85x** | — |
+| 24 | `Linked_Array_List (B-Tree) middle remove` | **349** ± 6.4 | 3,380 ± 27.6 | **9.68x** | — |
+| 25 | `Linked_Array_List (B-Tree) concat + slice` | **807** ± 13.1 | 31,901 ± 1648.8 | **39.53x** | — |
+| 26 | `Linked_Array_List (B-Tree) in-place put` | **161** ± 1.9 | 2,197 ± 90.6 | **13.65x** | — |
+| 27 | `Linked_Array_List (B-Tree) index-seek page(10)` | **394** ± 2.3 | 3,141 ± 59.8 | **7.97x** | — |
+| 28 | `Sorted_Map (B+Tree) out-of-order put` | **388** ± 1.7 | 4,192 ± 23.0 | **10.80x** | 115.4 KB |
+| 29 | `Sorted_Map (B+Tree) key lookup` | **163** ± 1.0 | 3,999 ± 469.4 | **24.53x** | — |
+| 30 | `Sorted_Map (B+Tree) rank query` | **131** ± 0.7 | 3,928 ± 37.4 | **29.98x** | — |
+| 31 | `Sorted_Map (B+Tree) ordered scan` | **13** ± 0.0 | 49 ± 1.1 | **3.77x** | — |
+| 32 | `Sorted_Map (B+Tree) lower-bound page(10)` | **466** ± 1.5 | 5,080 ± 147.8 | **10.90x** | — |
+| 33 | `Sorted_Map (B+Tree) remove & rebalance` | **230** ± 2.6 | 5,692 ± 149.5 | **24.75x** | — |
+| 34 | `Sorted_Map (B+Tree) get_index select` | **64** ± 1.3 | 3,038 ± 157.9 | **47.47x** | — |
+| 35 | `Sorted_Map (B+Tree) index-seek page(10)` | **401** ± 1.5 | 4,094 ± 181.7 | **10.21x** | — |
+| 36 | `Sorted_Map (B+Tree) in-place overwrite` | **362** ± 1.3 | 4,566 ± 52.3 | **12.61x** | — |
+| 37 | `Sorted_Set (B+Tree) key-only put (1 tx)` | **343** ± 2.0 | 4,031 ± 56.9 | **11.75x** | 80.0 KB |
+| 38 | `Sorted_Set (B+Tree) contains lookup` | **144** ± 0.9 | 3,780 ± 84.6 | **26.25x** | — |
+| 39 | `Replication (genesis -> 200 moments)` | **104** ± 11.2 | 864 ± 49.4 | **8.31x** | 250.9 KB |
+| 40 | `Replication (incremental 1-moment delta)` | **743** ± 17.9 | 1,641 ± 40.1 | **2.21x** | 132.7 KB |
+| 41 | `Compaction (Memory_Offset_Map, 200 -> 1)` | **3,707** ± 324.4 | 6,552 ± 2939.1 | **1.77x** | 1.2 KB |
+| 42 | `Compaction (File_Offset_Map, 200 -> 1)` | **9,347** ± 481.3 | 11,702 ± 2055.9 | **1.25x** | 1.2 KB |
+| 43 | `Compaction (Heterogeneous DAG + dedup)` | 126,618 ± 4396.2 | **106,439** ± 6364.1 | 0.84x | 23.4 KB |
+| 44 | `Replication (Post-compaction resync)` | **1,462** ± 36.7 | 1,613 ± 18.7 | **1.10x** | 23.4 KB |
+| 45 | `Hasher: SHA-1 (20B) HAMT put` | **223** ± 2.9 | 756 ± 3.6 | **3.39x** | 224.7 KB |
+| 46 | `Hasher: SHA-256 (32B) HAMT put` | **233** ± 2.5 | 854 ± 8.1 | **3.67x** | 248.7 KB |
+| 47 | `Bytes: Inline Short_Bytes read_bytes_buf` | **6** ± 0.0 | 8 ± 1.3 | **1.33x** | — |
+| 48 | `Bytes: External Bytes read_bytes_buf` | **9** ± 0.0 | 37 ± 1.7 | **4.11x** | — |
+| 49 | `Bytes: Tagged Short_Bytes read_bytes_buf` | **6** ± 0.0 | 7 ± 0.0 | **1.17x** | — |
+| 50 | `Bytes: Tagged External Bytes read_bytes_buf` | **9** ± 0.4 | 48 ± 0.7 | **5.33x** | — |
+| 51 | `Stream: Cursor_Writer (256 x 4KB = 1MB)` | **288** ± 9.9 | 1,614 ± 36.4 | **5.60x** | 1024.1 KB |
+| 52 | `Stream: Cursor_Reader (256 x 4KB = 1MB)` | **52** ± 0.9 | 73 ± 12.7 | **1.40x** | — |
+| 53 | `Stream: Cursor_Reader random seek + 64B read` | **6** ± 0.9 | 27 ± 1.1 | **4.50x** | — |
+| 54 | `Stream: Cursor_Writer random seek + 16B patch` | **13** ± 0.4 | 29 ± 1.0 | **2.23x** | — |
+| 55 | `Path: 4-level nested cursor_write_path` | **230** ± 1.9 | 1,438 ± 9.6 | **6.25x** | — |
+| 56 | `Path: 4-level nested cursor_read_path` | **148** ± 4.2 | 1,233 ± 10.1 | **8.33x** | — |
+| 57 | `Cursor: Full KV-pair scan (read_kv_pair)` | **97** ± 2.1 | 246 ± 1.2 | **2.54x** | — |
+| 58 | `Backend: Core_Memory commits` | **1,216** ± 10.7 | 2,473 ± 22.9 | **2.03x** | 391.0 KB |
+| 59 | `Backend: Core_Buffered_File commits` | **4,579** ± 15.1 | 17,854 ± 79.1 | **3.90x** | 391.0 KB |
+| 60 | `Backend: Core_File (unbuffered) commits` | **44,053** ± 193.3 | 46,795 ± 352.1 | **1.06x** | 391.0 KB |
+| 61 | `Tx: Mid-tx database_freeze + CoW clone` | **1,118** ± 9.4 | 1,869 ± 42.7 | **1.67x** | — |
+| 62 | `Tx: Aborted transaction rollback truncate` | **693** ± 3.5 | 1,949 ± 22.2 | **2.81x** | — |
+| 63 | `DB: Re-open & trailer checksum verify` | **56** ± 0.5 | 236 ± 3.1 | **4.21x** | — |
 <!-- END_BENCHMARK_TABLE -->
 
 ---
