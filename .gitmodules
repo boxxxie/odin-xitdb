@@ -1,0 +1,3 @@
+[submodule "vendor/xitdb-zig"]
+	path = vendor/xitdb-zig
+	url = https://github.com/xit-vcs/xitdb.git
