@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
 
     const run_bench = b.addRunArtifact(bench_exe);
     run_bench.step.dependOn(b.getInstallStep());
+    run_bench.addPassthruArgs();
 
     const bench_step = b.step("bench", "Run xitdb Zig benchmark suite (mirror of bench_xitdb.odin)");
     bench_step.dependOn(&run_bench.step);

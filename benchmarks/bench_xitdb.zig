@@ -11,43 +11,365 @@ const BenchResult = struct {
     bytes_used: u64 = 0,
 };
 
-var g_jsonl_writer: ?*std.Io.Writer = null;
-var g_bench_rank: usize = 0;
+const MAX_GROUP_BENCHES = 32;
+const MAX_RUNS = 256;
 
-fn printHeader(stdout: *std.Io.Writer) !void {
-    try stdout.writeAll("========================================================================================================\n");
-    try stdout.print("{s:<48} | {s:>8} | {s:>10} | {s:>12} | {s:>12}\n", .{ "Benchmark", "Ops", "Total (ms)", "ns/op", "ops/sec" });
-    try stdout.writeAll("--------------------------------------------------------------------------------------------------------\n");
+const BenchAccum = struct {
+    name: []const u8 = "",
+    ops: usize = 0,
+    bytes_used: u64 = 0,
+    samples_ns: [MAX_RUNS]f64 = undefined,
+    samples_ms: [MAX_RUNS]f64 = undefined,
+    count: usize = 0,
+};
+
+var g_jsonl_writer: ?*std.Io.Writer = null;
+var g_history_writer: ?*std.Io.Writer = null;
+var g_bench_rank: usize = 0;
+var g_runs: usize = 5;
+var g_warmup: usize = 1;
+var g_commit_sha_buf: [64]u8 = undefined;
+var g_commit_sha: []const u8 = "unknown";
+var g_run_id_buf: [64]u8 = undefined;
+var g_run_id: []const u8 = "run-0";
+var g_append_primary: bool = false;
+var g_save_history: bool = true;
+var g_jsonl_path: []const u8 = "benchmarks/zig.jsonl";
+var g_history_path: []const u8 = "benchmarks/history.jsonl";
+
+var g_is_warmup: bool = false;
+var g_group_slot: usize = 0;
+var g_group_count: usize = 0;
+var g_group_accum: [MAX_GROUP_BENCHES]BenchAccum = undefined;
+
+fn resolveGitCommit(io: std.Io) void {
+    var head_buf: [256]u8 = undefined;
+    const head_slice = std.Io.Dir.cwd().readFile(io, ".git/HEAD", &head_buf) catch {
+        g_commit_sha = "unknown";
+        return;
+    };
+    const head_trimmed = std.mem.trim(u8, head_slice, " \t\r\n");
+    if (std.mem.startsWith(u8, head_trimmed, "ref: ")) {
+        const ref_rel = std.mem.trim(u8, head_trimmed[5..], " \t\r\n");
+        var ref_path_buf: [256]u8 = undefined;
+        const ref_path = std.fmt.bufPrint(&ref_path_buf, ".git/{s}", .{ref_rel}) catch {
+            g_commit_sha = "unknown";
+            return;
+        };
+        var sha_buf: [128]u8 = undefined;
+        if (std.Io.Dir.cwd().readFile(io, ref_path, &sha_buf)) |sha_raw| {
+            const sha = std.mem.trim(u8, sha_raw, " \t\r\n");
+            const n = @min(sha.len, 12);
+            @memcpy(g_commit_sha_buf[0..n], sha[0..n]);
+            g_commit_sha = g_commit_sha_buf[0..n];
+            return;
+        } else |_| {}
+        var packed_buf: [8192]u8 = undefined;
+        if (std.Io.Dir.cwd().readFile(io, ".git/packed-refs", &packed_buf)) |packed_raw| {
+            var line_it = std.mem.splitScalar(u8, packed_raw, '\n');
+            while (line_it.next()) |line_raw| {
+                const line = std.mem.trim(u8, line_raw, " \t\r\n");
+                if (line.len < 12 or line[0] == '#' or line[0] == '^') continue;
+                if (std.mem.endsWith(u8, line, ref_rel) and line[line.len - ref_rel.len - 1] == ' ') {
+                    @memcpy(g_commit_sha_buf[0..12], line[0..12]);
+                    g_commit_sha = g_commit_sha_buf[0..12];
+                    return;
+                }
+            }
+        } else |_| {}
+    } else if (head_trimmed.len >= 7) {
+        const n = @min(head_trimmed.len, 12);
+        @memcpy(g_commit_sha_buf[0..n], head_trimmed[0..n]);
+        g_commit_sha = g_commit_sha_buf[0..n];
+        return;
+    }
+    g_commit_sha = "unknown";
 }
 
-fn printResult(stdout: *std.Io.Writer, r: BenchResult) !void {
-    g_bench_rank += 1;
-    const total_ns: f64 = @floatFromInt(@max(r.elapsed_ns, 0));
-    const total_ms = total_ns / 1e6;
-    const ops_f: f64 = @floatFromInt(@max(r.ops, 1));
-    const ns_per_op = total_ns / ops_f;
-    const ops_per_sec = (@as(f64, @floatFromInt(r.ops)) * 1e9) / @max(total_ns, 1.0);
-    if (r.bytes_used > 0) {
-        const kb = @as(f64, @floatFromInt(r.bytes_used)) / 1024.0;
-        try stdout.print(
-            "{s:<48} | {d:>8} | {d:>10.2} | {d:>12.0} | {d:>12.0}  ({d:.1} KB)\n",
-            .{ r.name, r.ops, total_ms, ns_per_op, ops_per_sec, kb },
-        );
-    } else {
-        try stdout.print(
-            "{s:<48} | {d:>8} | {d:>10.2} | {d:>12.0} | {d:>12.0}\n",
-            .{ r.name, r.ops, total_ms, ns_per_op, ops_per_sec },
-        );
-    }
-    try stdout.flush();
+fn parseCliArgs(init: std.process.Init) !void {
+    resolveGitCommit(init.io);
+    const ts = std.Io.Clock.real.now(init.io);
+    const unix_sec: i64 = @intCast(@divTrunc(ts.nanoseconds, 1_000_000_000));
+    g_run_id = try std.fmt.bufPrint(&g_run_id_buf, "run-{d}", .{unix_sec});
 
-    if (g_jsonl_writer) |jw| {
-        try jw.print(
-            "{{\"rank\":{d},\"lang\":\"zig\",\"name\":\"{s}\",\"ops\":{d},\"total_ms\":{d:.3},\"ns_per_op\":{d:.0},\"ops_per_sec\":{d:.0},\"bytes_used\":{d}}}\n",
-            .{ g_bench_rank, r.name, r.ops, total_ms, ns_per_op, ops_per_sec, r.bytes_used },
-        );
-        try jw.flush();
+    var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer it.deinit();
+    _ = it.skip(); // program name
+
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--append") or std.mem.eql(u8, arg, "-append")) {
+            g_append_primary = true;
+        } else if (std.mem.eql(u8, arg, "--no-history") or std.mem.eql(u8, arg, "-no-history")) {
+            g_save_history = false;
+        } else if (std.mem.eql(u8, arg, "--runs") or std.mem.eql(u8, arg, "-runs")) {
+            if (it.next()) |val| {
+                if (std.fmt.parseInt(usize, val, 10)) |v| {
+                    if (v > 0) g_runs = @min(v, MAX_RUNS);
+                } else |_| {}
+            }
+        } else if (std.mem.startsWith(u8, arg, "--runs=") or std.mem.startsWith(u8, arg, "-runs:")) {
+            const sep = std.mem.indexOfAny(u8, arg, "=:").?;
+            if (std.fmt.parseInt(usize, arg[sep + 1 ..], 10)) |v| {
+                if (v > 0) g_runs = @min(v, MAX_RUNS);
+            } else |_| {}
+        } else if (std.mem.eql(u8, arg, "--warmup") or std.mem.eql(u8, arg, "-warmup")) {
+            if (it.next()) |val| {
+                if (std.fmt.parseInt(usize, val, 10)) |v| {
+                    g_warmup = v;
+                } else |_| {}
+            }
+        } else if (std.mem.startsWith(u8, arg, "--warmup=") or std.mem.startsWith(u8, arg, "-warmup:")) {
+            const sep = std.mem.indexOfAny(u8, arg, "=:").?;
+            if (std.fmt.parseInt(usize, arg[sep + 1 ..], 10)) |v| {
+                g_warmup = v;
+            } else |_| {}
+        } else if (std.mem.eql(u8, arg, "--commit") or std.mem.eql(u8, arg, "-commit")) {
+            if (it.next()) |val| {
+                const n = @min(val.len, g_commit_sha_buf.len);
+                @memcpy(g_commit_sha_buf[0..n], val[0..n]);
+                g_commit_sha = g_commit_sha_buf[0..n];
+            }
+        } else if (std.mem.startsWith(u8, arg, "--commit=") or std.mem.startsWith(u8, arg, "-commit:")) {
+            const sep = std.mem.indexOfAny(u8, arg, "=:").?;
+            const val = arg[sep + 1 ..];
+            const n = @min(val.len, g_commit_sha_buf.len);
+            @memcpy(g_commit_sha_buf[0..n], val[0..n]);
+            g_commit_sha = g_commit_sha_buf[0..n];
+        } else if (std.mem.eql(u8, arg, "--run-id") or std.mem.eql(u8, arg, "-run-id")) {
+            if (it.next()) |val| {
+                const n = @min(val.len, g_run_id_buf.len);
+                @memcpy(g_run_id_buf[0..n], val[0..n]);
+                g_run_id = g_run_id_buf[0..n];
+            }
+        } else if (std.mem.startsWith(u8, arg, "--run-id=") or std.mem.startsWith(u8, arg, "-run-id:")) {
+            const sep = std.mem.indexOfAny(u8, arg, "=:").?;
+            const val = arg[sep + 1 ..];
+            const n = @min(val.len, g_run_id_buf.len);
+            @memcpy(g_run_id_buf[0..n], val[0..n]);
+            g_run_id = g_run_id_buf[0..n];
+        } else if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "-output")) {
+            if (it.next()) |val| {
+                g_jsonl_path = try init.arena.allocator().dupe(u8, val);
+            }
+        } else if (std.mem.eql(u8, arg, "--history") or std.mem.eql(u8, arg, "-history")) {
+            if (it.next()) |val| {
+                g_history_path = try init.arena.allocator().dupe(u8, val);
+            }
+        }
     }
+}
+
+fn sortF64(arr: []f64) void {
+    var i: usize = 1;
+    while (i < arr.len) : (i += 1) {
+        const key = arr[i];
+        var j: usize = i;
+        while (j > 0 and arr[j - 1] > key) : (j -= 1) {
+            arr[j] = arr[j - 1];
+        }
+        arr[j] = key;
+    }
+}
+
+fn calcPercentile(sorted: []const f64, p: f64) f64 {
+    const n = sorted.len;
+    if (n == 0) return 0.0;
+    if (n == 1) return sorted[0];
+    const pos = p * @as(f64, @floatFromInt(n - 1));
+    const lo: usize = @intFromFloat(pos);
+    const hi: usize = @min(lo + 1, n - 1);
+    const frac = pos - @as(f64, @floatFromInt(lo));
+    return sorted[lo] + frac * (sorted[hi] - sorted[lo]);
+}
+
+fn printHeader(stdout: *std.Io.Writer) !void {
+    try stdout.writeAll("============================================================================================================================================\n");
+    try stdout.print(
+        "  Commit: {s} | Lang: zig | Runs: {d} (Warmup: {d}) | Run ID: {s}\n",
+        .{ g_commit_sha, g_runs, g_warmup, g_run_id },
+    );
+    try stdout.writeAll("============================================================================================================================================\n");
+    try stdout.print(
+        "{s:<48} | {s:>8} | {s:>10} | {s:>12} | {s:>16} | {s:>6} | {s:>13} | {s:>12}\n",
+        .{ "Benchmark", "Ops", "Total (ms)", "Median ns/op", "Mean ± StdDev", "CV%", "Min..Max ns", "ops/sec" },
+    );
+    try stdout.writeAll("--------------------------------------------------------------------------------------------------------------------------------------------\n");
+    try stdout.flush();
+}
+
+fn printResult(_: *std.Io.Writer, r: BenchResult) !void {
+    if (g_is_warmup) return;
+    const slot = g_group_slot;
+    g_group_slot += 1;
+    if (slot >= MAX_GROUP_BENCHES) return;
+    var acc = &g_group_accum[slot];
+    if (acc.count == 0) {
+        acc.name = r.name;
+        acc.ops = r.ops;
+        acc.bytes_used = r.bytes_used;
+    } else if (r.bytes_used > 0) {
+        acc.bytes_used = r.bytes_used;
+    }
+    if (acc.count < MAX_RUNS) {
+        const total_ns: f64 = @floatFromInt(@max(r.elapsed_ns, 0));
+        const ops_f: f64 = @floatFromInt(@max(r.ops, 1));
+        acc.samples_ms[acc.count] = total_ns / 1e6;
+        acc.samples_ns[acc.count] = total_ns / ops_f;
+        acc.count += 1;
+    }
+}
+
+fn writeJsonlLine(
+    jw: *std.Io.Writer,
+    rank: usize,
+    acc: *const BenchAccum,
+    n: usize,
+    median_ms: f64,
+    median_ns: f64,
+    mean_ns: f64,
+    stddev_ns: f64,
+    variance_ns2: f64,
+    cv_pct: f64,
+    min_ns: f64,
+    max_ns: f64,
+    iqr_ns: f64,
+    p95_ns: f64,
+    p99_ns: f64,
+    ops_per_sec: f64,
+) !void {
+    try jw.print(
+        "{{\"rank\":{d},\"lang\":\"zig\",\"commit\":\"{s}\",\"run_id\":\"{s}\",\"name\":\"{s}\",\"ops\":{d},\"runs\":{d},\"warmup\":{d},\"total_ms\":{d:.3},\"ns_per_op\":{d:.0},\"mean_ns\":{d:.2},\"median_ns\":{d:.2},\"stddev_ns\":{d:.2},\"variance_ns2\":{d:.2},\"cv_pct\":{d:.2},\"min_ns\":{d:.0},\"max_ns\":{d:.0},\"iqr_ns\":{d:.2},\"p95_ns\":{d:.0},\"p99_ns\":{d:.0},\"ops_per_sec\":{d:.0},\"bytes_used\":{d},\"samples_ns\":[",
+        .{
+            rank,
+            g_commit_sha,
+            g_run_id,
+            acc.name,
+            acc.ops,
+            n,
+            g_warmup,
+            median_ms,
+            median_ns,
+            mean_ns,
+            median_ns,
+            stddev_ns,
+            variance_ns2,
+            cv_pct,
+            min_ns,
+            max_ns,
+            iqr_ns,
+            p95_ns,
+            p99_ns,
+            ops_per_sec,
+            acc.bytes_used,
+        },
+    );
+    for (0..n) |i| {
+        if (i > 0) try jw.writeByte(',');
+        try jw.print("{d:.0}", .{acc.samples_ns[i]});
+    }
+    try jw.writeAll("]}\n");
+    try jw.flush();
+}
+
+fn flushGroupResults(stdout: *std.Io.Writer) !void {
+    var sorted_ns: [MAX_RUNS]f64 = undefined;
+    var sorted_ms: [MAX_RUNS]f64 = undefined;
+
+    for (0..g_group_count) |slot| {
+        const acc = &g_group_accum[slot];
+        const n = acc.count;
+        if (n == 0) continue;
+
+        g_bench_rank += 1;
+        @memcpy(sorted_ns[0..n], acc.samples_ns[0..n]);
+        @memcpy(sorted_ms[0..n], acc.samples_ms[0..n]);
+        sortF64(sorted_ns[0..n]);
+        sortF64(sorted_ms[0..n]);
+
+        const min_ns = sorted_ns[0];
+        const max_ns = sorted_ns[n - 1];
+        const median_ns = calcPercentile(sorted_ns[0..n], 0.50);
+        const median_ms = calcPercentile(sorted_ms[0..n], 0.50);
+        const q1_ns = calcPercentile(sorted_ns[0..n], 0.25);
+        const q3_ns = calcPercentile(sorted_ns[0..n], 0.75);
+        const iqr_ns = q3_ns - q1_ns;
+        const p95_ns = calcPercentile(sorted_ns[0..n], 0.95);
+        const p99_ns = calcPercentile(sorted_ns[0..n], 0.99);
+
+        var sum_ns: f64 = 0.0;
+        for (0..n) |i| {
+            sum_ns += sorted_ns[i];
+        }
+        const mean_ns = sum_ns / @as(f64, @floatFromInt(n));
+
+        var var_sum: f64 = 0.0;
+        for (0..n) |i| {
+            const d = sorted_ns[i] - mean_ns;
+            var_sum += d * d;
+        }
+        const variance_ns2 = if (n > 1) var_sum / @as(f64, @floatFromInt(n - 1)) else 0.0;
+        const stddev_ns = @sqrt(variance_ns2);
+        const cv_pct = (stddev_ns / @max(mean_ns, 1e-9)) * 100.0;
+        const ops_f: f64 = @floatFromInt(@max(acc.ops, 1));
+        const ops_per_sec = (ops_f * 1e9) / @max(median_ns * ops_f, 1.0);
+
+        var mean_sd_buf: [32]u8 = undefined;
+        const mean_sd_str = try std.fmt.bufPrint(&mean_sd_buf, "{d:.0} ± {d:.1}", .{ mean_ns, stddev_ns });
+        var cv_buf: [16]u8 = undefined;
+        const cv_str = try std.fmt.bufPrint(&cv_buf, "{d:.1}%", .{cv_pct});
+        var minmax_buf: [32]u8 = undefined;
+        const minmax_str = try std.fmt.bufPrint(&minmax_buf, "{d:.0}..{d:.0}", .{ min_ns, max_ns });
+
+        if (acc.bytes_used > 0) {
+            const kb = @as(f64, @floatFromInt(acc.bytes_used)) / 1024.0;
+            try stdout.print(
+                "{s:<48} | {d:>8} | {d:>10.2} | {d:>12.0} | {s:>16} | {s:>6} | {s:>13} | {d:>12.0}  ({d:.1} KB)\n",
+                .{ acc.name, acc.ops, median_ms, median_ns, mean_sd_str, cv_str, minmax_str, ops_per_sec, kb },
+            );
+        } else {
+            try stdout.print(
+                "{s:<48} | {d:>8} | {d:>10.2} | {d:>12.0} | {s:>16} | {s:>6} | {s:>13} | {d:>12.0}\n",
+                .{ acc.name, acc.ops, median_ms, median_ns, mean_sd_str, cv_str, minmax_str, ops_per_sec },
+            );
+        }
+        try stdout.flush();
+
+        if (g_jsonl_writer) |jw| {
+            try writeJsonlLine(jw, g_bench_rank, acc, n, median_ms, median_ns, mean_ns, stddev_ns, variance_ns2, cv_pct, min_ns, max_ns, iqr_ns, p95_ns, p99_ns, ops_per_sec);
+        }
+        if (g_history_writer) |hw| {
+            try writeJsonlLine(hw, g_bench_rank, acc, n, median_ms, median_ns, mean_ns, stddev_ns, variance_ns2, cv_pct, min_ns, max_ns, iqr_ns, p95_ns, p99_ns, ops_per_sec);
+        }
+    }
+}
+
+fn runGroup(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stdout: *std.Io.Writer,
+    comptime groupFn: fn (std.Io, std.mem.Allocator, *std.Io.Writer, usize) anyerror!void,
+    param: usize,
+) !void {
+    g_is_warmup = true;
+    for (0..g_warmup) |_| {
+        g_group_slot = 0;
+        try groupFn(io, allocator, stdout, param);
+    }
+
+    g_is_warmup = false;
+    for (0..MAX_GROUP_BENCHES) |i| {
+        g_group_accum[i] = .{};
+    }
+    g_group_count = 0;
+    const runs = @min(@max(g_runs, 1), MAX_RUNS);
+    for (0..runs) |_| {
+        g_group_slot = 0;
+        try groupFn(io, allocator, stdout, param);
+        if (g_group_slot > g_group_count) {
+            g_group_count = g_group_slot;
+        }
+    }
+    try flushGroupResults(stdout);
 }
 
 inline fn hashSha1(data: []const u8) HashInt {
@@ -1857,23 +2179,43 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
+    try parseCliArgs(init);
+
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
 
     var jsonl_buf: [4096]u8 = undefined;
-    const jsonl_file = try std.Io.Dir.cwd().createFile(io, "benchmarks/zig.jsonl", .{});
+    const jsonl_file = try std.Io.Dir.cwd().createFile(io, g_jsonl_path, .{ .truncate = !g_append_primary });
     defer jsonl_file.close(io);
     var jsonl_writer = jsonl_file.writer(io, &jsonl_buf);
+    if (g_append_primary) {
+        jsonl_writer.pos = jsonl_file.length(io) catch 0;
+    }
     g_jsonl_writer = &jsonl_writer.interface;
 
+    var history_buf: [4096]u8 = undefined;
+    var history_file_opt: ?std.Io.File = null;
+    var history_writer: std.Io.File.Writer = undefined;
+    if (g_save_history and !std.mem.eql(u8, g_history_path, g_jsonl_path)) {
+        if (std.Io.Dir.cwd().createFile(io, g_history_path, .{ .truncate = false })) |hf| {
+            history_file_opt = hf;
+            history_writer = hf.writer(io, &history_buf);
+            history_writer.pos = hf.length(io) catch 0;
+            g_history_writer = &history_writer.interface;
+        } else |_| {}
+    }
+    defer if (history_file_opt) |hf| {
+        hf.close(io);
+    };
+
     try printHeader(stdout);
-    try benchHamt(io, allocator, stdout, 2_000);
-    try benchLists(io, allocator, stdout, 2_000);
-    try benchSortedMap(io, allocator, stdout, 2_000);
-    try benchCompactionAndReplication(io, allocator, stdout, 200);
-    try benchHashersAndByteStreams(io, allocator, stdout, 2_000);
-    try benchBackends(io, allocator, stdout, 500);
-    try stdout.writeAll("========================================================================================================\n");
+    try runGroup(io, allocator, stdout, benchHamt, 2_000);
+    try runGroup(io, allocator, stdout, benchLists, 2_000);
+    try runGroup(io, allocator, stdout, benchSortedMap, 2_000);
+    try runGroup(io, allocator, stdout, benchCompactionAndReplication, 200);
+    try runGroup(io, allocator, stdout, benchHashersAndByteStreams, 2_000);
+    try runGroup(io, allocator, stdout, benchBackends, 500);
+    try stdout.writeAll("============================================================================================================================================\n");
     try stdout.flush();
 }

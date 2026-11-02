@@ -1,7 +1,10 @@
 package xitdb_benchmarks
 
 import "core:fmt"
+import "core:math"
 import "core:os"
+import "core:strconv"
+import "core:strings"
 import "core:time"
 import xitdb "../xitdb"
 
@@ -12,56 +15,344 @@ Bench_Result :: struct {
 	bytes_used: i64,
 }
 
-g_jsonl_file: ^os.File
-g_bench_rank: int
+MAX_GROUP_BENCHES :: 32
+MAX_RUNS          :: 256
+
+Bench_Accum :: struct {
+	name:       string,
+	ops:        int,
+	bytes_used: i64,
+	samples_ns: [MAX_RUNS]f64,
+	samples_ms: [MAX_RUNS]f64,
+	count:      int,
+}
+
+g_jsonl_file:     ^os.File
+g_history_file:   ^os.File
+g_bench_rank:     int
+g_runs:           int = 5
+g_warmup:         int = 1
+g_commit_sha:     string = "unknown"
+g_run_id:         string = "run-0"
+g_append_primary: bool = false
+g_save_history:   bool = true
+g_jsonl_path:     string = "benchmarks/odin.jsonl"
+g_history_path:   string = "benchmarks/history.jsonl"
+
+g_is_warmup:      bool = false
+g_group_slot:     int = 0
+g_group_count:    int = 0
+g_group_accum:    [MAX_GROUP_BENCHES]Bench_Accum
+
+resolve_git_commit :: proc(allocator := context.allocator) -> string {
+	head_bytes, err := os.read_entire_file(".git/HEAD", allocator)
+	if err != nil {
+		return "unknown"
+	}
+	head_str := strings.trim_space(string(head_bytes))
+	if strings.has_prefix(head_str, "ref: ") {
+		ref_rel := strings.trim_space(head_str[5:])
+		ref_path := fmt.aprintf(".git/%s", ref_rel, allocator = allocator)
+		if ref_bytes, r_err := os.read_entire_file(ref_path, allocator); r_err == nil {
+			sha := strings.trim_space(string(ref_bytes))
+			if len(sha) > 12 {
+				return sha[:12]
+			}
+			return sha
+		}
+		if packed_bytes, p_err := os.read_entire_file(".git/packed-refs", allocator); p_err == nil {
+			lines := strings.split_lines(string(packed_bytes), allocator)
+			suffix := fmt.aprintf(" %s", ref_rel, allocator = allocator)
+			for line in lines {
+				trimmed := strings.trim_space(line)
+				if len(trimmed) == 0 || strings.has_prefix(trimmed, "#") || strings.has_prefix(trimmed, "^") {
+					continue
+				}
+				if strings.has_suffix(trimmed, suffix) && len(trimmed) >= 12 {
+					return trimmed[:12]
+				}
+			}
+		}
+		return "unknown"
+	}
+	if len(head_str) > 12 {
+		return head_str[:12]
+	}
+	return head_str
+}
+
+parse_cli_args :: proc() {
+	g_commit_sha = resolve_git_commit()
+	unix_sec := i64(time.to_unix_nanoseconds(time.now())) / 1_000_000_000
+	g_run_id = fmt.aprintf("run-%d", unix_sec)
+
+	args := os.args[1:]
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--append" || arg == "-append" {
+			g_append_primary = true
+		} else if arg == "--no-history" || arg == "-no-history" {
+			g_save_history = false
+		} else if (arg == "--runs" || arg == "-runs") && i + 1 < len(args) {
+			if v, ok := strconv.parse_int(args[i + 1]); ok && v > 0 {
+				g_runs = clamp(v, 1, MAX_RUNS)
+			}
+			i += 1
+		} else if strings.has_prefix(arg, "--runs=") || strings.has_prefix(arg, "-runs:") {
+			eq := strings.index_any(arg, "=:")
+			if v, ok := strconv.parse_int(arg[eq + 1:]); ok && v > 0 {
+				g_runs = clamp(v, 1, MAX_RUNS)
+			}
+		} else if (arg == "--warmup" || arg == "-warmup") && i + 1 < len(args) {
+			if v, ok := strconv.parse_int(args[i + 1]); ok && v >= 0 {
+				g_warmup = v
+			}
+			i += 1
+		} else if strings.has_prefix(arg, "--warmup=") || strings.has_prefix(arg, "-warmup:") {
+			eq := strings.index_any(arg, "=:")
+			if v, ok := strconv.parse_int(arg[eq + 1:]); ok && v >= 0 {
+				g_warmup = v
+			}
+		} else if (arg == "--commit" || arg == "-commit") && i + 1 < len(args) {
+			g_commit_sha = args[i + 1]
+			i += 1
+		} else if strings.has_prefix(arg, "--commit=") || strings.has_prefix(arg, "-commit:") {
+			eq := strings.index_any(arg, "=:")
+			g_commit_sha = arg[eq + 1:]
+		} else if (arg == "--run-id" || arg == "-run-id") && i + 1 < len(args) {
+			g_run_id = args[i + 1]
+			i += 1
+		} else if strings.has_prefix(arg, "--run-id=") || strings.has_prefix(arg, "-run-id:") {
+			eq := strings.index_any(arg, "=:")
+			g_run_id = arg[eq + 1:]
+		} else if (arg == "--output" || arg == "-output") && i + 1 < len(args) {
+			g_jsonl_path = args[i + 1]
+			i += 1
+		} else if (arg == "--history" || arg == "-history") && i + 1 < len(args) {
+			g_history_path = args[i + 1]
+			i += 1
+		}
+		i += 1
+	}
+}
+
+sort_f64 :: proc(arr: []f64) {
+	for i in 1 ..< len(arr) {
+		key := arr[i]
+		j := i - 1
+		for j >= 0 && arr[j] > key {
+			arr[j + 1] = arr[j]
+			j -= 1
+		}
+		arr[j + 1] = key
+	}
+}
+
+calc_percentile :: proc(sorted: []f64, p: f64) -> f64 {
+	n := len(sorted)
+	if n == 0 do return 0.0
+	if n == 1 do return sorted[0]
+	pos := p * f64(n - 1)
+	lo := int(pos)
+	hi := min(lo + 1, n - 1)
+	frac := pos - f64(lo)
+	return sorted[lo] + frac * (sorted[hi] - sorted[lo])
+}
 
 print_header :: proc() {
-	fmt.println("========================================================================================================")
-	fmt.printf("%-48s | %8s | %10s | %12s | %12s\n", "Benchmark", "Ops", "Total (ms)", "ns/op", "ops/sec")
-	fmt.println("--------------------------------------------------------------------------------------------------------")
+	fmt.println("============================================================================================================================================")
+	fmt.printf(
+		"  Commit: %s | Lang: odin | Runs: %d (Warmup: %d) | Run ID: %s\n",
+		g_commit_sha,
+		g_runs,
+		g_warmup,
+		g_run_id,
+	)
+	fmt.println("============================================================================================================================================")
+	fmt.printf(
+		"%-48s | %8s | %10s | %12s | %16s | %6s | %13s | %12s\n",
+		"Benchmark",
+		"Ops",
+		"Total (ms)",
+		"Median ns/op",
+		"Mean ± StdDev",
+		"CV%",
+		"Min..Max ns",
+		"ops/sec",
+	)
+	fmt.println("--------------------------------------------------------------------------------------------------------------------------------------------")
 }
 
 print_result :: proc(r: Bench_Result) {
-	g_bench_rank += 1
-	total_ns := f64(time.duration_nanoseconds(r.elapsed))
-	total_ms := total_ns / 1e6
-	ns_per_op := total_ns / f64(max(r.ops, 1))
-	ops_per_sec := (f64(r.ops) * 1e9) / max(total_ns, 1.0)
-	if r.bytes_used > 0 {
-		kb := f64(r.bytes_used) / 1024.0
-		fmt.printf(
-			"%-48s | % 8d | % 10.2f | % 12.0f | % 12.0f  (%.1f KB)\n",
-			r.name,
-			r.ops,
-			total_ms,
-			ns_per_op,
-			ops_per_sec,
-			kb,
-		)
-	} else {
-		fmt.printf(
-			"%-48s | % 8d | % 10.2f | % 12.0f | % 12.0f\n",
-			r.name,
-			r.ops,
-			total_ms,
-			ns_per_op,
-			ops_per_sec,
-		)
+	if g_is_warmup {
+		return
+	}
+	slot := g_group_slot
+	g_group_slot += 1
+	if slot >= MAX_GROUP_BENCHES {
+		return
+	}
+	acc := &g_group_accum[slot]
+	if acc.count == 0 {
+		acc.name = r.name
+		acc.ops = r.ops
+		acc.bytes_used = r.bytes_used
+	} else if r.bytes_used > 0 {
+		acc.bytes_used = r.bytes_used
+	}
+	if acc.count < MAX_RUNS {
+		total_ns := f64(max(time.duration_nanoseconds(r.elapsed), 0))
+		acc.samples_ms[acc.count] = total_ns / 1e6
+		acc.samples_ns[acc.count] = total_ns / f64(max(r.ops, 1))
+		acc.count += 1
+	}
+}
+
+flush_group_results :: proc() {
+	sorted_ns: [MAX_RUNS]f64
+	sorted_ms: [MAX_RUNS]f64
+
+	for slot in 0 ..< g_group_count {
+		acc := &g_group_accum[slot]
+		n := acc.count
+		if n == 0 do continue
+
+		g_bench_rank += 1
+		for i in 0 ..< n {
+			sorted_ns[i] = acc.samples_ns[i]
+			sorted_ms[i] = acc.samples_ms[i]
+		}
+		sort_f64(sorted_ns[:n])
+		sort_f64(sorted_ms[:n])
+
+		min_ns := sorted_ns[0]
+		max_ns := sorted_ns[n - 1]
+		median_ns := calc_percentile(sorted_ns[:n], 0.50)
+		median_ms := calc_percentile(sorted_ms[:n], 0.50)
+		q1_ns := calc_percentile(sorted_ns[:n], 0.25)
+		q3_ns := calc_percentile(sorted_ns[:n], 0.75)
+		iqr_ns := q3_ns - q1_ns
+		p95_ns := calc_percentile(sorted_ns[:n], 0.95)
+		p99_ns := calc_percentile(sorted_ns[:n], 0.99)
+
+		sum_ns := 0.0
+		for i in 0 ..< n {
+			sum_ns += sorted_ns[i]
+		}
+		mean_ns := sum_ns / f64(n)
+
+		var_sum := 0.0
+		for i in 0 ..< n {
+			d := sorted_ns[i] - mean_ns
+			var_sum += d * d
+		}
+		variance_ns2 := var_sum / f64(max(n - 1, 1)) if n > 1 else 0.0
+		stddev_ns := math.sqrt(variance_ns2)
+		cv_pct := (stddev_ns / max(mean_ns, 1e-9)) * 100.0
+		ops_per_sec := (f64(acc.ops) * 1e9) / max(median_ns * f64(max(acc.ops, 1)), 1.0)
+
+		mean_sd_str := fmt.tprintf("%s ± %s", fmt.tprintf("%.0f", mean_ns), fmt.tprintf("%.1f", stddev_ns))
+		cv_str := fmt.tprintf("%.1f%%", cv_pct)
+		minmax_str := fmt.tprintf("%.0f..%.0f", min_ns, max_ns)
+
+		if acc.bytes_used > 0 {
+			kb := f64(acc.bytes_used) / 1024.0
+			fmt.printf(
+				"%-48s | % 8d | % 10.2f | % 12.0f | %16s | %6s | %13s | % 12.0f  (%.1f KB)\n",
+				acc.name,
+				acc.ops,
+				median_ms,
+				median_ns,
+				mean_sd_str,
+				cv_str,
+				minmax_str,
+				ops_per_sec,
+				kb,
+			)
+		} else {
+			fmt.printf(
+				"%-48s | % 8d | % 10.2f | % 12.0f | %16s | %6s | %13s | % 12.0f\n",
+				acc.name,
+				acc.ops,
+				median_ms,
+				median_ns,
+				mean_sd_str,
+				cv_str,
+				minmax_str,
+				ops_per_sec,
+			)
+		}
+
+		if g_jsonl_file != nil || g_history_file != nil {
+			sb := strings.builder_make(context.temp_allocator)
+			strings.write_byte(&sb, '[')
+			for i in 0 ..< n {
+				if i > 0 do strings.write_byte(&sb, ',')
+				fmt.sbprintf(&sb, "%.0f", acc.samples_ns[i])
+			}
+			strings.write_byte(&sb, ']')
+			samples_json := strings.to_string(sb)
+
+			line := fmt.tprintf(
+				"{{\"rank\":%d,\"lang\":\"odin\",\"commit\":\"%s\",\"run_id\":\"%s\",\"name\":\"%s\",\"ops\":%d,\"runs\":%d,\"warmup\":%d,\"total_ms\":%.3f,\"ns_per_op\":%.0f,\"mean_ns\":%.2f,\"median_ns\":%.2f,\"stddev_ns\":%.2f,\"variance_ns2\":%.2f,\"cv_pct\":%.2f,\"min_ns\":%.0f,\"max_ns\":%.0f,\"iqr_ns\":%.2f,\"p95_ns\":%.0f,\"p99_ns\":%.0f,\"ops_per_sec\":%.0f,\"bytes_used\":%d,\"samples_ns\":%s}}\n",
+				g_bench_rank,
+				g_commit_sha,
+				g_run_id,
+				acc.name,
+				acc.ops,
+				n,
+				g_warmup,
+				median_ms,
+				median_ns,
+				mean_ns,
+				median_ns,
+				stddev_ns,
+				variance_ns2,
+				cv_pct,
+				min_ns,
+				max_ns,
+				iqr_ns,
+				p95_ns,
+				p99_ns,
+				ops_per_sec,
+				acc.bytes_used,
+				samples_json,
+			)
+			if g_jsonl_file != nil {
+				_, _ = os.write_string(g_jsonl_file, line)
+			}
+			if g_history_file != nil {
+				_, _ = os.write_string(g_history_file, line)
+			}
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+run_group :: proc(group_fn: proc(int), param: int) {
+	g_is_warmup = true
+	for _ in 0 ..< g_warmup {
+		g_group_slot = 0
+		group_fn(param)
+		free_all(context.temp_allocator)
 	}
 
-	if g_jsonl_file != nil {
-		line := fmt.tprintf(
-			"{{\"rank\":%d,\"lang\":\"odin\",\"name\":\"%s\",\"ops\":%d,\"total_ms\":%.3f,\"ns_per_op\":%.0f,\"ops_per_sec\":%.0f,\"bytes_used\":%d}}\n",
-			g_bench_rank,
-			r.name,
-			r.ops,
-			total_ms,
-			ns_per_op,
-			ops_per_sec,
-			r.bytes_used,
-		)
-		_, _ = os.write_string(g_jsonl_file, line)
+	g_is_warmup = false
+	for i in 0 ..< MAX_GROUP_BENCHES {
+		g_group_accum[i] = Bench_Accum{}
 	}
+	g_group_count = 0
+	runs := clamp(g_runs, 1, MAX_RUNS)
+	for run_idx in 0 ..< runs {
+		g_group_slot = 0
+		group_fn(param)
+		if g_group_slot > g_group_count {
+			g_group_count = g_group_slot
+		}
+		free_all(context.temp_allocator)
+	}
+	flush_group_results()
 }
 
 // ----------------------------------------------------------------------------
@@ -1730,10 +2021,11 @@ Bench_User_DTO :: struct {
 	tags:     []string `xitdb:"^tags"`,
 }
 
-run_dsl_benchmarks :: proc() {
+run_dsl_benchmarks :: proc(_: int = 0) {
 	core := xitdb.core_memory_init()
 	defer xitdb.core_destroy(&core)
 
+	context.allocator = context.temp_allocator
 	db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
 	N :: 500
 
@@ -1951,21 +2243,32 @@ run_dsl_benchmarks :: proc() {
 }
 
 main :: proc() {
-	jsonl_path := "benchmarks/odin.jsonl"
-	if f, err := os.open(jsonl_path, {.Write, .Create, .Trunc}, os.Permissions_Read_Write_All); err == nil {
+	parse_cli_args()
+
+	primary_flags := os.File_Flags{.Write, .Create, .Append} if g_append_primary else os.File_Flags{.Write, .Create, .Trunc}
+	if f, err := os.open(g_jsonl_path, primary_flags, os.Permissions_Read_Write_All); err == nil {
 		g_jsonl_file = f
 	}
 	defer if g_jsonl_file != nil {
 		os.close(g_jsonl_file)
 	}
 
+	if g_save_history && g_history_path != g_jsonl_path {
+		if hf, err := os.open(g_history_path, {.Write, .Create, .Append}, os.Permissions_Read_Write_All); err == nil {
+			g_history_file = hf
+		}
+	}
+	defer if g_history_file != nil {
+		os.close(g_history_file)
+	}
+
 	print_header()
-	bench_hamt(2_000)
-	bench_lists(2_000)
-	bench_sorted_map(2_000)
-	bench_compaction_and_replication(200)
-	bench_hashers_and_byte_streams(2_000)
-	bench_backends(500)
-	run_dsl_benchmarks()
-	fmt.println("========================================================================================================")
+	run_group(bench_hamt, 2_000)
+	run_group(bench_lists, 2_000)
+	run_group(bench_sorted_map, 2_000)
+	run_group(bench_compaction_and_replication, 200)
+	run_group(bench_hashers_and_byte_streams, 2_000)
+	run_group(bench_backends, 500)
+	run_group(run_dsl_benchmarks, 0)
+	fmt.println("============================================================================================================================================")
 }
