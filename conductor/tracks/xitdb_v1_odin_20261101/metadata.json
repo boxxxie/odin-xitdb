@@ -1,0 +1,11 @@
+{
+  "track_id": "xitdb_v1_odin_20261101",
+  "title": "Full v1 Odin Implementation of xitdb",
+  "status": "completed",
+  "created_at": "2026-11-01T22:45:00+08:00",
+  "completed_at": "2026-11-01T23:18:00+08:00",
+  "reference_repos": [
+    ".tmp/ref/xitdb-zig",
+    ".tmp/ref/xitdb-go"
+  ]
+}

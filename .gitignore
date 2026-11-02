@@ -1,0 +1,22 @@
+# Compiled Odin binaries
+*.bin
+*.exe
+*.out
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+bin/
+
+# Temporary & scratch files
+.tmp/
+*.patch
+.zig-cache/
+zig-out/
+
+# OS & Editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
