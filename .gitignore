@@ -11,6 +11,7 @@ bin/
 
 # Temporary & scratch files
 .tmp/
+.worktrees/
 *.patch
 .zig-cache/
 zig-out/

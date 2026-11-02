@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const xitdb = b.addModule("xitdb", .{
-        .root_source_file = b.path("vendor/xitdb-zig/src/lib.zig"),
+        .root_source_file = b.path("reference/xitdb-zig/src/lib.zig"),
     });
 
     const bench_exe = b.addExecutable(.{
@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
 
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("vendor/xitdb-zig/src/test.zig"),
+            .root_source_file = b.path("reference/xitdb-zig/src/test.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
