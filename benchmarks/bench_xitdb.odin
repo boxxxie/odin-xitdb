@@ -13,6 +13,7 @@ Bench_Result :: struct {
 }
 
 g_jsonl_file: ^os.File
+g_bench_rank: int
 
 print_header :: proc() {
 	fmt.println("========================================================================================================")
@@ -21,6 +22,7 @@ print_header :: proc() {
 }
 
 print_result :: proc(r: Bench_Result) {
+	g_bench_rank += 1
 	total_ns := f64(time.duration_nanoseconds(r.elapsed))
 	total_ms := total_ns / 1e6
 	ns_per_op := total_ns / f64(max(r.ops, 1))
@@ -49,7 +51,8 @@ print_result :: proc(r: Bench_Result) {
 
 	if g_jsonl_file != nil {
 		line := fmt.tprintf(
-			"{{\"lang\":\"odin\",\"name\":\"%s\",\"ops\":%d,\"total_ms\":%.3f,\"ns_per_op\":%.0f,\"ops_per_sec\":%.0f,\"bytes_used\":%d}}\n",
+			"{{\"rank\":%d,\"lang\":\"odin\",\"name\":\"%s\",\"ops\":%d,\"total_ms\":%.3f,\"ns_per_op\":%.0f,\"ops_per_sec\":%.0f,\"bytes_used\":%d}}\n",
+			g_bench_rank,
 			r.name,
 			r.ops,
 			total_ms,

@@ -1,63 +1,63 @@
-{"lang":"odin","name":"HAMT Hash_Map bulk put (1 tx)","ops":2000,"total_ms":0.625,"ns_per_op":312,"ops_per_sec":3200947,"bytes_used":219650}
-{"lang":"odin","name":"HAMT Hash_Map point lookup (with SHA-1)","ops":2000,"total_ms":0.187,"ns_per_op":93,"ops_per_sec":10699078,"bytes_used":0}
-{"lang":"odin","name":"HAMT Hash_Map lookup (pre-hashed digest)","ops":2000,"total_ms":0.114,"ns_per_op":57,"ops_per_sec":17468012,"bytes_used":0}
-{"lang":"odin","name":"HAMT CoW branched moment commits","ops":500,"total_ms":0.929,"ns_per_op":1859,"ops_per_sec":537972,"bytes_used":468656}
-{"lang":"odin","name":"HAMT Hash_Map remove & branch shortening","ops":1000,"total_ms":0.198,"ns_per_op":198,"ops_per_sec":5050939,"bytes_used":0}
-{"lang":"odin","name":"HAMT Hash_Map unordered iterator scan","ops":2000,"total_ms":0.074,"ns_per_op":37,"ops_per_sec":27067628,"bytes_used":0}
-{"lang":"odin","name":"HAMT Hash_Map in-place overwrite (1 tx)","ops":2000,"total_ms":0.736,"ns_per_op":368,"ops_per_sec":2715827,"bytes_used":0}
-{"lang":"odin","name":"HAMT Counted_Hash_Map bulk put (1 tx)","ops":2000,"total_ms":0.870,"ns_per_op":435,"ops_per_sec":2298914,"bytes_used":0}
-{"lang":"odin","name":"HAMT Counted_Hash_Map remove","ops":1000,"total_ms":0.262,"ns_per_op":262,"ops_per_sec":3810627,"bytes_used":0}
-{"lang":"odin","name":"HAMT deep suffix-collision put (depth 10+)","ops":500,"total_ms":0.223,"ns_per_op":446,"ops_per_sec":2240545,"bytes_used":0}
-{"lang":"odin","name":"HAMT deep suffix-collision branch collapse","ops":500,"total_ms":0.110,"ns_per_op":220,"ops_per_sec":4542275,"bytes_used":0}
-{"lang":"odin","name":"HAMT Counted_Hash_Set key-only put (1 tx)","ops":2000,"total_ms":0.907,"ns_per_op":453,"ops_per_sec":2206035,"bytes_used":0}
-{"lang":"odin","name":"HAMT Counted_Hash_Set membership check","ops":2000,"total_ms":0.171,"ns_per_op":85,"ops_per_sec":11715020,"bytes_used":0}
-{"lang":"odin","name":"Array_List (Radix Trie) append","ops":2000,"total_ms":0.209,"ns_per_op":104,"ops_per_sec":9584420,"bytes_used":19762}
-{"lang":"odin","name":"Array_List (Radix Trie) random get","ops":2000,"total_ms":0.092,"ns_per_op":46,"ops_per_sec":21736059,"bytes_used":0}
-{"lang":"odin","name":"Array_List (Radix Trie) iterator scan","ops":2000,"total_ms":0.024,"ns_per_op":12,"ops_per_sec":83277815,"bytes_used":0}
-{"lang":"odin","name":"Array_List (Radix Trie) in-place put","ops":2000,"total_ms":0.178,"ns_per_op":89,"ops_per_sec":11218623,"bytes_used":0}
-{"lang":"odin","name":"Array_List (Radix Trie) index-seek page(10)","ops":2000,"total_ms":0.929,"ns_per_op":465,"ops_per_sec":2152790,"bytes_used":0}
-{"lang":"odin","name":"Array_List (Radix Trie) depth-collapse slice","ops":500,"total_ms":0.812,"ns_per_op":1625,"ops_per_sec":615463,"bytes_used":0}
-{"lang":"odin","name":"Linked_Array_List (B-Tree) append","ops":2000,"total_ms":0.532,"ns_per_op":266,"ops_per_sec":3759045,"bytes_used":46410}
-{"lang":"odin","name":"Linked_Array_List (B-Tree) random get","ops":2000,"total_ms":0.115,"ns_per_op":58,"ops_per_sec":17388885,"bytes_used":0}
-{"lang":"odin","name":"Linked_Array_List (B-Tree) iterator scan","ops":2000,"total_ms":0.026,"ns_per_op":13,"ops_per_sec":77675936,"bytes_used":0}
-{"lang":"odin","name":"Linked_Array_List (B-Tree) middle insert","ops":500,"total_ms":0.132,"ns_per_op":263,"ops_per_sec":3799190,"bytes_used":0}
-{"lang":"odin","name":"Linked_Array_List (B-Tree) middle remove","ops":500,"total_ms":0.180,"ns_per_op":361,"ops_per_sec":2773017,"bytes_used":0}
-{"lang":"odin","name":"Linked_Array_List (B-Tree) concat + slice","ops":400,"total_ms":0.461,"ns_per_op":1152,"ops_per_sec":868063,"bytes_used":0}
-{"lang":"odin","name":"Linked_Array_List (B-Tree) in-place put","ops":2000,"total_ms":0.349,"ns_per_op":174,"ops_per_sec":5737811,"bytes_used":0}
-{"lang":"odin","name":"Linked_Array_List (B-Tree) index-seek page(10)","ops":2000,"total_ms":0.745,"ns_per_op":372,"ops_per_sec":2686298,"bytes_used":0}
-{"lang":"odin","name":"Sorted_Map (B+Tree) out-of-order put","ops":2000,"total_ms":0.781,"ns_per_op":390,"ops_per_sec":2561777,"bytes_used":118164}
-{"lang":"odin","name":"Sorted_Map (B+Tree) key lookup","ops":2000,"total_ms":0.328,"ns_per_op":164,"ops_per_sec":6098193,"bytes_used":0}
-{"lang":"odin","name":"Sorted_Map (B+Tree) rank query","ops":2000,"total_ms":0.254,"ns_per_op":127,"ops_per_sec":7872528,"bytes_used":0}
-{"lang":"odin","name":"Sorted_Map (B+Tree) ordered scan","ops":2000,"total_ms":0.025,"ns_per_op":13,"ops_per_sec":79185968,"bytes_used":0}
-{"lang":"odin","name":"Sorted_Map (B+Tree) lower-bound page(10)","ops":2000,"total_ms":1.038,"ns_per_op":519,"ops_per_sec":1926426,"bytes_used":0}
-{"lang":"odin","name":"Sorted_Map (B+Tree) remove & rebalance","ops":1000,"total_ms":0.243,"ns_per_op":243,"ops_per_sec":4115294,"bytes_used":0}
-{"lang":"odin","name":"Sorted_Map (B+Tree) get_index select","ops":2000,"total_ms":0.138,"ns_per_op":69,"ops_per_sec":14531821,"bytes_used":0}
-{"lang":"odin","name":"Sorted_Map (B+Tree) index-seek page(10)","ops":2000,"total_ms":0.774,"ns_per_op":387,"ops_per_sec":2582325,"bytes_used":0}
-{"lang":"odin","name":"Sorted_Map (B+Tree) in-place overwrite","ops":2000,"total_ms":1.149,"ns_per_op":575,"ops_per_sec":1740235,"bytes_used":0}
-{"lang":"odin","name":"Sorted_Set (B+Tree) key-only put (1 tx)","ops":2000,"total_ms":1.052,"ns_per_op":526,"ops_per_sec":1901363,"bytes_used":81908}
-{"lang":"odin","name":"Sorted_Set (B+Tree) contains lookup","ops":2000,"total_ms":0.276,"ns_per_op":138,"ops_per_sec":7243778,"bytes_used":0}
-{"lang":"odin","name":"Replication (genesis -> 200 moments)","ops":200,"total_ms":0.090,"ns_per_op":450,"ops_per_sec":2222741,"bytes_used":256896}
-{"lang":"odin","name":"Replication (incremental 1-moment delta)","ops":100,"total_ms":0.271,"ns_per_op":2714,"ops_per_sec":368503,"bytes_used":135880}
-{"lang":"odin","name":"Compaction (Memory_Offset_Map, 200 -> 1)","ops":1,"total_ms":0.007,"ns_per_op":6503,"ops_per_sec":153775,"bytes_used":1212}
-{"lang":"odin","name":"Compaction (File_Offset_Map, 200 -> 1)","ops":1,"total_ms":0.011,"ns_per_op":11221,"ops_per_sec":89119,"bytes_used":1212}
-{"lang":"odin","name":"Compaction (Heterogeneous DAG + dedup)","ops":1,"total_ms":0.108,"ns_per_op":107722,"ops_per_sec":9283,"bytes_used":23926}
-{"lang":"odin","name":"Replication (Post-compaction resync)","ops":1,"total_ms":0.002,"ns_per_op":1654,"ops_per_sec":604595,"bytes_used":23926}
-{"lang":"odin","name":"Hasher: SHA-1 (20B) HAMT put","ops":2000,"total_ms":0.835,"ns_per_op":418,"ops_per_sec":2394636,"bytes_used":230066}
-{"lang":"odin","name":"Hasher: SHA-256 (32B) HAMT put","ops":2000,"total_ms":0.563,"ns_per_op":282,"ops_per_sec":3552158,"bytes_used":254642}
-{"lang":"odin","name":"Bytes: Inline Short_Bytes read_bytes_buf","ops":10000,"total_ms":0.059,"ns_per_op":6,"ops_per_sec":170561146,"bytes_used":0}
-{"lang":"odin","name":"Bytes: External Bytes read_bytes_buf","ops":10000,"total_ms":0.088,"ns_per_op":9,"ops_per_sec":114096640,"bytes_used":0}
-{"lang":"odin","name":"Bytes: Tagged Short_Bytes read_bytes_buf","ops":10000,"total_ms":0.061,"ns_per_op":6,"ops_per_sec":164435821,"bytes_used":0}
-{"lang":"odin","name":"Bytes: Tagged External Bytes read_bytes_buf","ops":10000,"total_ms":0.085,"ns_per_op":8,"ops_per_sec":118079089,"bytes_used":0}
-{"lang":"odin","name":"Stream: Cursor_Writer (256 x 4KB = 1MB)","ops":256,"total_ms":0.219,"ns_per_op":856,"ops_per_sec":1168571,"bytes_used":1048680}
-{"lang":"odin","name":"Stream: Cursor_Reader (256 x 4KB = 1MB)","ops":256,"total_ms":0.017,"ns_per_op":67,"ops_per_sec":14941925,"bytes_used":0}
-{"lang":"odin","name":"Stream: Cursor_Reader random seek + 64B read","ops":2000,"total_ms":0.012,"ns_per_op":6,"ops_per_sec":172681748,"bytes_used":0}
-{"lang":"odin","name":"Stream: Cursor_Writer random seek + 16B patch","ops":2000,"total_ms":0.072,"ns_per_op":36,"ops_per_sec":27748873,"bytes_used":0}
-{"lang":"odin","name":"Path: 4-level nested cursor_write_path","ops":500,"total_ms":0.113,"ns_per_op":226,"ops_per_sec":4430974,"bytes_used":0}
-{"lang":"odin","name":"Path: 4-level nested cursor_read_path","ops":500,"total_ms":0.068,"ns_per_op":135,"ops_per_sec":7392404,"bytes_used":0}
-{"lang":"odin","name":"Cursor: Full KV-pair scan (read_kv_pair)","ops":2000,"total_ms":0.169,"ns_per_op":84,"ops_per_sec":11850658,"bytes_used":0}
-{"lang":"odin","name":"Backend: Core_Memory commits","ops":500,"total_ms":0.577,"ns_per_op":1153,"ops_per_sec":867282,"bytes_used":400376}
-{"lang":"odin","name":"Backend: Core_Buffered_File commits","ops":500,"total_ms":2.407,"ns_per_op":4813,"ops_per_sec":207769,"bytes_used":400376}
-{"lang":"odin","name":"Backend: Core_File (unbuffered) commits","ops":500,"total_ms":22.785,"ns_per_op":45570,"ops_per_sec":21944,"bytes_used":400376}
-{"lang":"odin","name":"Tx: Mid-tx database_freeze + CoW clone","ops":500,"total_ms":0.550,"ns_per_op":1100,"ops_per_sec":909367,"bytes_used":0}
-{"lang":"odin","name":"Tx: Aborted transaction rollback truncate","ops":500,"total_ms":0.340,"ns_per_op":680,"ops_per_sec":1471501,"bytes_used":0}
-{"lang":"odin","name":"DB: Re-open & trailer checksum verify","ops":5000,"total_ms":0.276,"ns_per_op":55,"ops_per_sec":18104201,"bytes_used":0}
+{"rank":1,"lang":"odin","name":"HAMT Hash_Map bulk put (1 tx)","ops":2000,"total_ms":0.919,"ns_per_op":459,"ops_per_sec":2177179,"bytes_used":219650}
+{"rank":2,"lang":"odin","name":"HAMT Hash_Map point lookup (with SHA-1)","ops":2000,"total_ms":0.188,"ns_per_op":94,"ops_per_sec":10647870,"bytes_used":0}
+{"rank":3,"lang":"odin","name":"HAMT Hash_Map lookup (pre-hashed digest)","ops":2000,"total_ms":0.117,"ns_per_op":59,"ops_per_sec":17063390,"bytes_used":0}
+{"rank":4,"lang":"odin","name":"HAMT CoW branched moment commits","ops":500,"total_ms":0.938,"ns_per_op":1876,"ops_per_sec":532931,"bytes_used":468656}
+{"rank":5,"lang":"odin","name":"HAMT Hash_Map remove & branch shortening","ops":1000,"total_ms":0.211,"ns_per_op":211,"ops_per_sec":4733145,"bytes_used":0}
+{"rank":6,"lang":"odin","name":"HAMT Hash_Map unordered iterator scan","ops":2000,"total_ms":0.077,"ns_per_op":38,"ops_per_sec":26043701,"bytes_used":0}
+{"rank":7,"lang":"odin","name":"HAMT Hash_Map in-place overwrite (1 tx)","ops":2000,"total_ms":0.590,"ns_per_op":295,"ops_per_sec":3391877,"bytes_used":0}
+{"rank":8,"lang":"odin","name":"HAMT Counted_Hash_Map bulk put (1 tx)","ops":2000,"total_ms":0.644,"ns_per_op":322,"ops_per_sec":3105272,"bytes_used":0}
+{"rank":9,"lang":"odin","name":"HAMT Counted_Hash_Map remove","ops":1000,"total_ms":0.254,"ns_per_op":254,"ops_per_sec":3929335,"bytes_used":0}
+{"rank":10,"lang":"odin","name":"HAMT deep suffix-collision put (depth 10+)","ops":500,"total_ms":0.220,"ns_per_op":439,"ops_per_sec":2277790,"bytes_used":0}
+{"rank":11,"lang":"odin","name":"HAMT deep suffix-collision branch collapse","ops":500,"total_ms":0.116,"ns_per_op":233,"ops_per_sec":4298967,"bytes_used":0}
+{"rank":12,"lang":"odin","name":"HAMT Counted_Hash_Set key-only put (1 tx)","ops":2000,"total_ms":0.893,"ns_per_op":446,"ops_per_sec":2239837,"bytes_used":0}
+{"rank":13,"lang":"odin","name":"HAMT Counted_Hash_Set membership check","ops":2000,"total_ms":0.177,"ns_per_op":89,"ops_per_sec":11270653,"bytes_used":0}
+{"rank":14,"lang":"odin","name":"Array_List (Radix Trie) append","ops":2000,"total_ms":0.207,"ns_per_op":103,"ops_per_sec":9665198,"bytes_used":19762}
+{"rank":15,"lang":"odin","name":"Array_List (Radix Trie) random get","ops":2000,"total_ms":0.095,"ns_per_op":48,"ops_per_sec":20942628,"bytes_used":0}
+{"rank":16,"lang":"odin","name":"Array_List (Radix Trie) iterator scan","ops":2000,"total_ms":0.025,"ns_per_op":12,"ops_per_sec":80687457,"bytes_used":0}
+{"rank":17,"lang":"odin","name":"Array_List (Radix Trie) in-place put","ops":2000,"total_ms":0.182,"ns_per_op":91,"ops_per_sec":10992575,"bytes_used":0}
+{"rank":18,"lang":"odin","name":"Array_List (Radix Trie) index-seek page(10)","ops":2000,"total_ms":0.696,"ns_per_op":348,"ops_per_sec":2874133,"bytes_used":0}
+{"rank":19,"lang":"odin","name":"Array_List (Radix Trie) depth-collapse slice","ops":500,"total_ms":0.444,"ns_per_op":889,"ops_per_sec":1125107,"bytes_used":0}
+{"rank":20,"lang":"odin","name":"Linked_Array_List (B-Tree) append","ops":2000,"total_ms":0.497,"ns_per_op":248,"ops_per_sec":4025927,"bytes_used":46410}
+{"rank":21,"lang":"odin","name":"Linked_Array_List (B-Tree) random get","ops":2000,"total_ms":0.106,"ns_per_op":53,"ops_per_sec":18923624,"bytes_used":0}
+{"rank":22,"lang":"odin","name":"Linked_Array_List (B-Tree) iterator scan","ops":2000,"total_ms":0.028,"ns_per_op":14,"ops_per_sec":70914442,"bytes_used":0}
+{"rank":23,"lang":"odin","name":"Linked_Array_List (B-Tree) middle insert","ops":500,"total_ms":0.140,"ns_per_op":279,"ops_per_sec":3581354,"bytes_used":0}
+{"rank":24,"lang":"odin","name":"Linked_Array_List (B-Tree) middle remove","ops":500,"total_ms":0.183,"ns_per_op":367,"ops_per_sec":2726817,"bytes_used":0}
+{"rank":25,"lang":"odin","name":"Linked_Array_List (B-Tree) concat + slice","ops":400,"total_ms":0.432,"ns_per_op":1080,"ops_per_sec":925778,"bytes_used":0}
+{"rank":26,"lang":"odin","name":"Linked_Array_List (B-Tree) in-place put","ops":2000,"total_ms":0.356,"ns_per_op":178,"ops_per_sec":5624851,"bytes_used":0}
+{"rank":27,"lang":"odin","name":"Linked_Array_List (B-Tree) index-seek page(10)","ops":2000,"total_ms":0.793,"ns_per_op":397,"ops_per_sec":2521416,"bytes_used":0}
+{"rank":28,"lang":"odin","name":"Sorted_Map (B+Tree) out-of-order put","ops":2000,"total_ms":1.163,"ns_per_op":581,"ops_per_sec":1720051,"bytes_used":118164}
+{"rank":29,"lang":"odin","name":"Sorted_Map (B+Tree) key lookup","ops":2000,"total_ms":0.355,"ns_per_op":177,"ops_per_sec":5640094,"bytes_used":0}
+{"rank":30,"lang":"odin","name":"Sorted_Map (B+Tree) rank query","ops":2000,"total_ms":0.255,"ns_per_op":128,"ops_per_sec":7841661,"bytes_used":0}
+{"rank":31,"lang":"odin","name":"Sorted_Map (B+Tree) ordered scan","ops":2000,"total_ms":0.025,"ns_per_op":13,"ops_per_sec":78715365,"bytes_used":0}
+{"rank":32,"lang":"odin","name":"Sorted_Map (B+Tree) lower-bound page(10)","ops":2000,"total_ms":1.079,"ns_per_op":539,"ops_per_sec":1854068,"bytes_used":0}
+{"rank":33,"lang":"odin","name":"Sorted_Map (B+Tree) remove & rebalance","ops":1000,"total_ms":0.245,"ns_per_op":245,"ops_per_sec":4085151,"bytes_used":0}
+{"rank":34,"lang":"odin","name":"Sorted_Map (B+Tree) get_index select","ops":2000,"total_ms":0.133,"ns_per_op":67,"ops_per_sec":14983518,"bytes_used":0}
+{"rank":35,"lang":"odin","name":"Sorted_Map (B+Tree) index-seek page(10)","ops":2000,"total_ms":0.824,"ns_per_op":412,"ops_per_sec":2426322,"bytes_used":0}
+{"rank":36,"lang":"odin","name":"Sorted_Map (B+Tree) in-place overwrite","ops":2000,"total_ms":0.751,"ns_per_op":375,"ops_per_sec":2664162,"bytes_used":0}
+{"rank":37,"lang":"odin","name":"Sorted_Set (B+Tree) key-only put (1 tx)","ops":2000,"total_ms":0.702,"ns_per_op":351,"ops_per_sec":2849393,"bytes_used":81908}
+{"rank":38,"lang":"odin","name":"Sorted_Set (B+Tree) contains lookup","ops":2000,"total_ms":0.281,"ns_per_op":141,"ops_per_sec":7109948,"bytes_used":0}
+{"rank":39,"lang":"odin","name":"Replication (genesis -> 200 moments)","ops":200,"total_ms":0.086,"ns_per_op":429,"ops_per_sec":2330731,"bytes_used":256896}
+{"rank":40,"lang":"odin","name":"Replication (incremental 1-moment delta)","ops":100,"total_ms":0.259,"ns_per_op":2585,"ops_per_sec":386798,"bytes_used":135880}
+{"rank":41,"lang":"odin","name":"Compaction (Memory_Offset_Map, 200 -> 1)","ops":1,"total_ms":0.008,"ns_per_op":7574,"ops_per_sec":132031,"bytes_used":1212}
+{"rank":42,"lang":"odin","name":"Compaction (File_Offset_Map, 200 -> 1)","ops":1,"total_ms":0.013,"ns_per_op":13456,"ops_per_sec":74316,"bytes_used":1212}
+{"rank":43,"lang":"odin","name":"Compaction (Heterogeneous DAG + dedup)","ops":1,"total_ms":0.112,"ns_per_op":112280,"ops_per_sec":8906,"bytes_used":23926}
+{"rank":44,"lang":"odin","name":"Replication (Post-compaction resync)","ops":1,"total_ms":0.002,"ns_per_op":1603,"ops_per_sec":623830,"bytes_used":23926}
+{"rank":45,"lang":"odin","name":"Hasher: SHA-1 (20B) HAMT put","ops":2000,"total_ms":0.480,"ns_per_op":240,"ops_per_sec":4163891,"bytes_used":230066}
+{"rank":46,"lang":"odin","name":"Hasher: SHA-256 (32B) HAMT put","ops":2000,"total_ms":0.477,"ns_per_op":239,"ops_per_sec":4189675,"bytes_used":254642}
+{"rank":47,"lang":"odin","name":"Bytes: Inline Short_Bytes read_bytes_buf","ops":10000,"total_ms":0.062,"ns_per_op":6,"ops_per_sec":161903991,"bytes_used":0}
+{"rank":48,"lang":"odin","name":"Bytes: External Bytes read_bytes_buf","ops":10000,"total_ms":0.084,"ns_per_op":8,"ops_per_sec":119350257,"bytes_used":0}
+{"rank":49,"lang":"odin","name":"Bytes: Tagged Short_Bytes read_bytes_buf","ops":10000,"total_ms":0.062,"ns_per_op":6,"ops_per_sec":161877782,"bytes_used":0}
+{"rank":50,"lang":"odin","name":"Bytes: Tagged External Bytes read_bytes_buf","ops":10000,"total_ms":0.101,"ns_per_op":10,"ops_per_sec":98873827,"bytes_used":0}
+{"rank":51,"lang":"odin","name":"Stream: Cursor_Writer (256 x 4KB = 1MB)","ops":256,"total_ms":0.213,"ns_per_op":832,"ops_per_sec":1201946,"bytes_used":1048680}
+{"rank":52,"lang":"odin","name":"Stream: Cursor_Reader (256 x 4KB = 1MB)","ops":256,"total_ms":0.017,"ns_per_op":66,"ops_per_sec":15237188,"bytes_used":0}
+{"rank":53,"lang":"odin","name":"Stream: Cursor_Reader random seek + 64B read","ops":2000,"total_ms":0.011,"ns_per_op":6,"ops_per_sec":175886026,"bytes_used":0}
+{"rank":54,"lang":"odin","name":"Stream: Cursor_Writer random seek + 16B patch","ops":2000,"total_ms":0.071,"ns_per_op":36,"ops_per_sec":28045377,"bytes_used":0}
+{"rank":55,"lang":"odin","name":"Path: 4-level nested cursor_write_path","ops":500,"total_ms":0.114,"ns_per_op":229,"ops_per_sec":4370859,"bytes_used":0}
+{"rank":56,"lang":"odin","name":"Path: 4-level nested cursor_read_path","ops":500,"total_ms":0.073,"ns_per_op":147,"ops_per_sec":6821562,"bytes_used":0}
+{"rank":57,"lang":"odin","name":"Cursor: Full KV-pair scan (read_kv_pair)","ops":2000,"total_ms":0.172,"ns_per_op":86,"ops_per_sec":11614874,"bytes_used":0}
+{"rank":58,"lang":"odin","name":"Backend: Core_Memory commits","ops":500,"total_ms":0.615,"ns_per_op":1230,"ops_per_sec":812966,"bytes_used":400376}
+{"rank":59,"lang":"odin","name":"Backend: Core_Buffered_File commits","ops":500,"total_ms":2.407,"ns_per_op":4813,"ops_per_sec":207752,"bytes_used":400376}
+{"rank":60,"lang":"odin","name":"Backend: Core_File (unbuffered) commits","ops":500,"total_ms":23.127,"ns_per_op":46253,"ops_per_sec":21620,"bytes_used":400376}
+{"rank":61,"lang":"odin","name":"Tx: Mid-tx database_freeze + CoW clone","ops":500,"total_ms":0.596,"ns_per_op":1191,"ops_per_sec":839412,"bytes_used":0}
+{"rank":62,"lang":"odin","name":"Tx: Aborted transaction rollback truncate","ops":500,"total_ms":0.365,"ns_per_op":729,"ops_per_sec":1370979,"bytes_used":0}
+{"rank":63,"lang":"odin","name":"DB: Re-open & trailer checksum verify","ops":5000,"total_ms":0.295,"ns_per_op":59,"ops_per_sec":16922020,"bytes_used":0}

@@ -1,63 +1,63 @@
-{"lang":"zig","name":"HAMT Hash_Map bulk put (1 tx)","ops":2000,"total_ms":1.587,"ns_per_op":794,"ops_per_sec":1260157,"bytes_used":219650}
-{"lang":"zig","name":"HAMT Hash_Map point lookup (with SHA-1)","ops":2000,"total_ms":0.530,"ns_per_op":265,"ops_per_sec":3773115,"bytes_used":0}
-{"lang":"zig","name":"HAMT Hash_Map lookup (pre-hashed digest)","ops":2000,"total_ms":0.360,"ns_per_op":180,"ops_per_sec":5553751,"bytes_used":0}
-{"lang":"zig","name":"HAMT CoW branched moment commits","ops":500,"total_ms":1.266,"ns_per_op":2533,"ops_per_sec":394848,"bytes_used":468656}
-{"lang":"zig","name":"HAMT Hash_Map remove & branch shortening","ops":1000,"total_ms":1.020,"ns_per_op":1020,"ops_per_sec":980183,"bytes_used":0}
-{"lang":"zig","name":"HAMT Hash_Map unordered iterator scan","ops":2000,"total_ms":0.314,"ns_per_op":157,"ops_per_sec":6366163,"bytes_used":0}
-{"lang":"zig","name":"HAMT Hash_Map in-place overwrite (1 tx)","ops":2000,"total_ms":1.413,"ns_per_op":707,"ops_per_sec":1415372,"bytes_used":0}
-{"lang":"zig","name":"HAMT Counted_Hash_Map bulk put (1 tx)","ops":2000,"total_ms":1.558,"ns_per_op":779,"ops_per_sec":1283780,"bytes_used":0}
-{"lang":"zig","name":"HAMT Counted_Hash_Map remove","ops":1000,"total_ms":1.070,"ns_per_op":1070,"ops_per_sec":934455,"bytes_used":0}
-{"lang":"zig","name":"HAMT deep suffix-collision put (depth 10+)","ops":500,"total_ms":0.621,"ns_per_op":1243,"ops_per_sec":804573,"bytes_used":0}
-{"lang":"zig","name":"HAMT deep suffix-collision branch collapse","ops":500,"total_ms":1.447,"ns_per_op":2893,"ops_per_sec":345650,"bytes_used":0}
-{"lang":"zig","name":"HAMT Counted_Hash_Set key-only put (1 tx)","ops":2000,"total_ms":1.101,"ns_per_op":550,"ops_per_sec":1817143,"bytes_used":0}
-{"lang":"zig","name":"HAMT Counted_Hash_Set membership check","ops":2000,"total_ms":0.563,"ns_per_op":282,"ops_per_sec":3550701,"bytes_used":0}
-{"lang":"zig","name":"Array_List (Radix Trie) append","ops":2000,"total_ms":0.473,"ns_per_op":236,"ops_per_sec":4232097,"bytes_used":19762}
-{"lang":"zig","name":"Array_List (Radix Trie) random get","ops":2000,"total_ms":0.260,"ns_per_op":130,"ops_per_sec":7678133,"bytes_used":0}
-{"lang":"zig","name":"Array_List (Radix Trie) iterator scan","ops":2000,"total_ms":0.076,"ns_per_op":38,"ops_per_sec":26256022,"bytes_used":0}
-{"lang":"zig","name":"Array_List (Radix Trie) in-place put","ops":2000,"total_ms":0.426,"ns_per_op":213,"ops_per_sec":4695596,"bytes_used":0}
-{"lang":"zig","name":"Array_List (Radix Trie) index-seek page(10)","ops":2000,"total_ms":3.074,"ns_per_op":1537,"ops_per_sec":650601,"bytes_used":0}
-{"lang":"zig","name":"Array_List (Radix Trie) depth-collapse slice","ops":500,"total_ms":0.737,"ns_per_op":1473,"ops_per_sec":678864,"bytes_used":0}
-{"lang":"zig","name":"Linked_Array_List (B-Tree) append","ops":2000,"total_ms":5.823,"ns_per_op":2911,"ops_per_sec":343473,"bytes_used":46410}
-{"lang":"zig","name":"Linked_Array_List (B-Tree) random get","ops":2000,"total_ms":4.383,"ns_per_op":2191,"ops_per_sec":456354,"bytes_used":0}
-{"lang":"zig","name":"Linked_Array_List (B-Tree) iterator scan","ops":2000,"total_ms":0.126,"ns_per_op":63,"ops_per_sec":15898757,"bytes_used":0}
-{"lang":"zig","name":"Linked_Array_List (B-Tree) middle insert","ops":500,"total_ms":1.797,"ns_per_op":3593,"ops_per_sec":278309,"bytes_used":0}
-{"lang":"zig","name":"Linked_Array_List (B-Tree) middle remove","ops":500,"total_ms":1.811,"ns_per_op":3622,"ops_per_sec":276114,"bytes_used":0}
-{"lang":"zig","name":"Linked_Array_List (B-Tree) concat + slice","ops":400,"total_ms":13.804,"ns_per_op":34510,"ops_per_sec":28977,"bytes_used":0}
-{"lang":"zig","name":"Linked_Array_List (B-Tree) in-place put","ops":2000,"total_ms":4.657,"ns_per_op":2328,"ops_per_sec":429468,"bytes_used":0}
-{"lang":"zig","name":"Linked_Array_List (B-Tree) index-seek page(10)","ops":2000,"total_ms":6.795,"ns_per_op":3398,"ops_per_sec":294324,"bytes_used":0}
-{"lang":"zig","name":"Sorted_Map (B+Tree) out-of-order put","ops":2000,"total_ms":8.847,"ns_per_op":4423,"ops_per_sec":226078,"bytes_used":118164}
-{"lang":"zig","name":"Sorted_Map (B+Tree) key lookup","ops":2000,"total_ms":8.430,"ns_per_op":4215,"ops_per_sec":237237,"bytes_used":0}
-{"lang":"zig","name":"Sorted_Map (B+Tree) rank query","ops":2000,"total_ms":8.228,"ns_per_op":4114,"ops_per_sec":243080,"bytes_used":0}
-{"lang":"zig","name":"Sorted_Map (B+Tree) ordered scan","ops":2000,"total_ms":0.106,"ns_per_op":53,"ops_per_sec":18928818,"bytes_used":0}
-{"lang":"zig","name":"Sorted_Map (B+Tree) lower-bound page(10)","ops":2000,"total_ms":10.787,"ns_per_op":5394,"ops_per_sec":185406,"bytes_used":0}
-{"lang":"zig","name":"Sorted_Map (B+Tree) remove & rebalance","ops":1000,"total_ms":5.962,"ns_per_op":5962,"ops_per_sec":167739,"bytes_used":0}
-{"lang":"zig","name":"Sorted_Map (B+Tree) get_index select","ops":2000,"total_ms":6.454,"ns_per_op":3227,"ops_per_sec":309893,"bytes_used":0}
-{"lang":"zig","name":"Sorted_Map (B+Tree) index-seek page(10)","ops":2000,"total_ms":8.648,"ns_per_op":4324,"ops_per_sec":231276,"bytes_used":0}
-{"lang":"zig","name":"Sorted_Map (B+Tree) in-place overwrite","ops":2000,"total_ms":9.507,"ns_per_op":4754,"ops_per_sec":210362,"bytes_used":0}
-{"lang":"zig","name":"Sorted_Set (B+Tree) key-only put (1 tx)","ops":2000,"total_ms":8.408,"ns_per_op":4204,"ops_per_sec":237865,"bytes_used":81908}
-{"lang":"zig","name":"Sorted_Set (B+Tree) contains lookup","ops":2000,"total_ms":7.881,"ns_per_op":3940,"ops_per_sec":253785,"bytes_used":0}
-{"lang":"zig","name":"Replication (genesis -> 200 moments)","ops":200,"total_ms":0.224,"ns_per_op":1118,"ops_per_sec":894574,"bytes_used":256896}
-{"lang":"zig","name":"Replication (incremental 1-moment delta)","ops":100,"total_ms":0.187,"ns_per_op":1874,"ops_per_sec":533541,"bytes_used":135880}
-{"lang":"zig","name":"Compaction (Memory_Offset_Map, 200 -> 1)","ops":1,"total_ms":0.010,"ns_per_op":10189,"ops_per_sec":98145,"bytes_used":1212}
-{"lang":"zig","name":"Compaction (File_Offset_Map, 200 -> 1)","ops":1,"total_ms":0.019,"ns_per_op":18916,"ops_per_sec":52865,"bytes_used":1212}
-{"lang":"zig","name":"Compaction (Heterogeneous DAG + dedup)","ops":1,"total_ms":0.163,"ns_per_op":163488,"ops_per_sec":6117,"bytes_used":23926}
-{"lang":"zig","name":"Replication (Post-compaction resync)","ops":1,"total_ms":0.002,"ns_per_op":1793,"ops_per_sec":557724,"bytes_used":23926}
-{"lang":"zig","name":"Hasher: SHA-1 (20B) HAMT put","ops":2000,"total_ms":1.594,"ns_per_op":797,"ops_per_sec":1254503,"bytes_used":230066}
-{"lang":"zig","name":"Hasher: SHA-256 (32B) HAMT put","ops":2000,"total_ms":1.805,"ns_per_op":903,"ops_per_sec":1107865,"bytes_used":254642}
-{"lang":"zig","name":"Bytes: Inline Short_Bytes read_bytes_buf","ops":10000,"total_ms":0.080,"ns_per_op":8,"ops_per_sec":125046893,"bytes_used":0}
-{"lang":"zig","name":"Bytes: External Bytes read_bytes_buf","ops":10000,"total_ms":0.387,"ns_per_op":39,"ops_per_sec":25822578,"bytes_used":0}
-{"lang":"zig","name":"Bytes: Tagged Short_Bytes read_bytes_buf","ops":10000,"total_ms":0.067,"ns_per_op":7,"ops_per_sec":150204278,"bytes_used":0}
-{"lang":"zig","name":"Bytes: Tagged External Bytes read_bytes_buf","ops":10000,"total_ms":0.481,"ns_per_op":48,"ops_per_sec":20787687,"bytes_used":0}
-{"lang":"zig","name":"Stream: Cursor_Writer (256 x 4KB = 1MB)","ops":256,"total_ms":0.460,"ns_per_op":1797,"ops_per_sec":556360,"bytes_used":1048680}
-{"lang":"zig","name":"Stream: Cursor_Reader (256 x 4KB = 1MB)","ops":256,"total_ms":0.022,"ns_per_op":87,"ops_per_sec":11437762,"bytes_used":0}
-{"lang":"zig","name":"Stream: Cursor_Reader random seek + 64B read","ops":2000,"total_ms":0.056,"ns_per_op":28,"ops_per_sec":35916960,"bytes_used":0}
-{"lang":"zig","name":"Stream: Cursor_Writer random seek + 16B patch","ops":2000,"total_ms":0.057,"ns_per_op":29,"ops_per_sec":34930227,"bytes_used":0}
-{"lang":"zig","name":"Path: 4-level nested cursor_write_path","ops":500,"total_ms":0.768,"ns_per_op":1537,"ops_per_sec":650666,"bytes_used":0}
-{"lang":"zig","name":"Path: 4-level nested cursor_read_path","ops":500,"total_ms":0.649,"ns_per_op":1298,"ops_per_sec":770702,"bytes_used":0}
-{"lang":"zig","name":"Cursor: Full KV-pair scan (read_kv_pair)","ops":2000,"total_ms":0.526,"ns_per_op":263,"ops_per_sec":3801999,"bytes_used":0}
-{"lang":"zig","name":"Backend: Core_Memory commits","ops":500,"total_ms":1.319,"ns_per_op":2638,"ops_per_sec":379038,"bytes_used":400376}
-{"lang":"zig","name":"Backend: Core_Buffered_File commits","ops":500,"total_ms":9.274,"ns_per_op":18548,"ops_per_sec":53913,"bytes_used":400376}
-{"lang":"zig","name":"Backend: Core_File (unbuffered) commits","ops":500,"total_ms":24.118,"ns_per_op":48235,"ops_per_sec":20732,"bytes_used":400376}
-{"lang":"zig","name":"Tx: Mid-tx database_freeze + CoW clone","ops":500,"total_ms":0.933,"ns_per_op":1865,"ops_per_sec":536053,"bytes_used":0}
-{"lang":"zig","name":"Tx: Aborted transaction rollback truncate","ops":500,"total_ms":0.976,"ns_per_op":1952,"ops_per_sec":512393,"bytes_used":0}
-{"lang":"zig","name":"DB: Re-open & trailer checksum verify","ops":5000,"total_ms":1.214,"ns_per_op":243,"ops_per_sec":4118301,"bytes_used":0}
+{"rank":1,"lang":"zig","name":"HAMT Hash_Map bulk put (1 tx)","ops":2000,"total_ms":2.142,"ns_per_op":1071,"ops_per_sec":933738,"bytes_used":219650}
+{"rank":2,"lang":"zig","name":"HAMT Hash_Map point lookup (with SHA-1)","ops":2000,"total_ms":0.534,"ns_per_op":267,"ops_per_sec":3746097,"bytes_used":0}
+{"rank":3,"lang":"zig","name":"HAMT Hash_Map lookup (pre-hashed digest)","ops":2000,"total_ms":0.374,"ns_per_op":187,"ops_per_sec":5352030,"bytes_used":0}
+{"rank":4,"lang":"zig","name":"HAMT CoW branched moment commits","ops":500,"total_ms":1.140,"ns_per_op":2280,"ops_per_sec":438545,"bytes_used":468656}
+{"rank":5,"lang":"zig","name":"HAMT Hash_Map remove & branch shortening","ops":1000,"total_ms":1.049,"ns_per_op":1049,"ops_per_sec":953022,"bytes_used":0}
+{"rank":6,"lang":"zig","name":"HAMT Hash_Map unordered iterator scan","ops":2000,"total_ms":0.512,"ns_per_op":256,"ops_per_sec":3904199,"bytes_used":0}
+{"rank":7,"lang":"zig","name":"HAMT Hash_Map in-place overwrite (1 tx)","ops":2000,"total_ms":1.693,"ns_per_op":847,"ops_per_sec":1180992,"bytes_used":0}
+{"rank":8,"lang":"zig","name":"HAMT Counted_Hash_Map bulk put (1 tx)","ops":2000,"total_ms":2.001,"ns_per_op":1000,"ops_per_sec":999542,"bytes_used":0}
+{"rank":9,"lang":"zig","name":"HAMT Counted_Hash_Map remove","ops":1000,"total_ms":0.982,"ns_per_op":982,"ops_per_sec":1018550,"bytes_used":0}
+{"rank":10,"lang":"zig","name":"HAMT deep suffix-collision put (depth 10+)","ops":500,"total_ms":0.618,"ns_per_op":1236,"ops_per_sec":809170,"bytes_used":0}
+{"rank":11,"lang":"zig","name":"HAMT deep suffix-collision branch collapse","ops":500,"total_ms":1.350,"ns_per_op":2700,"ops_per_sec":370374,"bytes_used":0}
+{"rank":12,"lang":"zig","name":"HAMT Counted_Hash_Set key-only put (1 tx)","ops":2000,"total_ms":1.041,"ns_per_op":521,"ops_per_sec":1920621,"bytes_used":0}
+{"rank":13,"lang":"zig","name":"HAMT Counted_Hash_Set membership check","ops":2000,"total_ms":0.520,"ns_per_op":260,"ops_per_sec":3849759,"bytes_used":0}
+{"rank":14,"lang":"zig","name":"Array_List (Radix Trie) append","ops":2000,"total_ms":0.440,"ns_per_op":220,"ops_per_sec":4544174,"bytes_used":19762}
+{"rank":15,"lang":"zig","name":"Array_List (Radix Trie) random get","ops":2000,"total_ms":0.257,"ns_per_op":129,"ops_per_sec":7778439,"bytes_used":0}
+{"rank":16,"lang":"zig","name":"Array_List (Radix Trie) iterator scan","ops":2000,"total_ms":0.078,"ns_per_op":39,"ops_per_sec":25602949,"bytes_used":0}
+{"rank":17,"lang":"zig","name":"Array_List (Radix Trie) in-place put","ops":2000,"total_ms":0.387,"ns_per_op":194,"ops_per_sec":5164689,"bytes_used":0}
+{"rank":18,"lang":"zig","name":"Array_List (Radix Trie) index-seek page(10)","ops":2000,"total_ms":2.908,"ns_per_op":1454,"ops_per_sec":687778,"bytes_used":0}
+{"rank":19,"lang":"zig","name":"Array_List (Radix Trie) depth-collapse slice","ops":500,"total_ms":0.655,"ns_per_op":1310,"ops_per_sec":763257,"bytes_used":0}
+{"rank":20,"lang":"zig","name":"Linked_Array_List (B-Tree) append","ops":2000,"total_ms":5.505,"ns_per_op":2753,"ops_per_sec":363305,"bytes_used":46410}
+{"rank":21,"lang":"zig","name":"Linked_Array_List (B-Tree) random get","ops":2000,"total_ms":4.285,"ns_per_op":2142,"ops_per_sec":466759,"bytes_used":0}
+{"rank":22,"lang":"zig","name":"Linked_Array_List (B-Tree) iterator scan","ops":2000,"total_ms":0.134,"ns_per_op":67,"ops_per_sec":14888596,"bytes_used":0}
+{"rank":23,"lang":"zig","name":"Linked_Array_List (B-Tree) middle insert","ops":500,"total_ms":1.759,"ns_per_op":3517,"ops_per_sec":284299,"bytes_used":0}
+{"rank":24,"lang":"zig","name":"Linked_Array_List (B-Tree) middle remove","ops":500,"total_ms":1.785,"ns_per_op":3570,"ops_per_sec":280118,"bytes_used":0}
+{"rank":25,"lang":"zig","name":"Linked_Array_List (B-Tree) concat + slice","ops":400,"total_ms":13.719,"ns_per_op":34298,"ops_per_sec":29157,"bytes_used":0}
+{"rank":26,"lang":"zig","name":"Linked_Array_List (B-Tree) in-place put","ops":2000,"total_ms":4.796,"ns_per_op":2398,"ops_per_sec":417040,"bytes_used":0}
+{"rank":27,"lang":"zig","name":"Linked_Array_List (B-Tree) index-seek page(10)","ops":2000,"total_ms":7.009,"ns_per_op":3505,"ops_per_sec":285338,"bytes_used":0}
+{"rank":28,"lang":"zig","name":"Sorted_Map (B+Tree) out-of-order put","ops":2000,"total_ms":10.075,"ns_per_op":5037,"ops_per_sec":198518,"bytes_used":118164}
+{"rank":29,"lang":"zig","name":"Sorted_Map (B+Tree) key lookup","ops":2000,"total_ms":9.076,"ns_per_op":4538,"ops_per_sec":220354,"bytes_used":0}
+{"rank":30,"lang":"zig","name":"Sorted_Map (B+Tree) rank query","ops":2000,"total_ms":8.439,"ns_per_op":4220,"ops_per_sec":236990,"bytes_used":0}
+{"rank":31,"lang":"zig","name":"Sorted_Map (B+Tree) ordered scan","ops":2000,"total_ms":0.101,"ns_per_op":51,"ops_per_sec":19735544,"bytes_used":0}
+{"rank":32,"lang":"zig","name":"Sorted_Map (B+Tree) lower-bound page(10)","ops":2000,"total_ms":10.862,"ns_per_op":5431,"ops_per_sec":184135,"bytes_used":0}
+{"rank":33,"lang":"zig","name":"Sorted_Map (B+Tree) remove & rebalance","ops":1000,"total_ms":5.923,"ns_per_op":5923,"ops_per_sec":168837,"bytes_used":0}
+{"rank":34,"lang":"zig","name":"Sorted_Map (B+Tree) get_index select","ops":2000,"total_ms":6.398,"ns_per_op":3199,"ops_per_sec":312602,"bytes_used":0}
+{"rank":35,"lang":"zig","name":"Sorted_Map (B+Tree) index-seek page(10)","ops":2000,"total_ms":8.531,"ns_per_op":4265,"ops_per_sec":234452,"bytes_used":0}
+{"rank":36,"lang":"zig","name":"Sorted_Map (B+Tree) in-place overwrite","ops":2000,"total_ms":9.600,"ns_per_op":4800,"ops_per_sec":208340,"bytes_used":0}
+{"rank":37,"lang":"zig","name":"Sorted_Set (B+Tree) key-only put (1 tx)","ops":2000,"total_ms":8.484,"ns_per_op":4242,"ops_per_sec":235746,"bytes_used":81908}
+{"rank":38,"lang":"zig","name":"Sorted_Set (B+Tree) contains lookup","ops":2000,"total_ms":8.184,"ns_per_op":4092,"ops_per_sec":244392,"bytes_used":0}
+{"rank":39,"lang":"zig","name":"Replication (genesis -> 200 moments)","ops":200,"total_ms":0.226,"ns_per_op":1131,"ops_per_sec":884392,"bytes_used":256896}
+{"rank":40,"lang":"zig","name":"Replication (incremental 1-moment delta)","ops":100,"total_ms":0.179,"ns_per_op":1791,"ops_per_sec":558397,"bytes_used":135880}
+{"rank":41,"lang":"zig","name":"Compaction (Memory_Offset_Map, 200 -> 1)","ops":1,"total_ms":0.012,"ns_per_op":11752,"ops_per_sec":85092,"bytes_used":1212}
+{"rank":42,"lang":"zig","name":"Compaction (File_Offset_Map, 200 -> 1)","ops":1,"total_ms":0.019,"ns_per_op":18665,"ops_per_sec":53576,"bytes_used":1212}
+{"rank":43,"lang":"zig","name":"Compaction (Heterogeneous DAG + dedup)","ops":1,"total_ms":0.182,"ns_per_op":181550,"ops_per_sec":5508,"bytes_used":23926}
+{"rank":44,"lang":"zig","name":"Replication (Post-compaction resync)","ops":1,"total_ms":0.002,"ns_per_op":1764,"ops_per_sec":566893,"bytes_used":23926}
+{"rank":45,"lang":"zig","name":"Hasher: SHA-1 (20B) HAMT put","ops":2000,"total_ms":1.615,"ns_per_op":807,"ops_per_sec":1238518,"bytes_used":230066}
+{"rank":46,"lang":"zig","name":"Hasher: SHA-256 (32B) HAMT put","ops":2000,"total_ms":1.781,"ns_per_op":890,"ops_per_sec":1123265,"bytes_used":254642}
+{"rank":47,"lang":"zig","name":"Bytes: Inline Short_Bytes read_bytes_buf","ops":10000,"total_ms":0.071,"ns_per_op":7,"ops_per_sec":140502719,"bytes_used":0}
+{"rank":48,"lang":"zig","name":"Bytes: External Bytes read_bytes_buf","ops":10000,"total_ms":0.361,"ns_per_op":36,"ops_per_sec":27683500,"bytes_used":0}
+{"rank":49,"lang":"zig","name":"Bytes: Tagged Short_Bytes read_bytes_buf","ops":10000,"total_ms":0.070,"ns_per_op":7,"ops_per_sec":142793906,"bytes_used":0}
+{"rank":50,"lang":"zig","name":"Bytes: Tagged External Bytes read_bytes_buf","ops":10000,"total_ms":0.493,"ns_per_op":49,"ops_per_sec":20276038,"bytes_used":0}
+{"rank":51,"lang":"zig","name":"Stream: Cursor_Writer (256 x 4KB = 1MB)","ops":256,"total_ms":0.606,"ns_per_op":2366,"ops_per_sec":422593,"bytes_used":1048680}
+{"rank":52,"lang":"zig","name":"Stream: Cursor_Reader (256 x 4KB = 1MB)","ops":256,"total_ms":0.045,"ns_per_op":174,"ops_per_sec":5748417,"bytes_used":0}
+{"rank":53,"lang":"zig","name":"Stream: Cursor_Reader random seek + 64B read","ops":2000,"total_ms":0.057,"ns_per_op":28,"ops_per_sec":35395098,"bytes_used":0}
+{"rank":54,"lang":"zig","name":"Stream: Cursor_Writer random seek + 16B patch","ops":2000,"total_ms":0.061,"ns_per_op":30,"ops_per_sec":32849353,"bytes_used":0}
+{"rank":55,"lang":"zig","name":"Path: 4-level nested cursor_write_path","ops":500,"total_ms":0.786,"ns_per_op":1571,"ops_per_sec":636440,"bytes_used":0}
+{"rank":56,"lang":"zig","name":"Path: 4-level nested cursor_read_path","ops":500,"total_ms":0.641,"ns_per_op":1283,"ops_per_sec":779665,"bytes_used":0}
+{"rank":57,"lang":"zig","name":"Cursor: Full KV-pair scan (read_kv_pair)","ops":2000,"total_ms":0.497,"ns_per_op":248,"ops_per_sec":4026413,"bytes_used":0}
+{"rank":58,"lang":"zig","name":"Backend: Core_Memory commits","ops":500,"total_ms":1.278,"ns_per_op":2555,"ops_per_sec":391337,"bytes_used":400376}
+{"rank":59,"lang":"zig","name":"Backend: Core_Buffered_File commits","ops":500,"total_ms":10.585,"ns_per_op":21171,"ops_per_sec":47235,"bytes_used":400376}
+{"rank":60,"lang":"zig","name":"Backend: Core_File (unbuffered) commits","ops":500,"total_ms":29.124,"ns_per_op":58248,"ops_per_sec":17168,"bytes_used":400376}
+{"rank":61,"lang":"zig","name":"Tx: Mid-tx database_freeze + CoW clone","ops":500,"total_ms":0.919,"ns_per_op":1838,"ops_per_sec":544158,"bytes_used":0}
+{"rank":62,"lang":"zig","name":"Tx: Aborted transaction rollback truncate","ops":500,"total_ms":0.974,"ns_per_op":1948,"ops_per_sec":513456,"bytes_used":0}
+{"rank":63,"lang":"zig","name":"DB: Re-open & trailer checksum verify","ops":5000,"total_ms":1.186,"ns_per_op":237,"ops_per_sec":4217349,"bytes_used":0}

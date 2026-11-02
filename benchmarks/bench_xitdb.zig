@@ -12,6 +12,7 @@ const BenchResult = struct {
 };
 
 var g_jsonl_writer: ?*std.Io.Writer = null;
+var g_bench_rank: usize = 0;
 
 fn printHeader(stdout: *std.Io.Writer) !void {
     try stdout.writeAll("========================================================================================================\n");
@@ -20,6 +21,7 @@ fn printHeader(stdout: *std.Io.Writer) !void {
 }
 
 fn printResult(stdout: *std.Io.Writer, r: BenchResult) !void {
+    g_bench_rank += 1;
     const total_ns: f64 = @floatFromInt(@max(r.elapsed_ns, 0));
     const total_ms = total_ns / 1e6;
     const ops_f: f64 = @floatFromInt(@max(r.ops, 1));
@@ -41,8 +43,8 @@ fn printResult(stdout: *std.Io.Writer, r: BenchResult) !void {
 
     if (g_jsonl_writer) |jw| {
         try jw.print(
-            "{{\"lang\":\"zig\",\"name\":\"{s}\",\"ops\":{d},\"total_ms\":{d:.3},\"ns_per_op\":{d:.0},\"ops_per_sec\":{d:.0},\"bytes_used\":{d}}}\n",
-            .{ r.name, r.ops, total_ms, ns_per_op, ops_per_sec, r.bytes_used },
+            "{{\"rank\":{d},\"lang\":\"zig\",\"name\":\"{s}\",\"ops\":{d},\"total_ms\":{d:.3},\"ns_per_op\":{d:.0},\"ops_per_sec\":{d:.0},\"bytes_used\":{d}}}\n",
+            .{ g_bench_rank, r.name, r.ops, total_ms, ns_per_op, ops_per_sec, r.bytes_used },
         );
         try jw.flush();
     }
