@@ -7,7 +7,7 @@ import "core:encoding/endian"
 
 read_btree_node :: proc(db: ^Database, ptr: i64) -> (res: BTree_Node, err: Error) {
 	core_seek_to(db.core, ptr) or_return
-	header_bytes: [BTREE_NODE_HEADER_SIZE]u8
+	header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
 	core_read_exact(db.core, header_bytes[:]) or_return
 	kind_int := header_bytes[0]
 	if kind_int > u8(BTree_Node_Kind.Branch) {
@@ -21,20 +21,16 @@ read_btree_node :: proc(db: ^Database, ptr: i64) -> (res: BTree_Node, err: Error
 	node := BTree_Node{kind = kind, num = num}
 	switch kind {
 	case .Leaf:
-		body: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8
+		body: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8 = ---
 		core_read_exact(db.core, body[:num * SLOT_LENGTH]) or_return
 		for i in 0 ..< num {
-			sb: [SLOT_LENGTH]u8
-			copy(sb[:], body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH])
-			node.values[i] = slot_from_bytes_raw(sb)
+			node.values[i] = slot_from_slice_raw(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH])
 		}
 	case .Branch:
-		body: [(SLOT_LENGTH + 8) * BTREE_SLOT_COUNT]u8
+		body: [(SLOT_LENGTH + 8) * BTREE_SLOT_COUNT]u8 = ---
 		core_read_exact(db.core, body[:SLOT_LENGTH * BTREE_SLOT_COUNT + num * 8]) or_return
 		for i in 0 ..< num {
-			sb: [SLOT_LENGTH]u8
-			copy(sb[:], body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH])
-			node.children[i] = slot_from_bytes_raw(sb)
+			node.children[i] = slot_from_slice_raw(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH])
 		}
 		counts_offset := SLOT_LENGTH * BTREE_SLOT_COUNT
 		for i in 0 ..< num {
@@ -108,8 +104,47 @@ read_btree_slot :: proc(db: ^Database, root_ptr, rank: i64) -> (res: Slot_Pointe
 	node_ptr := root_ptr
 	rem := rank
 	for {
+		if hdr_slice, in_mem, slice_err := core_slice_at(db.core, node_ptr, BTREE_NODE_HEADER_SIZE); in_mem {
+			if slice_err != nil {
+				return {}, slice_err
+			}
+			kind_int := hdr_slice[0]
+			if kind_int > u8(BTree_Node_Kind.Branch) {
+				return {}, .Invalid_BTree_Node_Kind
+			}
+			num := int(hdr_slice[1])
+			if num > BTREE_SLOT_COUNT {
+				return {}, .Invalid_BTree_Node
+			}
+			if BTree_Node_Kind(kind_int) == .Leaf {
+				position := node_ptr + BTREE_NODE_HEADER_SIZE + rem * SLOT_LENGTH
+				slot_slice, _, s_err := core_slice_at(db.core, position, SLOT_LENGTH)
+				if s_err != nil {
+					return {}, s_err
+				}
+				return Slot_Pointer{position = position, slot = slot_from_slice_raw(slot_slice)}, nil
+			}
+			body_len := SLOT_LENGTH * BTREE_SLOT_COUNT + num * 8
+			body_slice, _, b_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, body_len)
+			if b_err != nil {
+				return {}, b_err
+			}
+			counts_off := SLOT_LENGTH * BTREE_SLOT_COUNT
+			i := 0
+			for i + 1 < num {
+				cnt := i64(endian.unchecked_get_u64be(body_slice[counts_off + i * 8 : counts_off + (i + 1) * 8]))
+				if rem < cnt {
+					break
+				}
+				rem -= cnt
+				i += 1
+			}
+			node_ptr = slot_from_slice_raw(body_slice[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]).value
+			continue
+		}
+
 		core_seek_to(db.core, node_ptr) or_return
-		header_bytes: [BTREE_NODE_HEADER_SIZE]u8
+		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
 		core_read_exact(db.core, header_bytes[:]) or_return
 		kind_int := header_bytes[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
@@ -127,7 +162,7 @@ read_btree_slot :: proc(db: ^Database, root_ptr, rank: i64) -> (res: Slot_Pointe
 		}
 		counts_pos := node_ptr + BTREE_NODE_HEADER_SIZE + SLOT_LENGTH * BTREE_SLOT_COUNT
 		core_seek_to(db.core, counts_pos) or_return
-		counts_buf: [8 * BTREE_SLOT_COUNT]u8
+		counts_buf: [8 * BTREE_SLOT_COUNT]u8 = ---
 		core_read_exact(db.core, counts_buf[:num * 8]) or_return
 		i := 0
 		for i + 1 < num {
@@ -992,7 +1027,7 @@ btree_split :: proc(db: ^Database, root_ptr, rank: i64) -> (res: BTree_Split_Res
 
 read_sorted_node :: proc(db: ^Database, ptr: i64) -> (res: Sorted_Node, err: Error) {
 	core_seek_to(db.core, ptr) or_return
-	header_bytes: [BTREE_NODE_HEADER_SIZE]u8
+	header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
 	core_read_exact(db.core, header_bytes[:]) or_return
 	kind_int := header_bytes[0]
 	if kind_int > u8(BTree_Node_Kind.Branch) {
@@ -1006,26 +1041,20 @@ read_sorted_node :: proc(db: ^Database, ptr: i64) -> (res: Sorted_Node, err: Err
 	node := Sorted_Node{kind = kind, num = num}
 	switch kind {
 	case .Leaf:
-		body: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8
+		body: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8 = ---
 		core_read_exact(db.core, body[:num * SLOT_LENGTH]) or_return
 		for i in 0 ..< num {
-			sb: [SLOT_LENGTH]u8
-			copy(sb[:], body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH])
-			node.entries[i] = slot_from_bytes_raw(sb)
+			node.entries[i] = slot_from_slice_raw(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH])
 		}
 	case .Branch:
-		body: [(SLOT_LENGTH * 2 + 8) * BTREE_SLOT_COUNT]u8
+		body: [(SLOT_LENGTH * 2 + 8) * BTREE_SLOT_COUNT]u8 = ---
 		core_read_exact(db.core, body[:SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + num * 8]) or_return
 		for i in 0 ..< num {
-			sb: [SLOT_LENGTH]u8
-			copy(sb[:], body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH])
-			node.children[i] = slot_from_bytes_raw(sb)
+			node.children[i] = slot_from_slice_raw(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH])
 		}
 		sep_offset := SLOT_LENGTH * BTREE_SLOT_COUNT
 		for i in 0 ..< num {
-			sb: [SLOT_LENGTH]u8
-			copy(sb[:], body[sep_offset + i * SLOT_LENGTH : sep_offset + i * SLOT_LENGTH + SLOT_LENGTH])
-			node.separators[i] = slot_from_bytes_raw(sb)
+			node.separators[i] = slot_from_slice_raw(body[sep_offset + i * SLOT_LENGTH : sep_offset + i * SLOT_LENGTH + SLOT_LENGTH])
 		}
 		counts_offset := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
 		for i in 0 ..< num {
@@ -1089,9 +1118,26 @@ sorted_write_node :: proc(db: ^Database, node: Sorted_Node, old_ptr, frozen_at: 
 	return write_sorted_node(db, node)
 }
 
-read_kv_pair :: proc(db: ^Database, kv_slot: Slot) -> (res: Key_Value_Pair, err: Error) {
-	core_seek_to(db.core, kv_slot.value) or_return
-	return decode_kv_pair(db.core, kv_slot.tag, 0, context.temp_allocator)
+read_kv_pair :: proc(db: ^Database, entry: Slot) -> (res: Key_Value_Pair, err: Error) {
+	if is_key_only_entry(entry) {
+		return Key_Value_Pair{value_slot = Slot{}, key_slot = entry, hash = nil}, nil
+	}
+	core_seek_to(db.core, entry.value) or_return
+	return decode_kv_pair(db.core, entry.tag, 0, context.temp_allocator)
+}
+
+sorted_entry_key_slot :: #force_inline proc(db: ^Database, entry: Slot) -> (res: Slot, err: Error) {
+	if is_key_only_entry(entry) {
+		return entry, nil
+	}
+	if s_slice, in_mem, slice_err := core_slice_at(db.core, entry.value, SLOT_LENGTH); in_mem {
+		if slice_err != nil {
+			return {}, slice_err
+		}
+		return slot_from_slice_raw(s_slice), nil
+	}
+	core_seek_to(db.core, entry.value) or_return
+	return core_read_slot_raw(db.core)
 }
 
 write_kv_pair :: proc(db: ^Database, tag: Tag, kv_pair: Key_Value_Pair) -> (res: Slot, err: Error) {
@@ -1104,7 +1150,7 @@ write_kv_pair :: proc(db: ^Database, tag: Tag, kv_pair: Key_Value_Pair) -> (res:
 compare_key :: proc(db: ^Database, key_slot: Slot, target: []u8) -> (res: int, err: Error) {
 	#partial switch key_slot.tag {
 	case .Short_Bytes:
-		buf: [8]u8
+		buf: [8]u8 = ---
 		endian.unchecked_put_u64be(buf[:], u64(key_slot.value))
 		total := 6 if key_slot.full else 8
 		length := total
@@ -1116,17 +1162,47 @@ compare_key :: proc(db: ^Database, key_slot: Slot, target: []u8) -> (res: int, e
 		}
 		return bytes.compare(buf[:length], target), nil
 	case .Bytes:
+		#partial switch &v in db.core {
+		case Core_Memory:
+			pos := int(key_slot.value)
+			if pos < 0 || pos + 8 > len(v.buf) {
+				return 0, Xitdb_Error.Unexpected_EOF
+			}
+			length := int(endian.unchecked_get_u64be(v.buf[pos : pos + 8]))
+			if length < 0 || pos + 8 + length > len(v.buf) {
+				return 0, Xitdb_Error.Unexpected_EOF
+			}
+			return bytes.compare(v.buf[pos + 8 : pos + 8 + length], target), nil
+		case Core_Buffered_File:
+			buf_len := i64(len(v.memory.buf))
+			if buf_len > 0 && key_slot.value >= v.memory_pos && key_slot.value + 8 <= v.memory_pos + buf_len {
+				mem_off := int(key_slot.value - v.memory_pos)
+				length := int(endian.unchecked_get_u64be(v.memory.buf[mem_off : mem_off + 8]))
+				if length >= 0 && mem_off + 8 + length <= int(buf_len) {
+					return bytes.compare(v.memory.buf[mem_off + 8 : mem_off + 8 + length], target), nil
+				}
+			}
+		}
 		core_seek_to(db.core, key_slot.value) or_return
 		length := core_read_i64(db.core) or_return
-		if length <= 256 {
-			stack_buf: [256]u8
-			key_bytes := stack_buf[:int(length)]
+		read_len := min(int(length), len(target))
+		if read_len <= 256 {
+			stack_buf: [256]u8 = ---
+			key_bytes := stack_buf[:read_len]
 			core_read_exact(db.core, key_bytes) or_return
-			return bytes.compare(key_bytes, target), nil
+			c := bytes.compare(key_bytes, target[:read_len])
+			if c != 0 {
+				return c, nil
+			}
+			return -1 if int(length) < len(target) else (1 if int(length) > len(target) else 0), nil
 		}
-		key_bytes := make([]u8, int(length), context.temp_allocator)
+		key_bytes := make([]u8, read_len, context.temp_allocator)
 		core_read_exact(db.core, key_bytes) or_return
-		return bytes.compare(key_bytes, target), nil
+		c := bytes.compare(key_bytes, target[:read_len])
+		if c != 0 {
+			return c, nil
+		}
+		return -1 if int(length) < len(target) else (1 if int(length) > len(target) else 0), nil
 	case:
 		return 0, .Unexpected_Tag
 	}
@@ -1139,8 +1215,7 @@ sorted_leaf_search :: proc(db: ^Database, node: ^Sorted_Node, key: []u8) -> (idx
 	hi := node.num
 	for lo < hi {
 		mid := int(uint(lo + hi) >> 1)
-		core_seek_to(db.core, node.entries[mid].value) or_return
-		key_slot := core_read_slot_raw(db.core) or_return
+		key_slot := sorted_entry_key_slot(db, node.entries[mid]) or_return
 		cmp := compare_key(db, key_slot, key) or_return
 		if cmp == 0 {
 			return mid, true, nil
@@ -1172,8 +1247,65 @@ sorted_branch_search :: proc(db: ^Database, node: ^Sorted_Node, key: []u8) -> (i
 sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Sorted_Slot), err: Error) {
 	node_ptr := root_ptr
 	for {
+		if hdr_slice, in_mem, slice_err := core_slice_at(db.core, node_ptr, BTREE_NODE_HEADER_SIZE); in_mem {
+			if slice_err != nil {
+				return nil, slice_err
+			}
+			kind_int := hdr_slice[0]
+			if kind_int > u8(BTree_Node_Kind.Branch) {
+				return nil, .Invalid_BTree_Node_Kind
+			}
+			num := int(hdr_slice[1])
+			if num > BTREE_SLOT_COUNT {
+				return nil, .Invalid_BTree_Node
+			}
+			if BTree_Node_Kind(kind_int) == .Leaf {
+				entries_slice, _, e_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, num * SLOT_LENGTH)
+				if e_err != nil {
+					return nil, e_err
+				}
+				lo := 0
+				hi := num
+				for lo < hi {
+					mid := int(uint(lo + hi) >> 1)
+					entry_slot := slot_from_slice_raw(entries_slice[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH])
+					key_slot := sorted_entry_key_slot(db, entry_slot) or_return
+					cmp := compare_key(db, key_slot, key) or_return
+					if cmp == 0 {
+						entry_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(mid) * SLOT_LENGTH
+						return Sorted_Slot{slot = entry_slot, key_slot = key_slot, position = entry_pos}, nil
+					} else if cmp < 0 {
+						lo = mid + 1
+					} else {
+						hi = mid
+					}
+				}
+				return nil, nil
+			}
+			branch_slice, _, b_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, (BTREE_SLOT_COUNT + num) * SLOT_LENGTH)
+			if b_err != nil {
+				return nil, b_err
+			}
+			lo := 1
+			hi := num
+			sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
+			for lo < hi {
+				mid := int(uint(lo + hi) >> 1)
+				sep_slot := slot_from_slice_raw(branch_slice[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH])
+				c := compare_key(db, sep_slot, key) or_return
+				if c <= 0 {
+					lo = mid + 1
+				} else {
+					hi = mid
+				}
+			}
+			child_idx := lo - 1
+			node_ptr = slot_from_slice_raw(branch_slice[child_idx * SLOT_LENGTH : (child_idx + 1) * SLOT_LENGTH]).value
+			continue
+		}
+
 		core_seek_to(db.core, node_ptr) or_return
-		header_bytes: [BTREE_NODE_HEADER_SIZE]u8
+		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
 		core_read_exact(db.core, header_bytes[:]) or_return
 		kind_int := header_bytes[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
@@ -1184,7 +1316,7 @@ sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Sorte
 			return nil, .Invalid_BTree_Node
 		}
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			entries_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8
+			entries_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8 = ---
 			if num > 0 {
 				core_read_exact(db.core, entries_buf[:num * SLOT_LENGTH]) or_return
 			}
@@ -1192,11 +1324,8 @@ sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Sorte
 			hi := num
 			for lo < hi {
 				mid := int(uint(lo + hi) >> 1)
-				sb: [SLOT_LENGTH]u8
-				copy(sb[:], entries_buf[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH])
-				entry_slot := slot_from_bytes_raw(sb)
-				core_seek_to(db.core, entry_slot.value) or_return
-				key_slot := core_read_slot_raw(db.core) or_return
+				entry_slot := slot_from_slice_raw(entries_buf[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH])
+				key_slot := sorted_entry_key_slot(db, entry_slot) or_return
 				cmp := compare_key(db, key_slot, key) or_return
 				if cmp == 0 {
 					entry_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(mid) * SLOT_LENGTH
@@ -1209,16 +1338,14 @@ sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Sorte
 			}
 			return nil, nil
 		}
-		branch_buf: [SLOT_LENGTH * 2 * BTREE_SLOT_COUNT]u8
+		branch_buf: [SLOT_LENGTH * 2 * BTREE_SLOT_COUNT]u8 = ---
 		core_read_exact(db.core, branch_buf[:(BTREE_SLOT_COUNT + num) * SLOT_LENGTH]) or_return
 		lo := 1
 		hi := num
 		sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
 		for lo < hi {
 			mid := int(uint(lo + hi) >> 1)
-			sb: [SLOT_LENGTH]u8
-			copy(sb[:], branch_buf[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH])
-			sep_slot := slot_from_bytes_raw(sb)
+			sep_slot := slot_from_slice_raw(branch_buf[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH])
 			c := compare_key(db, sep_slot, key) or_return
 			if c <= 0 {
 				lo = mid + 1
@@ -1227,9 +1354,7 @@ sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Sorte
 			}
 		}
 		child_idx := lo - 1
-		csb: [SLOT_LENGTH]u8
-		copy(csb[:], branch_buf[child_idx * SLOT_LENGTH : (child_idx + 1) * SLOT_LENGTH])
-		node_ptr = slot_from_bytes_raw(csb).value
+		node_ptr = slot_from_slice_raw(branch_buf[child_idx * SLOT_LENGTH : (child_idx + 1) * SLOT_LENGTH]).value
 	}
 }
 
@@ -1237,8 +1362,47 @@ sorted_get_by_index :: proc(db: ^Database, root_ptr, rank: i64) -> (res: Sorted_
 	node_ptr := root_ptr
 	rem := rank
 	for {
+		if hdr_slice, in_mem, slice_err := core_slice_at(db.core, node_ptr, BTREE_NODE_HEADER_SIZE); in_mem {
+			if slice_err != nil {
+				return {}, slice_err
+			}
+			kind_int := hdr_slice[0]
+			if kind_int > u8(BTree_Node_Kind.Branch) {
+				return {}, .Invalid_BTree_Node_Kind
+			}
+			num := int(hdr_slice[1])
+			if num > BTREE_SLOT_COUNT {
+				return {}, .Invalid_BTree_Node
+			}
+			if BTree_Node_Kind(kind_int) == .Leaf {
+				pos := node_ptr + BTREE_NODE_HEADER_SIZE + rem * SLOT_LENGTH
+				s_slice, _, s_err := core_slice_at(db.core, pos, SLOT_LENGTH)
+				if s_err != nil {
+					return {}, s_err
+				}
+				return Sorted_Slot{slot = slot_from_slice_raw(s_slice), position = pos}, nil
+			}
+			body_len := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + num * 8
+			body_slice, _, b_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, body_len)
+			if b_err != nil {
+				return {}, b_err
+			}
+			counts_off := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
+			i := 0
+			for i + 1 < num {
+				cnt := i64(endian.unchecked_get_u64be(body_slice[counts_off + i * 8 : counts_off + (i + 1) * 8]))
+				if rem < cnt {
+					break
+				}
+				rem -= cnt
+				i += 1
+			}
+			node_ptr = slot_from_slice_raw(body_slice[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]).value
+			continue
+		}
+
 		core_seek_to(db.core, node_ptr) or_return
-		header_bytes: [BTREE_NODE_HEADER_SIZE]u8
+		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
 		core_read_exact(db.core, header_bytes[:]) or_return
 		kind_int := header_bytes[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
@@ -1256,7 +1420,7 @@ sorted_get_by_index :: proc(db: ^Database, root_ptr, rank: i64) -> (res: Sorted_
 		}
 		counts_pos := node_ptr + BTREE_NODE_HEADER_SIZE + SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
 		core_seek_to(db.core, counts_pos) or_return
-		counts_buf: [8 * BTREE_SLOT_COUNT]u8
+		counts_buf: [8 * BTREE_SLOT_COUNT]u8 = ---
 		core_read_exact(db.core, counts_buf[:num * 8]) or_return
 		i := 0
 		for i + 1 < num {
@@ -1278,8 +1442,68 @@ sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: 
 	node_ptr := root_ptr
 	rank: i64 = 0
 	for {
+		if hdr_slice, in_mem, slice_err := core_slice_at(db.core, node_ptr, BTREE_NODE_HEADER_SIZE); in_mem {
+			if slice_err != nil {
+				return 0, slice_err
+			}
+			kind_int := hdr_slice[0]
+			if kind_int > u8(BTree_Node_Kind.Branch) {
+				return 0, .Invalid_BTree_Node_Kind
+			}
+			num := int(hdr_slice[1])
+			if num > BTREE_SLOT_COUNT {
+				return 0, .Invalid_BTree_Node
+			}
+			if BTree_Node_Kind(kind_int) == .Leaf {
+				entries_slice, _, e_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, num * SLOT_LENGTH)
+				if e_err != nil {
+					return 0, e_err
+				}
+				lo := 0
+				hi := num
+				for lo < hi {
+					mid := int(uint(lo + hi) >> 1)
+					entry_slot := slot_from_slice_raw(entries_slice[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH])
+					key_slot := sorted_entry_key_slot(db, entry_slot) or_return
+					cmp := compare_key(db, key_slot, key) or_return
+					if cmp == 0 {
+						return rank + i64(mid), nil
+					} else if cmp < 0 {
+						lo = mid + 1
+					} else {
+						hi = mid
+					}
+				}
+				return rank + i64(lo), nil
+			}
+			branch_slice, _, b_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + num * 8)
+			if b_err != nil {
+				return 0, b_err
+			}
+			lo := 1
+			hi := num
+			sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
+			for lo < hi {
+				mid := int(uint(lo + hi) >> 1)
+				sep_slot := slot_from_slice_raw(branch_slice[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH])
+				c := compare_key(db, sep_slot, key) or_return
+				if c <= 0 {
+					lo = mid + 1
+				} else {
+					hi = mid
+				}
+			}
+			i := lo - 1
+			counts_off := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
+			for k in 0 ..< i {
+				rank += i64(endian.unchecked_get_u64be(branch_slice[counts_off + k * 8 : counts_off + (k + 1) * 8]))
+			}
+			node_ptr = slot_from_slice_raw(branch_slice[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]).value
+			continue
+		}
+
 		core_seek_to(db.core, node_ptr) or_return
-		header_bytes: [BTREE_NODE_HEADER_SIZE]u8
+		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
 		core_read_exact(db.core, header_bytes[:]) or_return
 		kind_int := header_bytes[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
@@ -1290,7 +1514,7 @@ sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: 
 			return 0, .Invalid_BTree_Node
 		}
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			entries_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8
+			entries_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8 = ---
 			if num > 0 {
 				core_read_exact(db.core, entries_buf[:num * SLOT_LENGTH]) or_return
 			}
@@ -1298,11 +1522,8 @@ sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: 
 			hi := num
 			for lo < hi {
 				mid := int(uint(lo + hi) >> 1)
-				sb: [SLOT_LENGTH]u8
-				copy(sb[:], entries_buf[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH])
-				entry_slot := slot_from_bytes_raw(sb)
-				core_seek_to(db.core, entry_slot.value) or_return
-				key_slot := core_read_slot_raw(db.core) or_return
+				entry_slot := slot_from_slice_raw(entries_buf[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH])
+				key_slot := sorted_entry_key_slot(db, entry_slot) or_return
 				cmp := compare_key(db, key_slot, key) or_return
 				if cmp == 0 {
 					return rank + i64(mid), nil
@@ -1314,16 +1535,14 @@ sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: 
 			}
 			return rank + i64(lo), nil
 		}
-		branch_buf: [(SLOT_LENGTH * 2 + 8) * BTREE_SLOT_COUNT]u8
+		branch_buf: [(SLOT_LENGTH * 2 + 8) * BTREE_SLOT_COUNT]u8 = ---
 		core_read_exact(db.core, branch_buf[:SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + num * 8]) or_return
 		lo := 1
 		hi := num
 		sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
 		for lo < hi {
 			mid := int(uint(lo + hi) >> 1)
-			sb: [SLOT_LENGTH]u8
-			copy(sb[:], branch_buf[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH])
-			sep_slot := slot_from_bytes_raw(sb)
+			sep_slot := slot_from_slice_raw(branch_buf[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH])
 			c := compare_key(db, sep_slot, key) or_return
 			if c <= 0 {
 				lo = mid + 1
@@ -1336,29 +1555,29 @@ sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: 
 		for k in 0 ..< i {
 			rank += i64(endian.unchecked_get_u64be(branch_buf[counts_off + k * 8 : counts_off + (k + 1) * 8]))
 		}
-		csb: [SLOT_LENGTH]u8
-		copy(csb[:], branch_buf[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH])
-		node_ptr = slot_from_bytes_raw(csb).value
+		node_ptr = slot_from_slice_raw(branch_buf[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]).value
 	}
 }
 
 write_key :: proc(db: ^Database, key: []u8) -> (res: Slot, err: Error) {
-	has_zero := false
-	for b in key {
-		if b == 0 {
-			has_zero = true
-			break
+	if len(key) <= 8 {
+		has_zero := false
+		for b in key {
+			if b == 0 {
+				has_zero = true
+				break
+			}
 		}
-	}
-	if len(key) <= 8 && !has_zero {
-		value: [8]u8
-		copy(value[:], key)
-		return Slot{value = i64(endian.unchecked_get_u64be(value[:])), tag = .Short_Bytes}, nil
+		if !has_zero {
+			value: [8]u8
+			copy(value[:], key)
+			return Slot{value = i64(endian.unchecked_get_u64be(value[:])), tag = .Short_Bytes}, nil
+		}
 	}
 	pos := core_length(db.core) or_return
 	core_seek_to(db.core, pos) or_return
 	if len(key) <= 248 {
-		buf: [256]u8
+		buf: [256]u8 = ---
 		endian.unchecked_put_u64be(buf[0:8], u64(len(key)))
 		copy(buf[8:8 + len(key)], key)
 		core_write_all(db.core, buf[:8 + len(key)]) or_return
@@ -1369,17 +1588,70 @@ write_key :: proc(db: ^Database, key: []u8) -> (res: Slot, err: Error) {
 	return Slot{value = pos, tag = .Bytes}, nil
 }
 
-sorted_new_entry :: proc(db: ^Database, key: []u8) -> (res: Sorted_Entry, err: Error) {
-	key_slot := write_key(db, key) or_return
-	kv_slot := write_kv_pair(db, .Sorted_KV_Pair, Key_Value_Pair{
+write_sorted_pair :: proc(db: ^Database, key_slot: Slot) -> (res: Slot, err: Error) {
+	return write_kv_pair(db, .Sorted_KV_Pair, Key_Value_Pair{
 		value_slot = Slot{},
 		key_slot   = key_slot,
 		hash       = nil,
-	}) or_return
-	return Sorted_Entry{kv_slot = kv_slot, key_slot = key_slot}, nil
+	})
 }
 
-sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (res: Sorted_Insert_Result, err: Error) {
+write_sorted_key_and_entry :: proc(db: ^Database, key: []u8, key_only: bool) -> (key_slot: Slot, entry: Slot, err: Error) {
+	if len(key) <= 8 {
+		has_zero := false
+		for b in key {
+			if b == 0 {
+				has_zero = true
+				break
+			}
+		}
+		if !has_zero {
+			value: [8]u8
+			copy(value[:], key)
+			key_slot = Slot{value = i64(endian.unchecked_get_u64be(value[:])), tag = .Short_Bytes}
+			if key_only {
+				return key_slot, key_slot, nil
+			}
+			entry = write_sorted_pair(db, key_slot) or_return
+			return key_slot, entry, nil
+		}
+	}
+	pos := core_length(db.core) or_return
+	core_seek_to(db.core, pos) or_return
+	key_slot = Slot{value = pos, tag = .Bytes}
+	if key_only {
+		if len(key) <= 248 {
+			buf: [256]u8 = ---
+			endian.unchecked_put_u64be(buf[0:8], u64(len(key)))
+			copy(buf[8:8 + len(key)], key)
+			core_write_all(db.core, buf[:8 + len(key)]) or_return
+			return key_slot, key_slot, nil
+		}
+		core_write_i64(db.core, i64(len(key))) or_return
+		core_write_all(db.core, key) or_return
+		return key_slot, key_slot, nil
+	}
+	pair_pos := pos + 8 + i64(len(key))
+	entry = Slot{value = pair_pos, tag = .Sorted_KV_Pair}
+	if len(key) <= 230 {
+		buf: [256]u8 = ---
+		endian.unchecked_put_u64be(buf[0:8], u64(len(key)))
+		copy(buf[8 : 8 + len(key)], key)
+		ks_bytes := slot_to_bytes(key_slot)
+		vs_bytes := slot_to_bytes(Slot{})
+		pair_off := 8 + len(key)
+		copy(buf[pair_off : pair_off + SLOT_LENGTH], ks_bytes[:])
+		copy(buf[pair_off + SLOT_LENGTH : pair_off + SORTED_KV_PAIR_LENGTH], vs_bytes[:])
+		core_write_all(db.core, buf[:pair_off + SORTED_KV_PAIR_LENGTH]) or_return
+		return key_slot, entry, nil
+	}
+	core_write_i64(db.core, i64(len(key))) or_return
+	core_write_all(db.core, key) or_return
+	entry = write_sorted_pair(db, key_slot) or_return
+	return key_slot, entry, nil
+}
+
+sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, frozen_at: i64) -> (res: Sorted_Insert_Result, err: Error) {
 	reusable := btree_reusable(db, node_ptr, frozen_at)
 	if reusable {
 		core_seek_to(db.core, node_ptr) or_return
@@ -1395,7 +1667,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 		}
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			entries_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8
+			entries_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8 = ---
 			if num > 0 {
 				core_read_exact(db.core, entries_buf[:num * SLOT_LENGTH]) or_return
 			}
@@ -1405,11 +1677,8 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 			found := false
 			for lo < hi {
 				mid := int(uint(lo + hi) >> 1)
-				sb: [SLOT_LENGTH]u8
-				copy(sb[:], entries_buf[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH])
-				entry_slot := slot_from_bytes_raw(sb)
-				core_seek_to(db.core, entry_slot.value) or_return
-				key_slot := core_read_slot_raw(db.core) or_return
+				entry_slot := slot_from_slice_raw(entries_buf[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH])
+				key_slot := sorted_entry_key_slot(db, entry_slot) or_return
 				cmp := compare_key(db, key_slot, key) or_return
 				if cmp == 0 {
 					lo = mid
@@ -1423,30 +1692,45 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 				}
 			}
 			if found {
-				kv_slot := matched_slot
-				if !btree_reusable(db, kv_slot.value, frozen_at) {
-					kv := read_kv_pair(db, kv_slot) or_return
-					kv_slot = write_kv_pair(db, kv_slot.tag, kv) or_return
+				if key_only {
+					return Sorted_Insert_Result{
+						node_ptr = node_ptr,
+						count    = i64(num),
+						entry    = matched_slot,
+						added    = false,
+					}, nil
+				}
+				entry := matched_slot
+				rewritten := false
+				if is_key_only_entry(entry) {
+					entry = write_sorted_pair(db, entry) or_return
+					rewritten = true
+				} else if !btree_reusable(db, entry.value, frozen_at) {
+					kv := read_kv_pair(db, entry) or_return
+					entry = write_kv_pair(db, entry.tag, kv) or_return
+					rewritten = true
+				}
+				if rewritten {
 					entry_pos := position + i64(lo) * SLOT_LENGTH
 					core_seek_to(db.core, entry_pos) or_return
-					core_write_slot(db.core, kv_slot) or_return
+					core_write_slot(db.core, entry) or_return
 				}
 				return Sorted_Insert_Result{
 					node_ptr = node_ptr,
 					count    = i64(num),
-					kv_slot  = kv_slot,
+					entry    = entry,
 					added    = false,
 				}, nil
 			}
 			idx := lo
-			entry := sorted_new_entry(db, key) or_return
+			key_slot, entry := write_sorted_key_and_entry(db, key, key_only) or_return
 			if num < BTREE_SLOT_COUNT {
 				total := num + 1
 				entry_pos := position + i64(idx) * SLOT_LENGTH
-				eb := slot_to_bytes(entry.kv_slot)
+				eb := slot_to_bytes(entry)
 				if idx < num {
 					tail_len := (num - idx) * SLOT_LENGTH
-					shift_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8
+					shift_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8 = ---
 					copy(shift_buf[:SLOT_LENGTH], eb[:])
 					copy(shift_buf[SLOT_LENGTH : SLOT_LENGTH + tail_len], entries_buf[idx * SLOT_LENGTH : num * SLOT_LENGTH])
 					core_seek_to(db.core, entry_pos) or_return
@@ -1461,21 +1745,17 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 				return Sorted_Insert_Result{
 					node_ptr = node_ptr,
 					count    = i64(total),
-					kv_slot  = entry.kv_slot,
+					entry    = entry,
 					added    = true,
 				}, nil
 			}
-			entries: [BTREE_SLOT_COUNT + 1]Slot
+			entries: [BTREE_SLOT_COUNT + 1]Slot = ---
 			for j in 0 ..< idx {
-				sb: [SLOT_LENGTH]u8
-				copy(sb[:], entries_buf[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH])
-				entries[j] = slot_from_bytes_raw(sb)
+				entries[j] = slot_from_slice_raw(entries_buf[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH])
 			}
-			entries[idx] = entry.kv_slot
+			entries[idx] = entry
 			for j in idx ..< num {
-				sb: [SLOT_LENGTH]u8
-				copy(sb[:], entries_buf[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH])
-				entries[j + 1] = slot_from_bytes_raw(sb)
+				entries[j + 1] = slot_from_slice_raw(entries_buf[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH])
 			}
 			total := num + 1
 			left_n := BTREE_SPLIT_COUNT
@@ -1486,31 +1766,28 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 			copy(right.entries[:right_n], entries[left_n:total])
 			separator: Slot
 			if left_n == idx {
-				separator = entry.key_slot
+				separator = key_slot
 			} else {
-				core_seek_to(db.core, entries[left_n].value) or_return
-				separator = core_read_slot_raw(db.core) or_return
+				separator = sorted_entry_key_slot(db, entries[left_n]) or_return
 			}
 			left_ptr := sorted_write_node(db, left, node_ptr, frozen_at) or_return
 			right_ptr := write_sorted_node(db, right) or_return
 			return Sorted_Insert_Result{
 				node_ptr = left_ptr,
 				count    = i64(left_n),
-				kv_slot  = entry.kv_slot,
+				entry    = entry,
 				added    = true,
 				split    = Sorted_Split{node_ptr = right_ptr, count = i64(right_n), separator = separator},
 			}, nil
 		} else {
-			branch_buf: [SLOT_LENGTH * 2 * BTREE_SLOT_COUNT]u8
-			core_read_exact(db.core, branch_buf[:(BTREE_SLOT_COUNT + num) * SLOT_LENGTH]) or_return
+			branch_buf: [(SLOT_LENGTH * 2 + 8) * BTREE_SLOT_COUNT]u8 = ---
+			core_read_exact(db.core, branch_buf[:SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + num * 8]) or_return
 			lo := 1
 			hi := num
 			sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
 			for lo < hi {
 				mid := int(uint(lo + hi) >> 1)
-				sb: [SLOT_LENGTH]u8
-				copy(sb[:], branch_buf[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH])
-				sep_slot := slot_from_bytes_raw(sb)
+				sep_slot := slot_from_slice_raw(branch_buf[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH])
 				c := compare_key(db, sep_slot, key) or_return
 				if c <= 0 {
 					lo = mid + 1
@@ -1520,11 +1797,9 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 			}
 			i := lo - 1
 			child_slot_pos := position + i64(i) * SLOT_LENGTH
-			csb: [SLOT_LENGTH]u8
-			copy(csb[:], branch_buf[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH])
-			child_slot := slot_from_bytes_raw(csb)
+			child_slot := slot_from_slice_raw(branch_buf[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH])
 			child_ptr := child_slot.value
-			child := sorted_put(db, child_ptr, key, frozen_at) or_return
+			child := sorted_put(db, child_ptr, key, key_only, frozen_at) or_return
 			if child.split == nil {
 				if child.node_ptr != child_ptr {
 					core_seek_to(db.core, child_slot_pos) or_return
@@ -1532,32 +1807,34 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 				}
 				new_cnt: i64 = 0
 				if child.added {
-					count_pos := position + SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + i64(i) * 8
-					core_seek_to(db.core, count_pos) or_return
-					old_cnt := core_read_i64(db.core) or_return
+					counts_off := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + i * 8
+					old_cnt := i64(endian.unchecked_get_u64be(branch_buf[counts_off : counts_off + 8]))
 					new_cnt = old_cnt + 1
+					count_pos := position + i64(counts_off)
 					core_seek_to(db.core, count_pos) or_return
 					core_write_i64(db.core, new_cnt) or_return
 				}
 				return Sorted_Insert_Result{
 					node_ptr = node_ptr,
 					count    = new_cnt,
-					kv_slot  = child.kv_slot,
+					entry    = child.entry,
 					added    = child.added,
 				}, nil
 			}
-			// Child split: read full branch node and finish split handling
-			node := read_sorted_node(db, node_ptr) or_return
-			children: [BTREE_SLOT_COUNT + 1]Slot
-			separators: [BTREE_SLOT_COUNT + 1]Slot
-			counts: [BTREE_SLOT_COUNT + 1]i64
-			copy(children[:node.num], node.children[:node.num])
-			copy(separators[:node.num], node.separators[:node.num])
-			copy(counts[:node.num], node.counts[:node.num])
+			// Child split: decode full branch node from branch_buf and finish split handling
+			children: [BTREE_SLOT_COUNT + 1]Slot = ---
+			separators: [BTREE_SLOT_COUNT + 1]Slot = ---
+			counts: [BTREE_SLOT_COUNT + 1]i64 = ---
+			counts_base := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
+			for k in 0 ..< num {
+				children[k] = slot_from_slice_raw(branch_buf[k * SLOT_LENGTH : (k + 1) * SLOT_LENGTH])
+				separators[k] = slot_from_slice_raw(branch_buf[sep_off + k * SLOT_LENGTH : sep_off + (k + 1) * SLOT_LENGTH])
+				counts[k] = i64(endian.unchecked_get_u64be(branch_buf[counts_base + k * 8 : counts_base + (k + 1) * 8]))
+			}
 			children[i] = Slot{value = child.node_ptr, tag = .Index}
 			counts[i] = child.count
 			split := child.split.?
-			for j := node.num; j > i + 1; j -= 1 {
+			for j := num; j > i + 1; j -= 1 {
 				children[j] = children[j - 1]
 				separators[j] = separators[j - 1]
 				counts[j] = counts[j - 1]
@@ -1565,7 +1842,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 			children[i + 1] = Slot{value = split.node_ptr, tag = .Index}
 			separators[i + 1] = split.separator
 			counts[i + 1] = split.count
-			total := node.num + 1
+			total := num + 1
 
 			if total <= BTREE_SLOT_COUNT {
 				branch := Sorted_Node{kind = .Branch, num = total}
@@ -1576,7 +1853,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 				return Sorted_Insert_Result{
 					node_ptr = ptr,
 					count    = sorted_node_subtree_count(branch),
-					kv_slot  = child.kv_slot,
+					entry    = child.entry,
 					added    = child.added,
 				}, nil
 			}
@@ -1597,7 +1874,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 			return Sorted_Insert_Result{
 				node_ptr = left_ptr,
 				count    = sorted_node_subtree_count(left),
-				kv_slot  = child.kv_slot,
+				entry    = child.entry,
 				added    = child.added,
 				split    = Sorted_Split{node_ptr = right_ptr, count = sorted_node_subtree_count(right), separator = separator},
 			}, nil
@@ -1610,52 +1887,36 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 		idx, found := sorted_leaf_search(db, &node, key) or_return
 
 		if found {
-			kv_slot := node.entries[idx]
-			if !btree_reusable(db, kv_slot.value, frozen_at) {
-				kv := read_kv_pair(db, kv_slot) or_return
-				kv_slot = write_kv_pair(db, kv_slot.tag, kv) or_return
-				if btree_reusable(db, node_ptr, frozen_at) {
-					entry_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(idx) * SLOT_LENGTH
-					core_seek_to(db.core, entry_pos) or_return
-					core_write_slot(db.core, kv_slot) or_return
-					return Sorted_Insert_Result{
-						node_ptr = node_ptr,
-						count    = i64(node.num),
-						kv_slot  = kv_slot,
-						added    = false,
-					}, nil
-				}
-				leaf := node
-				leaf.entries[idx] = kv_slot
-				ptr := write_sorted_node(db, leaf) or_return
-				return Sorted_Insert_Result{
-					node_ptr = ptr,
-					count    = i64(node.num),
-					kv_slot  = kv_slot,
-					added    = false,
-				}, nil
-			}
-			if btree_reusable(db, node_ptr, frozen_at) {
+			if key_only {
 				return Sorted_Insert_Result{
 					node_ptr = node_ptr,
 					count    = i64(node.num),
-					kv_slot  = kv_slot,
+					entry    = node.entries[idx],
 					added    = false,
 				}, nil
 			}
-			ptr := write_sorted_node(db, node) or_return
+			entry := node.entries[idx]
+			if is_key_only_entry(entry) {
+				entry = write_sorted_pair(db, entry) or_return
+			} else if !btree_reusable(db, entry.value, frozen_at) {
+				kv := read_kv_pair(db, entry) or_return
+				entry = write_kv_pair(db, entry.tag, kv) or_return
+			}
+			leaf := node
+			leaf.entries[idx] = entry
+			ptr := sorted_write_node(db, leaf, node_ptr, frozen_at) or_return
 			return Sorted_Insert_Result{
 				node_ptr = ptr,
 				count    = i64(node.num),
-				kv_slot  = kv_slot,
+				entry    = entry,
 				added    = false,
 			}, nil
 		}
 
-		entry := sorted_new_entry(db, key) or_return
+		key_slot, entry := write_sorted_key_and_entry(db, key, key_only) or_return
 		entries: [BTREE_SLOT_COUNT + 1]Slot
 		copy(entries[:idx], node.entries[:idx])
-		entries[idx] = entry.kv_slot
+		entries[idx] = entry
 		copy(entries[idx + 1 : node.num + 1], node.entries[idx:node.num])
 		total := node.num + 1
 
@@ -1666,7 +1927,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 			return Sorted_Insert_Result{
 				node_ptr = ptr,
 				count    = i64(total),
-				kv_slot  = entry.kv_slot,
+				entry    = entry,
 				added    = true,
 			}, nil
 		}
@@ -1679,17 +1940,16 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 		copy(right.entries[:right_n], entries[left_n:total])
 		separator: Slot
 		if left_n == idx {
-			separator = entry.key_slot
+			separator = key_slot
 		} else {
-			core_seek_to(db.core, entries[left_n].value) or_return
-			separator = core_read_slot_raw(db.core) or_return
+			separator = sorted_entry_key_slot(db, entries[left_n]) or_return
 		}
 		left_ptr := sorted_write_node(db, left, node_ptr, frozen_at) or_return
 		right_ptr := write_sorted_node(db, right) or_return
 		return Sorted_Insert_Result{
 			node_ptr = left_ptr,
 			count    = i64(left_n),
-			kv_slot  = entry.kv_slot,
+			entry    = entry,
 			added    = true,
 			split    = Sorted_Split{node_ptr = right_ptr, count = i64(right_n), separator = separator},
 		}, nil
@@ -1697,25 +1957,13 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 	case .Branch:
 		i := sorted_branch_search(db, &node, key) or_return
 		child_ptr := node.children[i].value
-		child := sorted_put(db, child_ptr, key, frozen_at) or_return
-		if child.split == nil && btree_reusable(db, node_ptr, frozen_at) {
-			if child.node_ptr != child_ptr {
-				child_slot_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(i) * SLOT_LENGTH
-				core_seek_to(db.core, child_slot_pos) or_return
-				core_write_slot(db.core, Slot{value = child.node_ptr, tag = .Index}) or_return
-				node.children[i] = Slot{value = child.node_ptr, tag = .Index}
-			}
-			if child.added {
-				count_pos := node_ptr + BTREE_NODE_HEADER_SIZE + SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + i64(i) * 8
-				core_seek_to(db.core, count_pos) or_return
-				core_write_i64(db.core, node.counts[i] + 1) or_return
-				node.counts[i] += 1
-			}
+		child := sorted_put(db, child_ptr, key, key_only, frozen_at) or_return
+		if !child.added && child.node_ptr == child_ptr {
 			return Sorted_Insert_Result{
 				node_ptr = node_ptr,
 				count    = sorted_node_subtree_count(node),
-				kv_slot  = child.kv_slot,
-				added    = child.added,
+				entry    = child.entry,
+				added    = false,
 			}, nil
 		}
 
@@ -1749,7 +1997,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 			return Sorted_Insert_Result{
 				node_ptr = ptr,
 				count    = sorted_node_subtree_count(branch),
-				kv_slot  = child.kv_slot,
+				entry    = child.entry,
 				added    = child.added,
 			}, nil
 		}
@@ -1770,7 +2018,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (
 		return Sorted_Insert_Result{
 			node_ptr = left_ptr,
 			count    = sorted_node_subtree_count(left),
-			kv_slot  = child.kv_slot,
+			entry    = child.entry,
 			added    = child.added,
 			split    = Sorted_Split{node_ptr = right_ptr, count = sorted_node_subtree_count(right), separator = separator},
 		}, nil
@@ -1805,8 +2053,7 @@ sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -
 				sb: [SLOT_LENGTH]u8
 				copy(sb[:], entries_buf[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH])
 				entry_slot := slot_from_bytes_raw(sb)
-				core_seek_to(db.core, entry_slot.value) or_return
-				key_slot := core_read_slot_raw(db.core) or_return
+				key_slot := sorted_entry_key_slot(db, entry_slot) or_return
 				cmp := compare_key(db, key_slot, key) or_return
 				if cmp == 0 {
 					lo = mid
@@ -1942,16 +2189,18 @@ sorted_grow_root :: proc(db: ^Database, result: Sorted_Insert_Result) -> (res: i
 	return result.node_ptr, nil
 }
 
-sorted_target_slot :: proc(db: ^Database, kv_slot: Slot, target: Sorted_Map_Get_Target) -> (res: Slot_Pointer, err: Error) {
+sorted_target_slot :: proc(db: ^Database, entry: Slot, target: Sorted_Map_Get_Target) -> (res: Slot_Pointer, err: Error) {
 	switch _ in target {
 	case Sorted_Map_Get_KV_Pair:
-		return Slot_Pointer{position = nil, slot = kv_slot}, nil
+		return Slot_Pointer{position = nil, slot = entry}, nil
 	case Sorted_Map_Get_Key:
-		core_seek_to(db.core, kv_slot.value) or_return
-		key_slot := core_read_slot_raw(db.core) or_return
+		key_slot := sorted_entry_key_slot(db, entry) or_return
 		return Slot_Pointer{position = nil, slot = key_slot}, nil
 	case Sorted_Map_Get_Value:
-		pos := kv_slot.value + database_kv_key_offset(db, kv_slot.tag) + SLOT_LENGTH
+		if is_key_only_entry(entry) {
+			return Slot_Pointer{position = nil, slot = Slot{}}, nil
+		}
+		pos := entry.value + database_kv_key_offset(db, entry.tag) + SLOT_LENGTH
 		core_seek_to(db.core, pos) or_return
 		val_slot := core_read_slot_raw(db.core) or_return
 		return Slot_Pointer{position = pos, slot = val_slot}, nil

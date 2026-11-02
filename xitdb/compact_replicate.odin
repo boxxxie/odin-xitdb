@@ -264,11 +264,17 @@ _compactor_remap_bytes :: proc(c: ^_Compactor, slot: Slot) -> (res: i64, err: Er
 @(private)
 _compactor_populate_index :: proc(c: ^_Compactor, source_offset, target_offset: i64) -> Error {
 	core_seek_to(c.source_core, source_offset) or_return
-	block_bytes: [INDEX_BLOCK_SIZE]u8
+	block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
 	core_read_exact(c.source_core, block_bytes[:]) or_return
 
 	for i in 0 ..< SLOT_COUNT {
-		sb: [SLOT_LENGTH]u8
+		tag := Tag(block_bytes[i * SLOT_LENGTH] & 0x7F)
+		tag_validate(tag) or_return
+		#partial switch tag {
+		case .None, .Uint, .Int, .Float, .Short_Bytes:
+			continue
+		}
+		sb: [SLOT_LENGTH]u8 = ---
 		copy(sb[:], block_bytes[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH])
 		child_slot := slot_from_bytes_raw(sb)
 		remapped := _compactor_remap_slot(c, child_slot) or_return
@@ -387,7 +393,13 @@ _compactor_populate_btree_leaf :: proc(c: ^_Compactor, source_offset, target_off
 	core_read_exact(c.source_core, body[:int(num) * SLOT_LENGTH]) or_return
 
 	for i in 0 ..< int(num) {
-		sb: [SLOT_LENGTH]u8
+		tag := Tag(body[i * SLOT_LENGTH] & 0x7F)
+		tag_validate(tag) or_return
+		#partial switch tag {
+		case .None, .Uint, .Int, .Float, .Short_Bytes:
+			continue
+		}
+		sb: [SLOT_LENGTH]u8 = ---
 		copy(sb[:], body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH])
 		remapped := _compactor_remap_slot(c, slot_from_bytes_raw(sb)) or_return
 		out_sb := slot_to_bytes(remapped)
@@ -408,7 +420,7 @@ _compactor_populate_btree_branch :: proc(c: ^_Compactor, source_offset, target_o
 	core_read_exact(c.source_core, body[:SLOT_LENGTH * BTREE_SLOT_COUNT + int(num) * 8]) or_return
 
 	for i in 0 ..< int(num) {
-		sb: [SLOT_LENGTH]u8
+		sb: [SLOT_LENGTH]u8 = ---
 		copy(sb[:], body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH])
 		child := slot_from_bytes_raw(sb)
 		tag_validate(child.tag) or_return
@@ -426,7 +438,7 @@ _compactor_populate_btree_branch :: proc(c: ^_Compactor, source_offset, target_o
 @(private)
 _compactor_populate_sorted_map :: proc(c: ^_Compactor, source_offset, target_offset: i64) -> Error {
 	core_seek_to(c.source_core, source_offset) or_return
-	hb: [BTREE_HEADER_LENGTH]u8
+	hb: [BTREE_HEADER_LENGTH]u8 = ---
 	core_read_exact(c.source_core, hb[:]) or_return
 	header := btree_header_from_bytes(hb) or_return
 	remapped_root := _compactor_remap_sorted_map_node(c, header.root_ptr) or_return
@@ -442,7 +454,7 @@ _compactor_remap_sorted_map_node :: proc(c: ^_Compactor, node_offset: i64) -> (r
 		return mapped, nil
 	}
 	core_seek_to(c.source_core, node_offset) or_return
-	node_header: [BTREE_NODE_HEADER_SIZE]u8
+	node_header: [BTREE_NODE_HEADER_SIZE]u8 = ---
 	core_read_exact(c.source_core, node_header[:]) or_return
 	kind_int := node_header[0]
 	if kind_int > u8(BTree_Node_Kind.Branch) {
@@ -479,7 +491,13 @@ _compactor_populate_sorted_map_leaf :: proc(c: ^_Compactor, source_offset, targe
 	core_read_exact(c.source_core, body[:int(num) * SLOT_LENGTH]) or_return
 
 	for i in 0 ..< int(num) {
-		sb: [SLOT_LENGTH]u8
+		tag := Tag(body[i * SLOT_LENGTH] & 0x7F)
+		tag_validate(tag) or_return
+		#partial switch tag {
+		case .None, .Uint, .Int, .Float, .Short_Bytes:
+			continue
+		}
+		sb: [SLOT_LENGTH]u8 = ---
 		copy(sb[:], body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH])
 		remapped := _compactor_remap_slot(c, slot_from_bytes_raw(sb)) or_return
 		out_sb := slot_to_bytes(remapped)
@@ -500,7 +518,7 @@ _compactor_populate_sorted_map_branch :: proc(c: ^_Compactor, source_offset, tar
 	core_read_exact(c.source_core, body[:SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + int(num) * 8]) or_return
 
 	for i in 0 ..< int(num) {
-		sb: [SLOT_LENGTH]u8
+		sb: [SLOT_LENGTH]u8 = ---
 		copy(sb[:], body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH])
 		child := slot_from_bytes_raw(sb)
 		tag_validate(child.tag) or_return
@@ -512,7 +530,13 @@ _compactor_populate_sorted_map_branch :: proc(c: ^_Compactor, source_offset, tar
 	}
 	separator_offset := SLOT_LENGTH * BTREE_SLOT_COUNT
 	for i in 1 ..< int(num) {
-		sb: [SLOT_LENGTH]u8
+		tag := Tag(body[separator_offset + i * SLOT_LENGTH] & 0x7F)
+		tag_validate(tag) or_return
+		#partial switch tag {
+		case .None, .Uint, .Int, .Float, .Short_Bytes:
+			continue
+		}
+		sb: [SLOT_LENGTH]u8 = ---
 		copy(sb[:], body[separator_offset + i * SLOT_LENGTH : separator_offset + (i + 1) * SLOT_LENGTH])
 		remapped := _compactor_remap_slot(c, slot_from_bytes_raw(sb)) or_return
 		out_sb := slot_to_bytes(remapped)
@@ -530,11 +554,17 @@ _compactor_populate_hash_map :: proc(c: ^_Compactor, source_offset, target_offse
 	if counted {
 		count_value = core_read_long(c.source_core) or_return
 	}
-	block_bytes: [INDEX_BLOCK_SIZE]u8
+	block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
 	core_read_exact(c.source_core, block_bytes[:]) or_return
 
 	for i in 0 ..< SLOT_COUNT {
-		sb: [SLOT_LENGTH]u8
+		tag := Tag(block_bytes[i * SLOT_LENGTH] & 0x7F)
+		tag_validate(tag) or_return
+		#partial switch tag {
+		case .None, .Uint, .Int, .Float, .Short_Bytes:
+			continue
+		}
+		sb: [SLOT_LENGTH]u8 = ---
 		copy(sb[:], block_bytes[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH])
 		child_slot := slot_from_bytes_raw(sb)
 		remapped := _compactor_remap_slot(c, child_slot) or_return

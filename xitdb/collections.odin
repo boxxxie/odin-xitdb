@@ -170,6 +170,15 @@ linked_array_list_append_cursor :: proc(a: ^Write_Linked_Array_List) -> (res: Wr
 	return cursor_write_path(&a.write_cursor, []Path_Part{Linked_Array_List_Append{}})
 }
 
+linked_array_list_append_context :: proc(a: ^Write_Linked_Array_List, data: Writeable_Data, fn: Context_Function, user_data: rawptr = nil) -> Error {
+	_, err := cursor_write_path(&a.write_cursor, []Path_Part{
+		Linked_Array_List_Append{},
+		Write_Data{data = data},
+		Context{function = fn, user_data = user_data},
+	})
+	return err
+}
+
 linked_array_list_slice :: proc(a: ^Write_Linked_Array_List, offset, size: i64) -> Error {
 	_, err := cursor_write_path(&a.write_cursor, []Path_Part{Linked_Array_List_Slice{offset = offset, size = size}})
 	return err

@@ -1159,6 +1159,24 @@ unit_write_kv_pair_cursors_and_read_bytes_buf_edge_cases :: proc(t: ^testing.T) 
 	free_all(context.temp_allocator)
 }
 
+// ----------------------------------------------------------------------------
+// Scenario 32: `Sorted_Set` Key-Only Leaf Entries, Map Reinterpretation & `linked_array_list_append_context`
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_sorted_set_key_only_leaf_entries_map_reinterpretation_and_linked_list_append_context :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
+
+	given_in_memory_database(&ctx)
+
+	// THEN Sorted_Set stores keys directly in leaf nodes (.Bytes / .Short_Bytes without .Sorted_KV_Pair indirection),
+	// supports reinterpretation as Sorted_Map (promoting key-only entries when values are written),
+	// and Linked_Array_List supports `linked_array_list_append_context`
+	then_sorted_set_stores_key_only_leaf_entries_and_reinterprets_with_sorted_map(&ctx)
+	then_linked_array_list_append_context_nests_collections(&ctx)
+}
+
 
 
 

@@ -868,20 +868,20 @@ slot_with_full :: proc(s: Slot, full: bool) -> Slot {
 	return res
 }
 
-slot_to_bytes :: proc(s: Slot) -> [SLOT_LENGTH]u8 {
-	buf: [SLOT_LENGTH]u8
+slot_to_bytes :: #force_inline proc(s: Slot) -> [SLOT_LENGTH]u8 {
+	buf: [SLOT_LENGTH]u8 = ---
 	full_bit := u8(0x80) if s.full else u8(0)
 	buf[0] = full_bit | (u8(s.tag) & 0x7f)
-	endian.put_u64(buf[1:9], .Big, u64(s.value))
+	endian.unchecked_put_u64be(buf[1:9], u64(s.value))
 	return buf
 }
 
 // Decode a Slot without validating the tag yet (matches Go SlotFromBytes + Tag.validate()).
-slot_from_bytes_raw :: proc(buf: [SLOT_LENGTH]u8) -> Slot {
+slot_from_bytes_raw :: #force_inline proc(buf: [SLOT_LENGTH]u8) -> Slot {
 	b := buf
 	full := (b[0] & 0x80) != 0
 	raw_tag := b[0] & 0x7f
-	val, _ := endian.get_u64(b[1:9], .Big)
+	val := endian.unchecked_get_u64be(b[1:9])
 	return Slot{
 		value = i64(val),
 		tag   = Tag(raw_tag),
@@ -889,7 +889,18 @@ slot_from_bytes_raw :: proc(buf: [SLOT_LENGTH]u8) -> Slot {
 	}
 }
 
-slot_from_bytes :: proc(buf: [SLOT_LENGTH]u8) -> (s: Slot, err: Error) {
+slot_from_slice_raw :: #force_inline proc(b: []u8) -> Slot #no_bounds_check {
+	full := (b[0] & 0x80) != 0
+	raw_tag := b[0] & 0x7f
+	val := endian.unchecked_get_u64be(b[1:9])
+	return Slot{
+		value = i64(val),
+		tag   = Tag(raw_tag),
+		full  = full,
+	}
+}
+
+slot_from_bytes :: #force_inline proc(buf: [SLOT_LENGTH]u8) -> (s: Slot, err: Error) {
 	s = slot_from_bytes_raw(buf)
 	tag_validate(s.tag) or_return
 	return s, nil
@@ -1055,19 +1066,17 @@ array_list_header_with_ptr :: proc(h: Array_List_Header, ptr: i64) -> Array_List
 	return Array_List_Header{ptr = ptr, size = h.size}
 }
 
-array_list_header_to_bytes :: proc(h: Array_List_Header) -> [ARRAY_LIST_HEADER_LENGTH]u8 {
-	buf: [ARRAY_LIST_HEADER_LENGTH]u8
-	endian.put_u64(buf[0:8], .Big, u64(h.size))
-	endian.put_u64(buf[8:16], .Big, u64(h.ptr))
+array_list_header_to_bytes :: #force_inline proc(h: Array_List_Header) -> [ARRAY_LIST_HEADER_LENGTH]u8 {
+	buf: [ARRAY_LIST_HEADER_LENGTH]u8 = ---
+	endian.unchecked_put_u64be(buf[0:8], u64(h.size))
+	endian.unchecked_put_u64be(buf[8:16], u64(h.ptr))
 	return buf
 }
 
-array_list_header_from_bytes :: proc(buf: [ARRAY_LIST_HEADER_LENGTH]u8) -> (res: Array_List_Header, err: Error) {
+array_list_header_from_bytes :: #force_inline proc(buf: [ARRAY_LIST_HEADER_LENGTH]u8) -> (res: Array_List_Header, err: Error) {
 	b := buf
-	u_size, _ := endian.get_u64(b[0:8], .Big)
-	u_ptr, _ := endian.get_u64(b[8:16], .Big)
-	size := i64(u_size)
-	ptr := i64(u_ptr)
+	size := i64(endian.unchecked_get_u64be(b[0:8]))
+	ptr := i64(endian.unchecked_get_u64be(b[8:16]))
 	if size < 0 || ptr < 0 {
 		return {}, .Expected_Unsigned_Long
 	}
@@ -1080,19 +1089,17 @@ BTree_Header :: struct {
 	size:     i64,
 }
 
-btree_header_to_bytes :: proc(h: BTree_Header) -> [BTREE_HEADER_LENGTH]u8 {
-	buf: [BTREE_HEADER_LENGTH]u8
-	endian.put_u64(buf[0:8], .Big, u64(h.size))
-	endian.put_u64(buf[8:16], .Big, u64(h.root_ptr))
+btree_header_to_bytes :: #force_inline proc(h: BTree_Header) -> [BTREE_HEADER_LENGTH]u8 {
+	buf: [BTREE_HEADER_LENGTH]u8 = ---
+	endian.unchecked_put_u64be(buf[0:8], u64(h.size))
+	endian.unchecked_put_u64be(buf[8:16], u64(h.root_ptr))
 	return buf
 }
 
-btree_header_from_bytes :: proc(buf: [BTREE_HEADER_LENGTH]u8) -> (res: BTree_Header, err: Error) {
+btree_header_from_bytes :: #force_inline proc(buf: [BTREE_HEADER_LENGTH]u8) -> (res: BTree_Header, err: Error) {
 	b := buf
-	u_size, _ := endian.get_u64(b[0:8], .Big)
-	u_ptr, _ := endian.get_u64(b[8:16], .Big)
-	size := i64(u_size)
-	root_ptr := i64(u_ptr)
+	size := i64(endian.unchecked_get_u64be(b[0:8]))
+	root_ptr := i64(endian.unchecked_get_u64be(b[8:16]))
 	if size < 0 || root_ptr < 0 {
 		return {}, .Expected_Unsigned_Long
 	}
@@ -1126,12 +1133,8 @@ kv_pair_from_bytes :: proc(b: []u8, hash_size: int, allocator := context.allocat
 		h = make([]u8, hash_size, allocator)
 		copy(h, b[:hash_size])
 	}
-	var_kb: [SLOT_LENGTH]u8
-	copy(var_kb[:], b[hash_size:hash_size + SLOT_LENGTH])
-	key_slot := slot_from_bytes_raw(var_kb)
-	var_vb: [SLOT_LENGTH]u8
-	copy(var_vb[:], b[hash_size + SLOT_LENGTH:hash_size + SLOT_LENGTH * 2])
-	val_slot := slot_from_bytes_raw(var_vb)
+	key_slot := slot_from_slice_raw(b[hash_size : hash_size + SLOT_LENGTH])
+	val_slot := slot_from_slice_raw(b[hash_size + SLOT_LENGTH : hash_size + SLOT_LENGTH * 2])
 	return Key_Value_Pair{value_slot = val_slot, key_slot = key_slot, hash = h}
 }
 
@@ -1148,7 +1151,7 @@ decode_kv_pair :: proc(c: ^Core, tag: Tag, hash_size: int, allocator := context.
 	case .KV_Pair:
 		kv_len := kv_pair_length(hash_size)
 		if kv_len <= 128 {
-			stack_buf: [128]u8
+			stack_buf: [128]u8 = ---
 			b := stack_buf[:kv_len]
 			core_read_exact(c, b) or_return
 			kv = kv_pair_from_bytes(b, hash_size, allocator)
@@ -1158,7 +1161,7 @@ decode_kv_pair :: proc(c: ^Core, tag: Tag, hash_size: int, allocator := context.
 			kv = kv_pair_from_bytes(b, hash_size, allocator)
 		}
 	case .Sorted_KV_Pair:
-		b: [SORTED_KEY_VALUE_LEN]u8
+		b: [SORTED_KEY_VALUE_LEN]u8 = ---
 		core_read_exact(c, b[:]) or_return
 		kv = kv_pair_from_bytes(b[:], 0, allocator)
 	case:
@@ -1183,17 +1186,13 @@ decode_kv_pair :: proc(c: ^Core, tag: Tag, hash_size: int, allocator := context.
 kv_pair_read_buf :: proc(c: ^Core, hash_buf: []u8) -> (kv: Key_Value_Pair, err: Error) {
 	hash_size := len(hash_buf)
 	kv_len := kv_pair_length(hash_size)
-	stack_buf: [128]u8
+	stack_buf: [128]u8 = ---
 	b := stack_buf[:kv_len] if kv_len <= len(stack_buf) else make([]u8, kv_len, context.temp_allocator)
 	core_read_exact(c, b) or_return
 	copy(hash_buf, b[:hash_size])
-	var_kb: [SLOT_LENGTH]u8
-	copy(var_kb[:], b[hash_size:hash_size + SLOT_LENGTH])
-	key_slot := slot_from_bytes_raw(var_kb)
+	key_slot := slot_from_slice_raw(b[hash_size : hash_size + SLOT_LENGTH])
 	tag_validate(key_slot.tag) or_return
-	var_vb: [SLOT_LENGTH]u8
-	copy(var_vb[:], b[hash_size + SLOT_LENGTH:hash_size + SLOT_LENGTH * 2])
-	val_slot := slot_from_bytes_raw(var_vb)
+	val_slot := slot_from_slice_raw(b[hash_size + SLOT_LENGTH : hash_size + SLOT_LENGTH * 2])
 	tag_validate(val_slot.tag) or_return
 	return Key_Value_Pair{value_slot = val_slot, key_slot = key_slot, hash = hash_buf}, nil
 }
@@ -1205,7 +1204,7 @@ encode_kv_pair :: proc(c: ^Core, tag: Tag, kv: Key_Value_Pair) -> Error {
 		vb := slot_to_bytes(kv.value_slot)
 		total := len(kv.hash) + SLOT_LENGTH * 2
 		if total <= 128 {
-			buf: [128]u8
+			buf: [128]u8 = ---
 			copy(buf[:len(kv.hash)], kv.hash)
 			copy(buf[len(kv.hash):len(kv.hash) + SLOT_LENGTH], kb[:])
 			copy(buf[len(kv.hash) + SLOT_LENGTH:total], vb[:])
@@ -1215,7 +1214,7 @@ encode_kv_pair :: proc(c: ^Core, tag: Tag, kv: Key_Value_Pair) -> Error {
 		core_write_all(c, kb[:]) or_return
 		return core_write_all(c, vb[:])
 	case .Sorted_KV_Pair:
-		buf: [SORTED_KEY_VALUE_LEN]u8
+		buf: [SORTED_KEY_VALUE_LEN]u8 = ---
 		kb := slot_to_bytes(kv.key_slot)
 		vb := slot_to_bytes(kv.value_slot)
 		copy(buf[:SLOT_LENGTH], kb[:])
@@ -1311,7 +1310,7 @@ Sorted_Split :: struct {
 Sorted_Insert_Result :: struct {
 	node_ptr: i64,
 	count:    i64,
-	kv_slot:  Slot,
+	entry:    Slot,
 	added:    bool,
 	split:    Maybe(Sorted_Split),
 }
@@ -1327,9 +1326,8 @@ Sorted_Slot :: struct {
 	position: i64,
 }
 
-Sorted_Entry :: struct {
-	kv_slot:  Slot,
-	key_slot: Slot,
+is_key_only_entry :: #force_inline proc(entry: Slot) -> bool {
+	return entry.tag == .Bytes || entry.tag == .Short_Bytes
 }
 
 // Bytes represents a byte array with an optional 2-byte format tag.

@@ -534,6 +534,20 @@ database_kv_key_offset :: proc(db: ^Database, tag: Tag) -> i64 {
 	return 0
 }
 
+database_kv_key_position :: proc(db: ^Database, entry: Slot) -> Maybe(i64) {
+	if is_key_only_entry(entry) {
+		return nil
+	}
+	return entry.value + database_kv_key_offset(db, entry.tag)
+}
+
+database_kv_value_position :: proc(db: ^Database, entry: Slot) -> Maybe(i64) {
+	if key_pos, ok := database_kv_key_position(db, entry).?; ok {
+		return key_pos + SLOT_LENGTH
+	}
+	return nil
+}
+
 // Central path-traversal method.
 read_slot_pointer :: proc(
 	db: ^Database,
@@ -1135,9 +1149,6 @@ _exec_path_part :: proc(
 			return read_slot_pointer(db, write_mode, path, path_i + 1, next_slot_ptr, frozen_at)
 
 		case .Sorted_Map, .Sorted_Set:
-			if slot_ptr.slot.tag != tag {
-				return {}, .Unexpected_Tag
-			}
 			header_ptr := slot_ptr.slot.value
 			old := database_is_old(db, header_ptr, frozen_at) or_return
 			if old {
@@ -1202,7 +1213,9 @@ _exec_path_part :: proc(
 			return read_slot_pointer(db, write_mode, path, path_i + 1, target_slot, frozen_at)
 		}
 
-		res := sorted_put(db, header.root_ptr, key, frozen_at) or_return
+		_, is_key_target := p.target.(Sorted_Map_Get_Key)
+		key_only := slot_ptr.slot.tag == .Sorted_Set && is_key_target
+		res := sorted_put(db, header.root_ptr, key, key_only, frozen_at) or_return
 		new_root_ptr := sorted_grow_root(db, res) or_return
 		if new_root_ptr != header.root_ptr || res.added {
 			core_seek_to(db.core, header_ptr) or_return
@@ -1212,9 +1225,9 @@ _exec_path_part :: proc(
 		}
 		target_slot: Slot_Pointer
 		if _, is_val := p.target.(Sorted_Map_Get_Value); is_val && res.added {
-			target_slot = Slot_Pointer{position = res.kv_slot.value + SLOT_LENGTH, slot = Slot{}}
+			target_slot = Slot_Pointer{position = res.entry.value + SLOT_LENGTH, slot = Slot{}}
 		} else {
-			target_slot = sorted_target_slot(db, res.kv_slot, p.target) or_return
+			target_slot = sorted_target_slot(db, res.entry, p.target) or_return
 		}
 		return read_slot_pointer(db, write_mode, path, path_i + 1, target_slot, frozen_at)
 
@@ -1297,9 +1310,41 @@ _exec_path_part :: proc(
 		val_slot_pos := key_slot_pos + SLOT_LENGTH
 
 		if slot_ptr.slot.full {
+			if val_slot, val_inline, val_err := _try_encode_inline_data(p.value); val_err != nil {
+				return {}, val_err
+			} else if val_inline {
+				if key_bytes, is_kbytes := _extract_bytes_data(p.key); is_kbytes && !bytes_is_short(key_bytes) {
+					if key_bytes.format_tag != nil && len(key_bytes.format_tag) != 2 {
+						return {}, .Invalid_Format_Tag_Size
+					}
+					if db.tx_start == nil {
+						return {}, .Expected_Tx_Start
+					}
+					cur_len := core_length(db.core) or_return
+					has_ft := key_bytes.format_tag != nil
+					key_payload_len := 8 + len(key_bytes.value) + (2 if has_ft else 0)
+					if cur_len == val_slot_pos + SLOT_LENGTH && key_payload_len <= 238 {
+						key_slot := Slot{value = cur_len, tag = .Bytes, full = has_ft}
+						combined_buf: [256]u8 = ---
+						out_kb := slot_to_bytes(key_slot)
+						out_vb := slot_to_bytes(val_slot)
+						copy(combined_buf[0:SLOT_LENGTH], out_kb[:])
+						copy(combined_buf[SLOT_LENGTH : SLOT_LENGTH * 2], out_vb[:])
+						endian.unchecked_put_u64be(combined_buf[18:26], u64(len(key_bytes.value)))
+						copy(combined_buf[26 : 26 + len(key_bytes.value)], key_bytes.value)
+						if has_ft {
+							copy(combined_buf[26 + len(key_bytes.value) : 18 + key_payload_len], key_bytes.format_tag)
+						}
+						core_seek_to(db.core, key_slot_pos) or_return
+						core_write_all(db.core, combined_buf[:18 + key_payload_len]) or_return
+						clean_sp := Slot_Pointer{position = slot_ptr.position, slot = slot_with_full(slot_ptr.slot, false)}
+						return read_slot_pointer(db, write_mode, path, path_i + 1, clean_sp, frozen_at)
+					}
+				}
+			}
 			key_slot := _encode_writeable_data(db, Slot_Pointer{position = key_slot_pos, slot = Slot{}}, p.key) or_return
 			val_slot := _encode_writeable_data(db, Slot_Pointer{position = val_slot_pos, slot = Slot{}}, p.value) or_return
-			slots_buf: [SLOT_LENGTH * 2]u8
+			slots_buf: [SLOT_LENGTH * 2]u8 = ---
 			out_kb := slot_to_bytes(key_slot)
 			out_vb := slot_to_bytes(val_slot)
 			copy(slots_buf[:SLOT_LENGTH], out_kb[:])
@@ -1334,6 +1379,74 @@ _exec_path_part :: proc(
 	}
 
 	return {}, .Unreachable
+}
+
+@(private)
+_extract_bytes_data :: #force_inline proc(write_data: Writeable_Data) -> (b: Bytes, ok: bool) {
+	#partial switch data in write_data {
+	case string:
+		return Bytes{value = transmute([]u8)data}, true
+	case []u8:
+		return Bytes{value = data}, true
+	case Bytes:
+		return data, true
+	}
+	return {}, false
+}
+
+@(private)
+_try_encode_inline_data :: #force_inline proc(write_data: Writeable_Data) -> (slot: Slot, is_inline: bool, err: Error) {
+	switch data in write_data {
+	case nil:
+		return Slot{full = true}, true, nil
+	case Slot:
+		if data.tag == .None {
+			return slot_with_full(data, true), true, nil
+		}
+		return data, true, nil
+	case Uint:
+		return Slot{value = i64(data.value), tag = .Uint}, true, nil
+	case u64:
+		return Slot{value = i64(data), tag = .Uint}, true, nil
+	case Int:
+		return Slot{value = data.value, tag = .Int}, true, nil
+	case i64:
+		return Slot{value = data, tag = .Int}, true, nil
+	case Float:
+		return Slot{value = transmute(i64)data.value, tag = .Float}, true, nil
+	case f64:
+		return Slot{value = transmute(i64)data, tag = .Float}, true, nil
+	case string:
+		b := Bytes{value = transmute([]u8)data}
+		if bytes_is_short(b) {
+			buf: [8]u8
+			copy(buf[:], b.value)
+			return Slot{value = i64(endian.unchecked_get_u64be(buf[:])), tag = .Short_Bytes}, true, nil
+		}
+		return {}, false, nil
+	case []u8:
+		b := Bytes{value = data}
+		if bytes_is_short(b) {
+			buf: [8]u8
+			copy(buf[:], b.value)
+			return Slot{value = i64(endian.unchecked_get_u64be(buf[:])), tag = .Short_Bytes}, true, nil
+		}
+		return {}, false, nil
+	case Bytes:
+		if data.format_tag != nil && len(data.format_tag) != 2 {
+			return {}, false, .Invalid_Format_Tag_Size
+		}
+		if bytes_is_short(data) {
+			buf: [8]u8
+			copy(buf[:], data.value)
+			if data.format_tag != nil {
+				copy(buf[6:8], data.format_tag)
+			}
+			return Slot{value = i64(endian.unchecked_get_u64be(buf[:])), tag = .Short_Bytes, full = data.format_tag != nil}, true, nil
+		}
+		return {}, false, nil
+	}
+	return {}, false, nil
 }
 
 @(private)
@@ -1380,7 +1493,7 @@ _encode_bytes_slot :: proc(db: ^Database, slot_ptr: Slot_Pointer, data: Bytes) -
 		if data.format_tag != nil {
 			copy(buf[6:8], data.format_tag)
 		}
-		uval, _ := endian.get_u64(buf[:], .Big)
+		uval := endian.unchecked_get_u64be(buf[:])
 		return Slot{
 			value = i64(uval),
 			tag   = .Short_Bytes,
@@ -1398,7 +1511,7 @@ _encode_bytes_slot :: proc(db: ^Database, slot_ptr: Slot_Pointer, data: Bytes) -
 	has_ft := data.format_tag != nil
 	total_len := 8 + len(data.value) + (2 if has_ft else 0)
 	if total_len <= 256 {
-		buf: [256]u8
+		buf: [256]u8 = ---
 		endian.unchecked_put_u64be(buf[0:8], u64(len(data.value)))
 		copy(buf[8 : 8 + len(data.value)], data.value)
 		if has_ft {

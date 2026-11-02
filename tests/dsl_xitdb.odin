@@ -301,6 +301,14 @@ then_linked_array_list_handles_empty_slice_and_range_error_guards :: proc(ctx: ^
 	driver_verify_linked_array_list_edge_boundaries(ctx, initial_count)
 }
 
+then_sorted_set_stores_key_only_leaf_entries_and_reinterprets_with_sorted_map :: proc(ctx: ^Suite_Ctx) {
+	driver_verify_sorted_set_key_only_entries_and_map_reinterpretation(ctx)
+}
+
+then_linked_array_list_append_context_nests_collections :: proc(ctx: ^Suite_Ctx) {
+	driver_verify_linked_array_list_append_context(ctx)
+}
+
 
 
 

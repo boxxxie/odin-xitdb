@@ -436,8 +436,28 @@ core_write_all :: proc(c: ^Core, p: []u8) -> Error {
 	return .Invalid_Database
 }
 
+// Returns a read-only slice of `n` bytes at `pos` when backed by an in-memory buffer,
+// or `(nil, false, nil)` when file I/O is required.
+core_slice_at :: #force_inline proc(c: ^Core, pos: i64, n: int) -> (slice: []u8, in_mem: bool, err: Error) {
+	#partial switch &v in c {
+	case Core_Memory:
+		p := int(pos)
+		if p < 0 || p + n > len(v.buf) {
+			return nil, true, Xitdb_Error.Unexpected_EOF
+		}
+		return v.buf[p : p + n], true, nil
+	case Core_Buffered_File:
+		buf_len := i64(len(v.memory.buf))
+		if buf_len > 0 && pos >= v.memory_pos && pos + i64(n) <= v.memory_pos + buf_len {
+			mem_off := int(pos - v.memory_pos)
+			return v.memory.buf[mem_off : mem_off + n], true, nil
+		}
+	}
+	return nil, false, nil
+}
+
 core_read_byte :: proc(c: ^Core) -> (v: u8, err: Error) {
-	b: [1]u8
+	b: [1]u8 = ---
 	core_read_exact(c, b[:]) or_return
 	return b[0], nil
 }
@@ -448,76 +468,133 @@ core_write_byte :: proc(c: ^Core, v: u8) -> Error {
 }
 
 core_read_u16 :: proc(c: ^Core) -> (v: u16, err: Error) {
-	b: [2]u8
+	b: [2]u8 = ---
 	core_read_exact(c, b[:]) or_return
-	v, _ = endian.get_u16(b[:], .Big)
-	return v, nil
+	return endian.unchecked_get_u16be(b[:]), nil
 }
 
 core_write_u16 :: proc(c: ^Core, v: u16) -> Error {
-	b: [2]u8
-	endian.put_u16(b[:], .Big, v)
+	b: [2]u8 = ---
+	endian.unchecked_put_u16be(b[:], v)
 	return core_write_all(c, b[:])
 }
 
 core_read_u32 :: proc(c: ^Core) -> (v: u32, err: Error) {
-	b: [4]u8
+	b: [4]u8 = ---
 	core_read_exact(c, b[:]) or_return
-	v, _ = endian.get_u32(b[:], .Big)
-	return v, nil
+	return endian.unchecked_get_u32be(b[:]), nil
 }
 
 core_write_u32 :: proc(c: ^Core, v: u32) -> Error {
-	b: [4]u8
-	endian.put_u32(b[:], .Big, v)
+	b: [4]u8 = ---
+	endian.unchecked_put_u32be(b[:], v)
 	return core_write_all(c, b[:])
 }
 
-core_read_long :: proc(c: ^Core) -> (res: i64, err: Error) {
-	b: [8]u8
-	core_read_exact(c, b[:]) or_return
-	v, _ := endian.get_u64(b[:], .Big)
-	if i64(v) < 0 {
+core_read_long :: #force_inline proc(c: ^Core) -> (res: i64, err: Error) {
+	res = core_read_i64(c) or_return
+	if res < 0 {
 		return 0, Xitdb_Error.Expected_Unsigned_Long
 	}
-	return i64(v), nil
+	return res, nil
 }
 
-core_write_long :: proc(c: ^Core, v: i64) -> Error {
+core_write_long :: #force_inline proc(c: ^Core, v: i64) -> Error {
 	if v < 0 {
 		return Xitdb_Error.Expected_Unsigned_Long
 	}
-	b: [8]u8
-	endian.put_u64(b[:], .Big, u64(v))
-	return core_write_all(c, b[:])
+	return core_write_i64(c, v)
 }
 
-core_read_i64 :: proc(c: ^Core) -> (res: i64, err: Error) {
-	b: [8]u8
+core_read_i64 :: #force_inline proc(c: ^Core) -> (res: i64, err: Error) {
+	#partial switch &v in c {
+	case Core_Memory:
+		end_pos := v.pos + 8
+		if v.pos < 0 || end_pos > i64(len(v.buf)) {
+			v.pos = i64(len(v.buf))
+			return 0, Xitdb_Error.Unexpected_EOF
+		}
+		res = i64(endian.unchecked_get_u64be(v.buf[int(v.pos):int(end_pos)]))
+		v.pos = end_pos
+		return res, nil
+	case Core_Buffered_File:
+		buf_len := i64(len(v.memory.buf))
+		if buf_len > 0 && v.pos >= v.memory_pos && v.pos + 8 <= v.memory_pos + buf_len {
+			mem_off := int(v.pos - v.memory_pos)
+			res = i64(endian.unchecked_get_u64be(v.memory.buf[mem_off : mem_off + 8]))
+			v.pos += 8
+			return res, nil
+		}
+	}
+	b: [8]u8 = ---
 	core_read_exact(c, b[:]) or_return
-	v, _ := endian.get_u64(b[:], .Big)
-	return i64(v), nil
+	return i64(endian.unchecked_get_u64be(b[:])), nil
 }
 
-core_write_i64 :: proc(c: ^Core, v: i64) -> Error {
-	b: [8]u8
-	endian.put_u64(b[:], .Big, u64(v))
+core_write_i64 :: #force_inline proc(c: ^Core, v: i64) -> Error {
+	#partial switch &m in c {
+	case Core_Memory:
+		old_size := len(m.buf)
+		pos := int(m.pos)
+		end_pos := pos + 8
+		if end_pos > old_size {
+			resize(&m.buf, end_pos)
+		}
+		endian.unchecked_put_u64be(m.buf[pos:end_pos], u64(v))
+		m.pos = i64(end_pos)
+		return nil
+	}
+	b: [8]u8 = ---
+	endian.unchecked_put_u64be(b[:], u64(v))
 	return core_write_all(c, b[:])
 }
 
-core_read_slot_raw :: proc(c: ^Core) -> (s: Slot, err: Error) {
-	buf: [SLOT_LENGTH]u8
+core_read_slot_raw :: #force_inline proc(c: ^Core) -> (s: Slot, err: Error) {
+	#partial switch &v in c {
+	case Core_Memory:
+		end_pos := v.pos + SLOT_LENGTH
+		if v.pos < 0 || end_pos > i64(len(v.buf)) {
+			v.pos = i64(len(v.buf))
+			return {}, Xitdb_Error.Unexpected_EOF
+		}
+		s = slot_from_slice_raw(v.buf[int(v.pos):int(end_pos)])
+		v.pos = end_pos
+		return s, nil
+	case Core_Buffered_File:
+		buf_len := i64(len(v.memory.buf))
+		if buf_len > 0 && v.pos >= v.memory_pos && v.pos + SLOT_LENGTH <= v.memory_pos + buf_len {
+			mem_off := int(v.pos - v.memory_pos)
+			s = slot_from_slice_raw(v.memory.buf[mem_off : mem_off + SLOT_LENGTH])
+			v.pos += SLOT_LENGTH
+			return s, nil
+		}
+	}
+	buf: [SLOT_LENGTH]u8 = ---
 	core_read_exact(c, buf[:]) or_return
 	return slot_from_bytes_raw(buf), nil
 }
 
-core_read_slot :: proc(c: ^Core) -> (s: Slot, err: Error) {
-	buf: [SLOT_LENGTH]u8
-	core_read_exact(c, buf[:]) or_return
-	return slot_from_bytes(buf)
+core_read_slot :: #force_inline proc(c: ^Core) -> (s: Slot, err: Error) {
+	s = core_read_slot_raw(c) or_return
+	tag_validate(s.tag) or_return
+	return s, nil
 }
 
-core_write_slot :: proc(c: ^Core, s: Slot) -> Error {
+core_write_slot :: #force_inline proc(c: ^Core, s: Slot) -> Error {
+	#partial switch &v in c {
+	case Core_Memory:
+		old_size := len(v.buf)
+		pos := int(v.pos)
+		end_pos := pos + SLOT_LENGTH
+		if end_pos > old_size {
+			resize(&v.buf, end_pos)
+		}
+		full_bit := u8(0x80) if s.full else u8(0)
+		v.buf[pos] = full_bit | (u8(s.tag) & 0x7f)
+		endian.unchecked_put_u64be(v.buf[pos + 1 : end_pos], u64(s.value))
+		v.pos = i64(end_pos)
+		return nil
+	}
 	buf := slot_to_bytes(s)
 	return core_write_all(c, buf[:])
 }

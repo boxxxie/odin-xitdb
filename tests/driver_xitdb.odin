@@ -2266,6 +2266,108 @@ driver_verify_linked_array_list_edge_boundaries :: proc(ctx: ^Suite_Ctx, initial
 	driver_assert_moment_linked_list(ctx, 0, "list", []string{"rebuilt-0", "rebuilt-1"})
 }
 
+driver_verify_sorted_set_key_only_entries_and_map_reinterpretation :: proc(ctx: ^Suite_Ctx) {
+	cb_m0 :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+		c := (^Suite_Ctx)(user_data)
+		m := xitdb.write_hash_map_init(cursor^) or_return
+		sc := xitdb.hash_map_put_cursor(&m, "tags") or_return
+		ss := xitdb.write_sorted_set_init(sc) or_return
+
+		// Insert short key (<= 8 bytes -> .Short_Bytes) and long key (> 8 bytes -> .Bytes)
+		xitdb.sorted_set_put(&ss, "short") or_return
+		xitdb.sorted_set_put(&ss, "longer-sorted-set-key") or_return
+
+		// Verify leaf entries are stored directly as .Short_Bytes / .Bytes (not .Sorted_KV_Pair)
+		it := xitdb.sorted_set_iterator(ss.read_sorted_set) or_return
+		cur0, _ := xitdb.cursor_iterator_next(&it)
+		testing.expect_value(c.t, cur0.?.slot_ptr.slot.tag, xitdb.Tag.Bytes) // "longer-sorted-set-key" sorts before "short"
+		kv0 := xitdb.cursor_read_kv_pair(cur0.?, context.temp_allocator) or_return
+		testing.expect_value(c.t, kv0.value_cursor.slot_ptr.slot.tag, xitdb.Tag.None)
+		testing.expect_value(c.t, kv0.key_cursor.slot_ptr.position, nil)
+		testing.expect_value(c.t, kv0.value_cursor.slot_ptr.position, nil)
+
+		cur1, _ := xitdb.cursor_iterator_next(&it)
+		testing.expect_value(c.t, cur1.?.slot_ptr.slot.tag, xitdb.Tag.Short_Bytes) // "short"
+		return nil
+	}
+
+	cb_m1 :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+		c := (^Suite_Ctx)(user_data)
+		m := xitdb.write_hash_map_init(cursor^) or_return
+		sc := xitdb.hash_map_put_cursor(&m, "tags") or_return
+
+		// Reinterpret the existing Sorted_Set as a Write_Sorted_Map and assign a value to "short"
+		sm := xitdb.write_sorted_map_init(sc) or_return
+		xitdb.sorted_map_put(&sm, "short", u64(42)) or_return
+
+		// Reinterpret back as a Write_Sorted_Set and verify duplicate put on an existing key-value entry leaves its value intact
+		ss := xitdb.write_sorted_set_init(sc) or_return
+		xitdb.sorted_set_put(&ss, "short") or_return
+
+		val_cur, _ := xitdb.sorted_map_get_cursor(sm.read_sorted_map, "short")
+		val, _ := xitdb.cursor_read_uint(val_cur.?)
+		testing.expect_value(c.t, val, u64(42))
+
+		// While "longer-sorted-set-key" remains a key-only entry with an empty (.None) value
+		long_val_slot, _ := xitdb.sorted_map_get_slot(sm.read_sorted_map, "longer-sorted-set-key")
+		testing.expect(c.t, long_val_slot == nil, "Expected key-only entry to have no value in Sorted_Map")
+		return nil
+	}
+
+	testing.expect_value(ctx.t, driver_run_moment_tx(ctx, nil, cb_m0, ctx), nil)
+	testing.expect_value(ctx.t, driver_run_moment_tx(ctx, 0, cb_m1, ctx), nil)
+
+	// Compact and verify both key-only and promoted key-value entries survive compaction
+	driver_compact_primary(ctx, false)
+	cm1 := driver_read_moment_map(ctx, 0, .Compacted)
+	tags_cur, _ := xitdb.hash_map_get_cursor(cm1, "tags")
+	csm, _ := xitdb.read_sorted_map_init(tags_cur.?)
+	s_cur, _ := xitdb.sorted_map_get_cursor(csm, "short")
+	s_val, _ := xitdb.cursor_read_uint(s_cur.?)
+	testing.expect_value(ctx.t, s_val, u64(42))
+
+	css, _ := xitdb.read_sorted_set_init(tags_cur.?)
+	has_long, _ := xitdb.sorted_set_contains(css, "longer-sorted-set-key")
+	testing.expect(ctx.t, has_long, "Expected key-only entry to survive compaction")
+}
+
+driver_verify_linked_array_list_append_context :: proc(ctx: ^Suite_Ctx) {
+	cb :: proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		m := xitdb.write_hash_map_init(cursor^) or_return
+		lc := xitdb.hash_map_put_cursor(&m, "events") or_return
+		ll := xitdb.write_linked_array_list_init(lc) or_return
+
+		xitdb.linked_array_list_append_context(&ll, xitdb.Slot{}, proc(item_cur: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+			ev := xitdb.write_hash_map_init(item_cur^) or_return
+			xitdb.hash_map_put(&ev, "kind", "login") or_return
+			xitdb.hash_map_put(&ev, "seq", u64(1)) or_return
+			return nil
+		}) or_return
+
+		xitdb.linked_array_list_append_context(&ll, xitdb.Slot{}, proc(item_cur: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+			ev := xitdb.write_hash_map_init(item_cur^) or_return
+			xitdb.hash_map_put(&ev, "kind", "logout") or_return
+			xitdb.hash_map_put(&ev, "seq", u64(2)) or_return
+			return nil
+		}) or_return
+		return nil
+	}
+
+	testing.expect_value(ctx.t, driver_run_moment_tx(ctx, -1, cb, nil), nil)
+
+	m_last := driver_read_moment_map(ctx, -1)
+	ev_cur, _ := xitdb.hash_map_get_cursor(m_last, "events")
+	ll, _ := xitdb.read_linked_array_list_init(ev_cur.?)
+	cnt, _ := xitdb.linked_array_list_count(ll)
+	testing.expect_value(ctx.t, cnt, i64(2))
+
+	item1_cur, _ := xitdb.linked_array_list_get_cursor(ll, 1)
+	item1_map, _ := xitdb.read_hash_map_init(item1_cur.?)
+	kind_cur, _ := xitdb.hash_map_get_cursor(item1_map, "kind")
+	kind_str, _ := xitdb.cursor_read_string(kind_cur.?, 64, context.temp_allocator)
+	testing.expect_value(ctx.t, kind_str, "logout")
+}
+
 
 
 
