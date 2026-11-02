@@ -161,7 +161,7 @@ calc_percentile :: proc(sorted: []f64, p: f64) -> f64 {
 }
 
 print_header :: proc() {
-	fmt.println("============================================================================================================================================")
+	fmt.println("=================================================================================================================================================================")
 	fmt.printf(
 		"  Commit: %s | Lang: odin | Runs: %d (Warmup: %d) | Run ID: %s\n",
 		g_commit_sha,
@@ -169,19 +169,21 @@ print_header :: proc() {
 		g_warmup,
 		g_run_id,
 	)
-	fmt.println("============================================================================================================================================")
+	fmt.println("=================================================================================================================================================================")
 	fmt.printf(
-		"%-48s | %8s | %10s | %12s | %16s | %6s | %13s | %12s\n",
+		"%-48s | %8s | %10s | %10s | %16s | %6s | %8s | %8s | %13s | %11s\n",
 		"Benchmark",
 		"Ops",
 		"Total (ms)",
-		"Median ns/op",
+		"Med (p50)",
 		"Mean ± StdDev",
 		"CV%",
+		"IQR ns",
+		"p95 ns",
 		"Min..Max ns",
 		"ops/sec",
 	)
-	fmt.println("--------------------------------------------------------------------------------------------------------------------------------------------")
+	fmt.println("-----------------------------------------------------------------------------------------------------------------------------------------------------------------")
 }
 
 print_result :: proc(r: Bench_Result) {
@@ -254,31 +256,37 @@ flush_group_results :: proc() {
 
 		mean_sd_str := fmt.tprintf("%s ± %s", fmt.tprintf("%.0f", mean_ns), fmt.tprintf("%.1f", stddev_ns))
 		cv_str := fmt.tprintf("%.1f%%", cv_pct)
+		iqr_str := fmt.tprintf("%.1f", iqr_ns)
+		p95_str := fmt.tprintf("%.0f", p95_ns)
 		minmax_str := fmt.tprintf("%.0f..%.0f", min_ns, max_ns)
 
 		if acc.bytes_used > 0 {
 			kb := f64(acc.bytes_used) / 1024.0
 			fmt.printf(
-				"%-48s | % 8d | % 10.2f | % 12.0f | %16s | %6s | %13s | % 12.0f  (%.1f KB)\n",
+				"%-48s | % 8d | % 10.2f | % 10.0f | %16s | %6s | %8s | %8s | %13s | % 11.0f  (%.1f KB)\n",
 				acc.name,
 				acc.ops,
 				median_ms,
 				median_ns,
 				mean_sd_str,
 				cv_str,
+				iqr_str,
+				p95_str,
 				minmax_str,
 				ops_per_sec,
 				kb,
 			)
 		} else {
 			fmt.printf(
-				"%-48s | % 8d | % 10.2f | % 12.0f | %16s | %6s | %13s | % 12.0f\n",
+				"%-48s | % 8d | % 10.2f | % 10.0f | %16s | %6s | %8s | %8s | %13s | % 11.0f\n",
 				acc.name,
 				acc.ops,
 				median_ms,
 				median_ns,
 				mean_sd_str,
 				cv_str,
+				iqr_str,
+				p95_str,
 				minmax_str,
 				ops_per_sec,
 			)
@@ -2237,6 +2245,72 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 			name    = "DSL Layer 5: Datalog Cycle-Safe reach (32-ring)",
 			ops     = R,
 			elapsed = time.since(t2),
+		})
+		free_all(context.temp_allocator)
+	}
+
+	// 6. Layer 2 & 3/4: Secondary Index Stale-Key Eviction (`tx_index_on` update) & Cyclic Graph `pull` + `diff`
+	{
+		U :: 200
+		t0 := time.now()
+		tx_evict := xitdb.tx_init(&db, base_moment = -1, track_changes = false, allocator = context.temp_allocator)
+		xitdb.tx_index_on(&tx_evict, "users", "username", "username->id")
+		for i in 0 ..< U {
+			id_str := fmt.tprintf("u%04d", i)
+			new_uname := fmt.tprintf("renamed_%04d", i)
+			_ = xitdb.tx_put(&tx_evict, fmt.tprintf(".users[%q].username", id_str), new_uname)
+		}
+		_, ev_err := xitdb.tx_commit(&tx_evict)
+		assert(ev_err == nil)
+		print_result(Bench_Result{
+			name    = "DSL Layer 2: Secondary Index Evict+Update (N=200)",
+			ops     = U,
+			elapsed = time.since(t0),
+		})
+		free_all(context.temp_allocator)
+
+		// Seed cyclic Slot references in a dedicated moment and benchmark cycle-safe `pull` + `diff_moments`
+		tx_cyc := xitdb.tx_init(&db, base_moment = -1, track_changes = true, allocator = context.temp_allocator)
+		xitdb.tx_with_cursor(&tx_cyc, proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+			moment := xitdb.write_hash_map_init(cursor^) or_return
+			m_slot := xitdb.hash_map_slot(moment.read_hash_map) or_return
+			xitdb.hash_map_put(&moment, "self", m_slot) or_return
+
+			ma_cur := xitdb.hash_map_put_cursor(&moment, "node_a") or_return
+			ma := xitdb.write_hash_map_init(ma_cur) or_return
+			xitdb.hash_map_put(&ma, "label", "A") or_return
+
+			mb_cur := xitdb.hash_map_put_cursor(&moment, "node_b") or_return
+			mb := xitdb.write_hash_map_init(mb_cur) or_return
+			xitdb.hash_map_put(&mb, "label", "B") or_return
+
+			mb_slot := xitdb.hash_map_slot(mb.read_hash_map) or_return
+			xitdb.hash_map_put(&ma, "peer", mb_slot) or_return
+			ma_slot := xitdb.hash_map_slot(ma.read_hash_map) or_return
+			xitdb.hash_map_put(&mb, "peer", ma_slot) or_return
+			return nil
+		})
+		rep_cyc, cyc_err := xitdb.tx_commit(&tx_cyc)
+		assert(cyc_err == nil)
+
+		tx_cyc2 := xitdb.tx_init(&db, base_moment = -1, track_changes = false, allocator = context.temp_allocator)
+		_ = xitdb.tx_put(&tx_cyc2, ".node_a.label", "A_v2")
+		rep_cyc2, cyc2_err := xitdb.tx_commit(&tx_cyc2)
+		assert(cyc2_err == nil)
+
+		C :: 200
+		node_a_cur, _ := xitdb.select_cursor(&db, "@-1.node_a")
+		t1 := time.now()
+		for _ in 0 ..< C {
+			pv, p_err := xitdb.pull(node_a_cur.?, "*", context.temp_allocator)
+			assert(p_err == nil && pv != nil)
+			diffs, d_err := xitdb.diff_moments(&db, rep_cyc.moment_index, rep_cyc2.moment_index, false, context.temp_allocator)
+			assert(d_err == nil && len(diffs) == 1)
+		}
+		print_result(Bench_Result{
+			name    = "DSL Layer 3/4: Cyclic Graph pull + diff (N=200)",
+			ops     = C,
+			elapsed = time.since(t1),
 		})
 		free_all(context.temp_allocator)
 	}

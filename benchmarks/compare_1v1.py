@@ -228,19 +228,19 @@ def print_1v1_comparison(odin_rows: List[Dict[str, Any]], zig_rows: List[Dict[st
     z_samples = zig_rows[0]["runs"]
 
     print()
-    print("=" * 150)
+    print("=" * 172)
     print(
         f"  xitdb 1v1 Statistical Benchmark Comparison: Odin (-o:speed) vs Zig 0.17.0 (-Doptimize=ReleaseFast)\n"
         f"  Commit: Odin={o_commit} ({o_samples} samples/test across {odin_rows[0]['num_invocations']} run(s)) | "
         f"Zig={z_commit} ({z_samples} samples/test across {zig_rows[0]['num_invocations']} run(s))"
     )
-    print("=" * 150)
+    print("=" * 172)
     header = (
-        f"  {'Benchmark':<46} | {'Ops':>7} | {'Odin Med ± σ (CV%)':>23} | "
-        f"{'Zig Med ± σ (CV%)':>23} | {'Speedup (Sig)':>19} | {'Footprint':>12}"
+        f"  {'Benchmark':<46} | {'Ops':>7} | {'Odin Med ± σ (CV% | p95)':>32} | "
+        f"{'Zig Med ± σ (CV% | p95)':>32} | {'Speedup (Sig)':>19} | {'Welch z':>8} | {'Footprint':>10}"
     )
     print(header)
-    print("  " + "-" * 146)
+    print("  " + "-" * 168)
 
     odin_wins = 0
     zig_wins = 0
@@ -261,8 +261,8 @@ def print_1v1_comparison(odin_rows: List[Dict[str, Any]], zig_rows: List[Dict[st
         z_stat = welch_z_score(o, z)
         sig_flag = "*" if z_stat >= 1.96 else "~"
 
-        o_cell = f"{o['ns_per_op']:>6} ± {o['stddev_ns']:>5.1f} ({o['cv_pct']:>4.1f}%)"
-        z_cell = f"{z['ns_per_op']:>6} ± {z['stddev_ns']:>5.1f} ({z['cv_pct']:>4.1f}%)"
+        o_cell = f"{o['ns_per_op']:>6} ± {o['stddev_ns']:>5.1f} ({o['cv_pct']:>4.1f}%|p95:{o['p95_ns']:>6.0f})"
+        z_cell = f"{z['ns_per_op']:>6} ± {z['stddev_ns']:>5.1f} ({z['cv_pct']:>4.1f}%|p95:{z['p95_ns']:>6.0f})"
 
         if o["ns_per_op"] == z["ns_per_op"]:
             ties += 1
@@ -277,28 +277,28 @@ def print_1v1_comparison(odin_rows: List[Dict[str, Any]], zig_rows: List[Dict[st
             ratio_str = f"{ratio:5.2f}x Zig  ({sig_flag})"
 
         print(
-            f"  {o['name']:<46} | {o['ops']:>7} | {o_cell:>23} | "
-            f"{z_cell:>23} | {ratio_str:>19} | {size_col:>12}"
+            f"  {o['name']:<46} | {o['ops']:>7} | {o_cell:>32} | "
+            f"{z_cell:>32} | {ratio_str:>19} | {z_stat:>8.1f} | {size_col:>10}"
         )
 
     if odin_only:
-        print("  " + "-" * 146)
+        print("  " + "-" * 168)
         print(f"  Odin-Only Benchmarks (5-Layer DSL & Datalog Engine) [{len(odin_only)} benchmarks]:")
         for o in odin_only:
-            o_cell = f"{o['ns_per_op']:>6} ± {o['stddev_ns']:>5.1f} ({o['cv_pct']:>4.1f}%)"
+            o_cell = f"{o['ns_per_op']:>6} ± {o['stddev_ns']:>5.1f} ({o['cv_pct']:>4.1f}%|p95:{o['p95_ns']:>6.0f})"
             o_sz = fmt_kb(o["bytes_used"])
             print(
-                f"  {o['name']:<46} | {o['ops']:>7} | {o_cell:>23} | "
-                f"{'—':>23} | {'—':>19} | {o_sz:>12}"
+                f"  {o['name']:<46} | {o['ops']:>7} | {o_cell:>32} | "
+                f"{'—':>32} | {'—':>19} | {'—':>8} | {o_sz:>10}"
             )
 
-    print("=" * 150)
+    print("=" * 172)
     print(
         f"  Summary ({len(shared)} shared): Odin faster on {odin_wins}/{len(shared)}, "
         f"Zig faster on {zig_wins}/{len(shared)}, Ties: {ties}/{len(shared)} | "
         f"Footprint Mismatches: {footprint_mismatches} | (* = Welch z>=1.96, ~ = within variance)"
     )
-    print("=" * 150)
+    print("=" * 172)
 
 
 def compare_commits(records: List[Dict[str, Any]], sha_a: str, sha_b: str, lang: str) -> None:

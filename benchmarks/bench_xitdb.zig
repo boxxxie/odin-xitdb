@@ -183,17 +183,17 @@ fn calcPercentile(sorted: []const f64, p: f64) f64 {
 }
 
 fn printHeader(stdout: *std.Io.Writer) !void {
-    try stdout.writeAll("============================================================================================================================================\n");
+    try stdout.writeAll("=================================================================================================================================================================\n");
     try stdout.print(
         "  Commit: {s} | Lang: zig | Runs: {d} (Warmup: {d}) | Run ID: {s}\n",
         .{ g_commit_sha, g_runs, g_warmup, g_run_id },
     );
-    try stdout.writeAll("============================================================================================================================================\n");
+    try stdout.writeAll("=================================================================================================================================================================\n");
     try stdout.print(
-        "{s:<48} | {s:>8} | {s:>10} | {s:>12} | {s:>16} | {s:>6} | {s:>13} | {s:>12}\n",
-        .{ "Benchmark", "Ops", "Total (ms)", "Median ns/op", "Mean ± StdDev", "CV%", "Min..Max ns", "ops/sec" },
+        "{s:<48} | {s:>8} | {s:>10} | {s:>10} | {s:>16} | {s:>6} | {s:>8} | {s:>8} | {s:>13} | {s:>11}\n",
+        .{ "Benchmark", "Ops", "Total (ms)", "Med (p50)", "Mean ± StdDev", "CV%", "IQR ns", "p95 ns", "Min..Max ns", "ops/sec" },
     );
-    try stdout.writeAll("--------------------------------------------------------------------------------------------------------------------------------------------\n");
+    try stdout.writeAll("-----------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
     try stdout.flush();
 }
 
@@ -317,19 +317,23 @@ fn flushGroupResults(stdout: *std.Io.Writer) !void {
         const mean_sd_str = try std.fmt.bufPrint(&mean_sd_buf, "{d:.0} ± {d:.1}", .{ mean_ns, stddev_ns });
         var cv_buf: [16]u8 = undefined;
         const cv_str = try std.fmt.bufPrint(&cv_buf, "{d:.1}%", .{cv_pct});
+        var iqr_buf: [16]u8 = undefined;
+        const iqr_str = try std.fmt.bufPrint(&iqr_buf, "{d:.1}", .{iqr_ns});
+        var p95_buf: [16]u8 = undefined;
+        const p95_str = try std.fmt.bufPrint(&p95_buf, "{d:.0}", .{p95_ns});
         var minmax_buf: [32]u8 = undefined;
         const minmax_str = try std.fmt.bufPrint(&minmax_buf, "{d:.0}..{d:.0}", .{ min_ns, max_ns });
 
         if (acc.bytes_used > 0) {
             const kb = @as(f64, @floatFromInt(acc.bytes_used)) / 1024.0;
             try stdout.print(
-                "{s:<48} | {d:>8} | {d:>10.2} | {d:>12.0} | {s:>16} | {s:>6} | {s:>13} | {d:>12.0}  ({d:.1} KB)\n",
-                .{ acc.name, acc.ops, median_ms, median_ns, mean_sd_str, cv_str, minmax_str, ops_per_sec, kb },
+                "{s:<48} | {d:>8} | {d:>10.2} | {d:>10.0} | {s:>16} | {s:>6} | {s:>8} | {s:>8} | {s:>13} | {d:>11.0}  ({d:.1} KB)\n",
+                .{ acc.name, acc.ops, median_ms, median_ns, mean_sd_str, cv_str, iqr_str, p95_str, minmax_str, ops_per_sec, kb },
             );
         } else {
             try stdout.print(
-                "{s:<48} | {d:>8} | {d:>10.2} | {d:>12.0} | {s:>16} | {s:>6} | {s:>13} | {d:>12.0}\n",
-                .{ acc.name, acc.ops, median_ms, median_ns, mean_sd_str, cv_str, minmax_str, ops_per_sec },
+                "{s:<48} | {d:>8} | {d:>10.2} | {d:>10.0} | {s:>16} | {s:>6} | {s:>8} | {s:>8} | {s:>13} | {d:>11.0}\n",
+                .{ acc.name, acc.ops, median_ms, median_ns, mean_sd_str, cv_str, iqr_str, p95_str, minmax_str, ops_per_sec },
             );
         }
         try stdout.flush();
