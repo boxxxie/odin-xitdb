@@ -773,7 +773,7 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 	for op in tx.ops {
 		switch op.kind {
 		case .Put:
-			_evict_stale_secondary_index_entries(tx, &moment, op) or_return
+			_evict_stale_secondary_index_entries(tx, &moment, ectx.has_parent, op) or_return
 			put_at_steps(moment.write_cursor, op.steps, op.val) or_return
 			_apply_secondary_index_rules(tx, &moment, op) or_return
 
@@ -797,7 +797,9 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 			linked_array_list_insert(&ll_col, op.offset, op.val) or_return
 
 		case .Remove:
-			_evict_stale_secondary_index_entries(tx, &moment, op) or_return
+			cursor_reload_slot(&moment.write_cursor) or_return
+			moment.read_hash_map.cursor = moment.write_cursor.read_cursor
+			_evict_stale_secondary_index_entries(tx, &moment, true, op) or_return
 			_execute_remove_steps(&moment, op.steps) or_return
 
 		case .Slice:
@@ -815,6 +817,8 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 			}
 
 		case .Fork:
+			cursor_reload_slot(&moment.write_cursor) or_return
+			moment.read_hash_map.cursor = moment.write_cursor.read_cursor
 			src_cur_maybe := read_steps_cursor(moment.read_hash_map.cursor, op.from_steps) or_return
 			src_cur, has_src := src_cur_maybe.?
 			if !has_src {
@@ -827,18 +831,21 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 
 		case .Savepoint:
 			database_freeze(cursor.db) or_return
+			cursor_reload_slot(&moment.write_cursor) or_return
+			moment.read_hash_map.cursor = moment.write_cursor.read_cursor
 
 		case .Callback:
 			if op.callback != nil {
 				mc := moment.write_cursor
 				op.callback(&mc, op.user_data) or_return
+				cursor_reload_slot(&moment.write_cursor) or_return
+				moment.read_hash_map.cursor = moment.write_cursor.read_cursor
 			}
 		}
 	}
 
-	// Only compute structural diff when __tx metadata or change tracking is enabled
-	wants_tx_meta := len(tx.doc) > 0 || tx.instant != nil || len(tx.meta) > 0 || tx.track_changes
-	if wants_tx_meta {
+	// Only compute the structural diff when change tracking (`tx.track_changes`) is requested
+	if tx.track_changes {
 		cursor_reload_slot(&moment.write_cursor) or_return
 		moment.read_hash_map.cursor = moment.write_cursor.read_cursor
 		base_cur := Read_Cursor{
@@ -850,7 +857,10 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 		for d in diffs {
 			append(&ectx.recorded, d)
 		}
+	}
 
+	wants_tx_meta := len(tx.doc) > 0 || tx.instant != nil || len(tx.meta) > 0 || tx.track_changes
+	if wants_tx_meta {
 		tx_cur := hash_map_put_cursor(&moment, "__tx") or_return
 		tx_map := write_hash_map_init(tx_cur) or_return
 		if len(tx.doc) > 0 {
@@ -865,15 +875,17 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 		for m_entry in tx.meta {
 			hash_map_put(&tx_map, m_entry.key, m_entry.val) or_return
 		}
-		changes_cur := hash_map_put_cursor(&tx_map, "changes") or_return
-		changes_list := write_array_list_init(changes_cur) or_return
-		for chg in ectx.recorded {
-			item_cur := array_list_append_cursor(&changes_list) or_return
-			item_map := write_hash_map_init(item_cur) or_return
-			hash_map_put(&item_map, "op", _op_kind_to_string(chg.op)) or_return
-			hash_map_put(&item_map, "path", chg.path_str) or_return
-			hash_map_put(&item_map, "old_tag", u64(chg.old_slot.tag)) or_return
-			hash_map_put(&item_map, "new_tag", u64(chg.new_slot.tag)) or_return
+		if tx.track_changes {
+			changes_cur := hash_map_put_cursor(&tx_map, "changes") or_return
+			changes_list := write_array_list_init(changes_cur) or_return
+			for chg in ectx.recorded {
+				item_cur := array_list_append_cursor(&changes_list) or_return
+				item_map := write_hash_map_init(item_cur) or_return
+				hash_map_put(&item_map, "op", _op_kind_to_string(chg.op)) or_return
+				hash_map_put(&item_map, "path", chg.path_str) or_return
+				hash_map_put(&item_map, "old_tag", u64(chg.old_slot.tag)) or_return
+				hash_map_put(&item_map, "new_tag", u64(chg.new_slot.tag)) or_return
+			}
 		}
 	}
 
@@ -961,8 +973,8 @@ _execute_remove_steps :: proc(moment: ^Write_Hash_Map, steps: []Path_Step) -> Er
 
 // Before overwriting or removing an indexed field/record, remove its previous key from the secondary Sorted_Map.
 @(private = "file")
-_evict_stale_secondary_index_entries :: proc(tx: ^Tx, moment: ^Write_Hash_Map, op: Tx_Op) -> Error {
-	if len(tx.index_rules) == 0 || len(op.steps) < 2 {
+_evict_stale_secondary_index_entries :: proc(tx: ^Tx, moment: ^Write_Hash_Map, has_parent: bool, op: Tx_Op) -> Error {
+	if !has_parent || len(tx.index_rules) == 0 || len(op.steps) < 2 {
 		return nil
 	}
 	for rule in tx.index_rules {
@@ -1683,8 +1695,50 @@ _is_collection_tag :: proc(tag: Tag) -> bool {
 
 // Pull a shaped projection (e.g. `"{username, age, fruits[0..2], people[0]{age}}"`) from `cursor`.
 pull :: proc(cursor: Read_Cursor, pattern: string, allocator := context.temp_allocator) -> (res: Pull_Value, err: Error) {
+	p := strings.trim_space(pattern)
+	if len(p) == 0 || p == "*" {
+		slot := cursor_slot(cursor) or_return
+		if !_is_collection_tag(slot.tag) {
+			return _pull_scalar_slot(cursor, slot, allocator)
+		}
+	}
 	visited := make(map[i64]bool, 16, context.temp_allocator)
 	return _pull_with_visited(cursor, pattern, &visited, allocator)
+}
+
+@(private = "file")
+_pull_scalar_slot :: proc(cursor: Read_Cursor, slot: Slot, allocator: runtime.Allocator) -> (res: Pull_Value, err: Error) {
+	#partial switch slot.tag {
+	case .None:
+		return nil, nil
+	case .Uint:
+		u := cursor_read_uint(cursor) or_return
+		return u, nil
+	case .Int:
+		i := cursor_read_int(cursor) or_return
+		return i, nil
+	case .Float:
+		f := cursor_read_float(cursor) or_return
+		return f, nil
+	case .Short_Bytes, .Bytes:
+		if slot.full {
+			obj := cursor_read_bytes_object(cursor, 0, allocator) or_return
+			return obj, nil
+		}
+		s := cursor_read_string(cursor, 0, allocator) or_return
+		return s, nil
+	}
+	return nil, .Unexpected_Tag
+}
+
+@(private = "file")
+_pull_cursor_value :: proc(cursor: Read_Cursor, allocator: runtime.Allocator) -> (res: Pull_Value, err: Error) {
+	slot := cursor_slot(cursor) or_return
+	if !_is_collection_tag(slot.tag) {
+		return _pull_scalar_slot(cursor, slot, allocator)
+	}
+	visited := make(map[i64]bool, 16, context.temp_allocator)
+	return _pull_wildcard(cursor, &visited, allocator)
 }
 
 @(private = "file")
@@ -2071,13 +2125,8 @@ _diff_recursive :: proc(
 				va_maybe := hash_map_get_cursor(map_a, k_str) or_return
 				if va_maybe == nil {
 					val_b_slot := cursor_slot(kv_b.value_cursor) or_return
-					if _is_collection_tag(val_b_slot.tag) && !visited[[2]i64{-1, val_b_slot.value}] {
-						sub_prefix := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = context.temp_allocator)
-						_diff_recursive(empty_cur, kv_b.value_cursor, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
-					} else {
-						child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
-						append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
-					}
+					child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
+					append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
 				}
 			}
 			return nil
@@ -2116,13 +2165,8 @@ _diff_recursive :: proc(
 				va_maybe := sorted_map_get_cursor(sm_a, k_str) or_return
 				if va_maybe == nil {
 					val_b_slot := cursor_slot(kv_b.value_cursor) or_return
-					if _is_collection_tag(val_b_slot.tag) && !visited[[2]i64{-1, val_b_slot.value}] {
-						sub_prefix := fmt.aprintf("%s$%s", prefix, k_str, allocator = context.temp_allocator)
-						_diff_recursive(empty_cur, kv_b.value_cursor, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
-					} else {
-						child_path := fmt.aprintf("%s$%s", prefix, k_str, allocator = allocator)
-						append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
-					}
+					child_path := fmt.aprintf("%s$%s", prefix, k_str, allocator = allocator)
+					append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
 				}
 			}
 			return nil
@@ -3432,12 +3476,12 @@ _eval_pattern_steps :: proc(
 		switch clause.rhs_kind {
 		case .None:
 		case .Literal:
-			actual := pull(cur, "*", allocator) or_return
+			actual := _pull_cursor_value(cur, allocator) or_return
 			if !_pull_value_equals(actual, clause.rhs_lit) {
 				return false, nil
 			}
 		case .Var:
-			actual := pull(cur, "*", allocator) or_return
+			actual := _pull_cursor_value(cur, allocator) or_return
 			if next_env.bound[clause.rhs_var] {
 				if !_pull_value_equals(next_env.vals[clause.rhs_var], actual) {
 					return false, nil
