@@ -11,6 +11,8 @@ const BenchResult = struct {
     bytes_used: u64 = 0,
 };
 
+var g_jsonl_writer: ?*std.Io.Writer = null;
+
 fn printHeader(stdout: *std.Io.Writer) !void {
     try stdout.writeAll("========================================================================================================\n");
     try stdout.print("{s:<48} | {s:>8} | {s:>10} | {s:>12} | {s:>12}\n", .{ "Benchmark", "Ops", "Total (ms)", "ns/op", "ops/sec" });
@@ -36,6 +38,14 @@ fn printResult(stdout: *std.Io.Writer, r: BenchResult) !void {
         );
     }
     try stdout.flush();
+
+    if (g_jsonl_writer) |jw| {
+        try jw.print(
+            "{{\"lang\":\"zig\",\"name\":\"{s}\",\"ops\":{d},\"total_ms\":{d:.3},\"ns_per_op\":{d:.0},\"ops_per_sec\":{d:.0},\"bytes_used\":{d}}}\n",
+            .{ r.name, r.ops, total_ms, ns_per_op, ops_per_sec, r.bytes_used },
+        );
+        try jw.flush();
+    }
 }
 
 inline fn hashSha1(data: []const u8) HashInt {
@@ -1848,6 +1858,12 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
+
+    var jsonl_buf: [4096]u8 = undefined;
+    const jsonl_file = try std.Io.Dir.cwd().createFile(io, "benchmarks/zig.jsonl", .{});
+    defer jsonl_file.close(io);
+    var jsonl_writer = jsonl_file.writer(io, &jsonl_buf);
+    g_jsonl_writer = &jsonl_writer.interface;
 
     try printHeader(stdout);
     try benchHamt(io, allocator, stdout, 2_000);

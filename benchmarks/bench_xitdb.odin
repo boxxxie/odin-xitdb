@@ -12,6 +12,8 @@ Bench_Result :: struct {
 	bytes_used: i64,
 }
 
+g_jsonl_file: ^os.File
+
 print_header :: proc() {
 	fmt.println("========================================================================================================")
 	fmt.printf("%-48s | %8s | %10s | %12s | %12s\n", "Benchmark", "Ops", "Total (ms)", "ns/op", "ops/sec")
@@ -43,6 +45,19 @@ print_result :: proc(r: Bench_Result) {
 			ns_per_op,
 			ops_per_sec,
 		)
+	}
+
+	if g_jsonl_file != nil {
+		line := fmt.tprintf(
+			"{{\"lang\":\"odin\",\"name\":\"%s\",\"ops\":%d,\"total_ms\":%.3f,\"ns_per_op\":%.0f,\"ops_per_sec\":%.0f,\"bytes_used\":%d}}\n",
+			r.name,
+			r.ops,
+			total_ms,
+			ns_per_op,
+			ops_per_sec,
+			r.bytes_used,
+		)
+		_, _ = os.write_string(g_jsonl_file, line)
 	}
 }
 
@@ -1700,6 +1715,14 @@ bench_backends :: proc(commits: int) {
 }
 
 main :: proc() {
+	jsonl_path := "benchmarks/odin.jsonl"
+	if f, err := os.open(jsonl_path, {.Write, .Create, .Trunc}, os.Permissions_Read_Write_All); err == nil {
+		g_jsonl_file = f
+	}
+	defer if g_jsonl_file != nil {
+		os.close(g_jsonl_file)
+	}
+
 	print_header()
 	bench_hamt(2_000)
 	bench_lists(2_000)

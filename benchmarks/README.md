@@ -23,7 +23,30 @@ odin run benchmarks -o:speed -microarch:native -no-bounds-check
 The upstream Zig reference implementation is tracked in `reference/xitdb-zig`. To run the Zig benchmark suite (requires Zig `0.17.0-dev` matching `reference/xitdb-zig/build.zig.zon`):
 
 ```bash
-zig build bench -Doptimize=ReleaseFast
+zig build bench -Doptimize=ReleaseFast -Dcpu=native
+```
+
+### JSONL Results & Clean Git Diffs (`odin.jsonl` / `zig.jsonl`)
+
+Every benchmark run automatically writes flat JSONL records (one JSON object per benchmark case) to:
+- `benchmarks/odin.jsonl` (written by `bench_xitdb.odin`)
+- `benchmarks/zig.jsonl` (written by `bench_xitdb.zig`)
+
+Each line follows the schema:
+```json
+{"lang":"odin","name":"HAMT Hash_Map bulk put (1 tx)","ops":2000,"total_ms":0.625,"ns_per_op":312,"ops_per_sec":3200947,"bytes_used":219650}
+```
+
+`.gitattributes` configures `*.jsonl diff=jsonl`. To get human-readable `git diff` output on `.jsonl` files (instead of noisy raw JSON diffs), configure the `jsonl` textconv driver in your local Git config:
+
+```bash
+git config diff.jsonl.textconv "jq -r 'if .bytes_used > 0 then \"\(.name) | \(.ns_per_op) ns/op | \(.ops_per_sec) ops/sec | \(.bytes_used) B\" else \"\(.name) | \(.ns_per_op) ns/op | \(.ops_per_sec) ops/sec\" end'"
+```
+
+You can also compare `benchmarks/odin.jsonl` and `benchmarks/zig.jsonl` directly with `jq`:
+
+```bash
+jq -rn '[inputs] | group_by(.name)[] | "\(.[0].name): Odin=\(.[0].ns_per_op)ns vs Zig=\(.[1].ns_per_op)ns (\((.[1].ns_per_op / ([.[0].ns_per_op, 1] | max) * 100 | round) / 100)x)"' benchmarks/odin.jsonl benchmarks/zig.jsonl
 ```
 
 ---
