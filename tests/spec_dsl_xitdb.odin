@@ -418,3 +418,77 @@ spec_datalog_transitive_reach_and_cycle_safe_graph_traversal :: proc(t: ^testing
 	cyclic_pkgs := xitdb.datalog_column_strings(cycle_res, "?p")
 	testing.expect_value(t, len(cyclic_pkgs), 3) // "http", "net", "core" (while "app" is not in the cycle!)
 }
+
+@(test)
+spec_dsl_error_guards_savepoint_survival_and_counted_collections :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
+
+	given_in_memory_database(&ctx, hash_algo = "sha1")
+
+	// 1. Malformed selectors, invalid 2-byte format tags, and bad Datalog syntax return clean errors
+	_, sel_err1 := xitdb.parse_selector("@abc.users")
+	testing.expect_value(t, sel_err1, xitdb.Xitdb_Error.Invalid_Range)
+
+	_, sel_err2 := xitdb.parse_selector("@-1.users[\"unclosed]")
+	testing.expect_value(t, sel_err2, xitdb.Xitdb_Error.Invalid_Range)
+
+	_, sel_err3 := xitdb.parse_selector("@-1.todos[[0]")
+	testing.expect_value(t, sel_err3, xitdb.Xitdb_Error.Invalid_Range)
+
+	_, tag_err := xitdb.transact_script(&ctx.primary_db, `
+		branch none {
+			put .doc = "# Title"^^markdown
+		}
+	`)
+	testing.expect_value(t, tag_err, xitdb.Xitdb_Error.Invalid_Format_Tag_Size)
+
+	_, dlog_err := xitdb.parse_datalog("SELECT * FROM users")
+	testing.expect_value(t, dlog_err, xitdb.Xitdb_Error.Invalid_Range)
+
+	// 2. Counted_Hash_Map (#), Counted_Hash_Set (#%), and Linked_Array_List ([[i]]) insert/remove
+	tx := xitdb.tx_init(&ctx.primary_db, base_moment = nil)
+	_ = xitdb.tx_put(&tx, "#metrics[\"views\"]", u64(100))
+	_ = xitdb.tx_put(&tx, "#metrics[\"clicks\"]", u64(25))
+	_ = xitdb.tx_put(&tx, ".visitors#%\"u1\"", "u1")
+	_ = xitdb.tx_put(&tx, ".visitors#%\"u2\"", "u2")
+	_ = xitdb.tx_put(&tx, ".queue[[0]]", "first")
+	_ = xitdb.tx_put(&tx, ".queue[[1]]", "third")
+	_ = xitdb.tx_insert(&tx, ".queue", 1, "second")
+
+	_, commit_err := xitdb.tx_commit(&tx)
+	testing.expect_value(t, commit_err, nil)
+
+	views, v_err := xitdb.get_uint(&ctx.primary_db, "@0#metrics[\"views\"]")
+	testing.expect_value(t, v_err, nil)
+	testing.expect_value(t, views, u64(100))
+
+	then_moment_has_counted_map_size(&ctx, 0, "metrics", 2)
+	then_moment_has_counted_set(&ctx, 0, "visitors", 2, []string{"u1", "u2"})
+	then_moment_has_linked_list(&ctx, 0, "queue", []string{"first", "second", "third"})
+
+	// Remove middle element from Linked_Array_List and 1 member from Counted_Hash_Set in Moment 1
+	tx1 := xitdb.tx_init(&ctx.primary_db, base_moment = 0)
+	_ = xitdb.tx_rm(&tx1, ".queue[[1]]")
+	_ = xitdb.tx_rm(&tx1, ".visitors#%\"u1\"")
+	_, err1 := xitdb.tx_commit(&tx1)
+	testing.expect_value(t, err1, nil)
+
+	then_moment_has_linked_list(&ctx, 1, "queue", []string{"first", "third"})
+	then_moment_has_counted_set(&ctx, 1, "visitors", 1, []string{"u2"})
+
+	// 3. Path_Step formatting round-trip with special characters
+	steps := []xitdb.Path_Step{
+		xitdb.hm("users"),
+		xitdb.hm("user.101"),
+		xitdb.chm("login count"),
+		xitdb.ll(2),
+	}
+	formatted := xitdb.format_steps(steps)
+	reparsed, rp_err := xitdb.parse_steps(formatted)
+	testing.expect_value(t, rp_err, nil)
+	testing.expect_value(t, len(reparsed), 4)
+	testing.expect_value(t, reparsed[1].key, "user.101")
+	testing.expect_value(t, reparsed[2].kind, xitdb.Step_Kind.Counted_Hash_Map_Key)
+	testing.expect_value(t, reparsed[3].index, i64(2))
+}
