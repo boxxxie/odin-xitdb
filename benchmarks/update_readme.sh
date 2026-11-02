@@ -42,8 +42,59 @@ def fmt_dec1($v):
   (($v * 10 | round) / 10 | tostring) as $s |
   if ($s | test("\\.")) then $s else $s + ".0" end;
 
+def fmt_dec2($v):
+  (($v * 100 | round) / 100 | tostring) as $s |
+  if ($s | test("\\.")) then
+    ($s | split(".")) as $parts |
+    $parts[0] + "." + (if ($parts[1] | length) == 1 then $parts[1] + "0" else $parts[1] end)
+  else
+    $s + ".00"
+  end;
+
 def fmt_sigma($v):
   if $v >= 100 then ($v | round | commify) else fmt_dec1($v) end;
+
+def fmt_us($ns):
+  ($ns / 1000.0) as $us |
+  if $us >= 10.0 then fmt_dec1($us)
+  else fmt_dec2($us)
+  end;
+
+def fmt_ops_count($n):
+  if $n >= 1000 and ($n % 1000 == 0) then (($n / 1000 | tostring) + "K")
+  else ($n | commify)
+  end;
+
+def fmt_si1($v):
+  if $v >= 1e8 then (($v / 1e6 | round | tostring) + "M")
+  elif $v >= 1e6 then (fmt_dec1($v / 1e6) + "M")
+  elif $v >= 1e5 then (($v / 1e3 | round | tostring) + "K")
+  elif $v >= 1e3 then (fmt_dec1($v / 1e3) + "K")
+  else ($v | round | tostring)
+  end;
+
+def fmt_si2($v):
+  if $v >= 1e8 then (fmt_dec1($v / 1e6) + "M")
+  elif $v >= 1e6 then (fmt_dec2($v / 1e6) + "M")
+  elif $v >= 1e5 then (fmt_dec1($v / 1e3) + "K")
+  elif $v >= 1e3 then (fmt_dec2($v / 1e3) + "K")
+  else ($v | round | tostring)
+  end;
+
+def fmt_ops_range($min_ns; $max_ns):
+  (1e9 / ([$max_ns, 1] | max)) as $lo_ops |
+  (1e9 / ([$min_ns, 1] | max)) as $hi_ops |
+  fmt_si1($lo_ops) as $lo1 |
+  fmt_si1($hi_ops) as $hi1 |
+  if $min_ns == $max_ns then
+    $lo1
+  elif $lo1 != $hi1 then
+    "\($lo1)–\($hi1)"
+  else
+    fmt_si2($lo_ops) as $lo2 |
+    fmt_si2($hi_ops) as $hi2 |
+    if $lo2 != $hi2 then "\($lo2)–\($hi2)" else $lo1 end
+  end;
 
 def fmt_ms($ms):
   (($ms * 100 | round) / 100 | tostring) as $s |
@@ -140,12 +191,31 @@ def filter_and_pool_commit($all; $lang; $sha):
   ($all | map(select(.lang == $lang and ((.commit // "unknown") | startswith($sha))))) as $filtered |
   ($filtered | group_by(.name) | map(pool_records(.)) | sort_by(.rank));
 
-def single_lang_table($list):
-  "| # | Benchmark | Ops | Median\u00a0(`ns`) | Mean\u00a0±\u00a0σ\u00a0(`ns`) | CV | IQR | `p95`\u00a0/\u00a0`p99` | Min..Max | `ops/sec` | Size |",
-  "| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+def tier_table_ns($list):
+  "| # | Benchmark | Ops | Med\u00a0(`ns`) | Mean\u00a0±\u00a0σ | CV | IQR | `p95` | `p99` | Min | Max | `ops/s` | Size |",
+  "| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ($list[] |
-    "| \(.rank) | `\(.name | nbsp)` | \(.ops | commify) | **\(.ns_per_op | commify)** | \(.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma(.stddev_ns)) | \(fmt_dec1(.cv_pct))% | \(.iqr_ns | round | commify) | \(.p95_ns | commify)\u00a0/\u00a0\(.p99_ns | commify) | \(.min_ns | commify)..\(.max_ns | commify) | \(.ops_per_sec | commify) | \(fmt_kb(.bytes_used)) |"
+    "| \(.rank) | `\(.name | nbsp)` | \(fmt_ops_count(.ops)) | **\(.ns_per_op | commify)** | \(.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma(.stddev_ns)) | \(fmt_dec1(.cv_pct))% | \(.iqr_ns | round | commify) | \(.p95_ns | commify) | \(.p99_ns | commify) | \(.min_ns | commify) | \(.max_ns | commify) | \(fmt_ops_range(.min_ns; .max_ns)) | \(fmt_kb(.bytes_used)) |"
   );
+
+def tier_table_us($list):
+  "| # | Benchmark | Ops | Med\u00a0(`µs`) | Mean\u00a0±\u00a0σ | CV | IQR | `p95` | `p99` | Min | Max | `ops/s` | Size |",
+  "| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  ($list[] |
+    "| \(.rank) | `\(.name | nbsp)` | \(fmt_ops_count(.ops)) | **\(fmt_us(.median_ns))** | \(fmt_us(.mean_ns))\u00a0±\u00a0\(fmt_us(.stddev_ns)) | \(fmt_dec1(.cv_pct))% | \(fmt_us(.iqr_ns)) | \(fmt_us(.p95_ns)) | \(fmt_us(.p99_ns)) | \(fmt_us(.min_ns)) | \(fmt_us(.max_ns)) | \(fmt_ops_range(.min_ns; .max_ns)) | \(fmt_kb(.bytes_used)) |"
+  );
+
+def single_lang_section($sec_num; $lang_label; $flags; $sha; $list):
+  ($list | map(select(.ns_per_op < 100))) as $fast |
+  ($list | map(select(.ns_per_op >= 100 and .ns_per_op < 1000))) as $mid |
+  ($list | map(select(.ns_per_op >= 1000))) as $heavy |
+  "### \($sec_num). \($lang_label) Results (`\($flags)`, Commit `\($sha)`, \($list[0].runs) samples across \($list[0].invocations) run(s))\n",
+  "#### \($sec_num).1 Sub-100ns Fast Path (`< 100 ns` · `10M–167M ops/s`, \($fast | length) tests)\n",
+  tier_table_ns($fast),
+  "\n#### \($sec_num).2 Sub-Microsecond Collection & Cursor Ops (`100–999 ns` · `1M–10M ops/s`, \($mid | length) tests)\n",
+  tier_table_ns($mid),
+  "\n#### \($sec_num).3 Multi-Microsecond Transactions, Compaction & Queries (`≥ 1 µs` · `1.7K–1M ops/s`, \($heavy | length) tests)\n",
+  tier_table_us($heavy);
 
 [inputs] as $all |
 distinct_commits($all; "odin") as $odin_commits |
@@ -158,10 +228,9 @@ filter_and_pool_commit($all; "zig"; $zig_target) as $zig_list |
 ($odin_list[0].commit // "unknown") as $odin_sha |
 ($zig_list[0].commit // "unknown") as $zig_sha |
 
-"### 1. Odin Results (`-o:speed -microarch:native`, Commit `\($odin_sha)`, \($odin_list[0].runs) samples across \($odin_list[0].invocations) run(s))\n",
-single_lang_table($odin_list),
-"\n### 2. Zig Results (`-Doptimize=ReleaseFast -Dcpu=native`, Commit `\($zig_sha)`, \($zig_list[0].runs) samples across \($zig_list[0].invocations) run(s))\n",
-single_lang_table($zig_list),
+single_lang_section("1"; "Odin"; "-o:speed -microarch:native"; $odin_sha; $odin_list),
+"\n",
+single_lang_section("2"; "Zig"; "-Doptimize=ReleaseFast -Dcpu=native"; $zig_sha; $zig_list),
 "\n### 3. 1v1 Statistical Comparison (Odin vs. Zig, Commit `\($odin_sha)`)\n",
 "| # | Benchmark | Odin\u00a0(`Med\u00a0±\u00a0σ`\u00a0·\u00a0`CV`\u00a0·\u00a0`p95`) | Zig\u00a0(`Med\u00a0±\u00a0σ`\u00a0·\u00a0`CV`\u00a0·\u00a0`p95`) | Speedup | Welch\u00a0$z$ | Size |",
 "| ---: | :--- | ---: | ---: | ---: | ---: | ---: |",
