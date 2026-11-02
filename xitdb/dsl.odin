@@ -2529,7 +2529,7 @@ _split_datalog_where_clauses :: proc(where_body: string, allocator: runtime.Allo
 					bracket_depth += 1
 				} else if ch == ']' {
 					bracket_depth -= 1
-				} else if ch == ';' && paren_depth == 0 && bracket_depth == 0 {
+				} else if (ch == ';' || ch == ',') && paren_depth == 0 && bracket_depth == 0 {
 					sub := strings.trim_space(line[start:i])
 					if len(sub) > 0 {
 						append(&out, sub)
