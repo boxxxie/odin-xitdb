@@ -538,3 +538,74 @@ unit_user_dsl_secondary_index_stale_key_eviction_and_heap_allocator_cleanup :: p
 		testing.expect(t, old_dave == nil, "Expected deleted user key 'dave' to be evicted from secondary index")
 	}
 }
+
+@(test)
+unit_user_dsl_cyclic_graph_pull_and_diff_safety :: proc(t: ^testing.T) {
+	core := xitdb.core_memory_init()
+	defer xitdb.core_destroy(&core)
+	defer free_all(context.temp_allocator)
+
+	db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
+
+	// Moment 0: baseline moment
+	tx0 := xitdb.tx_init(&db, base_moment = nil)
+	_ = xitdb.tx_put(&tx0, ".title", "baseline")
+	_, err0 := xitdb.tx_commit(&tx0)
+	testing.expect_value(t, err0, nil)
+
+	// Moment 1: introduce cyclic self-reference, cyclic Array_List, and mutually recursive maps
+	// while `track_changes = true` is enabled (which runs `diff_cursors` at commit time)
+	tx1 := xitdb.tx_init(&db, base_moment = 0, track_changes = true)
+	xitdb.tx_doc(&tx1, "Introduce cyclic slots")
+	xitdb.tx_with_cursor(&tx1, proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		moment := xitdb.write_hash_map_init(cursor^) or_return
+		m_slot := xitdb.hash_map_slot(moment.read_hash_map) or_return
+		xitdb.hash_map_put(&moment, "self", m_slot) or_return
+
+		cl_cur := xitdb.hash_map_put_cursor(&moment, "cyclic_list") or_return
+		cl := xitdb.write_array_list_init(cl_cur) or_return
+		cl_slot := xitdb.array_list_slot(cl.read_array_list) or_return
+		xitdb.array_list_append(&cl, cl_slot) or_return
+
+		ma_cur := xitdb.hash_map_put_cursor(&moment, "map_a") or_return
+		ma := xitdb.write_hash_map_init(ma_cur) or_return
+		xitdb.hash_map_put(&ma, "name", "Node A") or_return
+
+		mb_cur := xitdb.hash_map_put_cursor(&moment, "map_b") or_return
+		mb := xitdb.write_hash_map_init(mb_cur) or_return
+		xitdb.hash_map_put(&mb, "name", "Node B") or_return
+
+		mb_slot := xitdb.hash_map_slot(mb.read_hash_map) or_return
+		xitdb.hash_map_put(&ma, "peer", mb_slot) or_return
+
+		ma_slot := xitdb.hash_map_slot(ma.read_hash_map) or_return
+		xitdb.hash_map_put(&mb, "peer", ma_slot) or_return
+		return nil
+	})
+
+	rep1, err1 := xitdb.tx_commit(&tx1)
+	testing.expect_value(t, err1, nil)
+	testing.expect(t, len(rep1.changes) > 0, "Expected cyclic commit to record changes without infinite recursion")
+
+	// 1. Wildcard `pull(rep1.after.cursor, "*")` terminates cleanly and breaks cycles with `nil`
+	pulled, p_err := xitdb.pull(rep1.after.cursor, "*", context.temp_allocator)
+	testing.expect_value(t, p_err, nil)
+	title_pv, has_title := xitdb.pull_get(pulled, "title")
+	testing.expect(t, has_title, "Expected title in pulled cyclic moment")
+	testing.expect_value(t, title_pv.(string), "baseline")
+
+	self_pv, has_self := xitdb.pull_get(pulled, "self")
+	testing.expect(t, has_self, "Expected self key in pulled map")
+	testing.expect(t, self_pv == nil, "Expected cyclic self back-reference to resolve to nil")
+
+	// 2. Moment 2: branch from cyclic Moment 1, mutate a scalar, and run `diff_moments(&db, 1, 2)`
+	tx2 := xitdb.tx_init(&db, base_moment = 1, track_changes = true)
+	_ = xitdb.tx_put(&tx2, ".title", "updated-with-cycles-present")
+	_, err2 := xitdb.tx_commit(&tx2)
+	testing.expect_value(t, err2, nil)
+
+	diffs, d_err := xitdb.diff_moments(&db, 1, 2, false, context.temp_allocator)
+	testing.expect_value(t, d_err, nil)
+	testing.expect_value(t, len(diffs), 1)
+	testing.expect_value(t, diffs[0].path_str, ".title")
+}

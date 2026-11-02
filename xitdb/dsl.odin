@@ -1671,25 +1671,41 @@ Pull_Value :: union {
 	Pull_Map,
 }
 
+@(private = "file")
+_is_collection_tag :: proc(tag: Tag) -> bool {
+	#partial switch tag {
+	case .Array_List, .Linked_Array_List, .Hash_Map, .Counted_Hash_Map,
+	     .Hash_Set, .Counted_Hash_Set, .Sorted_Map, .Sorted_Set:
+		return true
+	}
+	return false
+}
+
 // Pull a shaped projection (e.g. `"{username, age, fruits[0..2], people[0]{age}}"`) from `cursor`.
 pull :: proc(cursor: Read_Cursor, pattern: string, allocator := context.temp_allocator) -> (res: Pull_Value, err: Error) {
+	visited := make(map[i64]bool, 16, context.temp_allocator)
+	return _pull_with_visited(cursor, pattern, &visited, allocator)
+}
+
+@(private = "file")
+_pull_with_visited :: proc(cursor: Read_Cursor, pattern: string, visited: ^map[i64]bool, allocator: runtime.Allocator) -> (res: Pull_Value, err: Error) {
 	p := strings.trim_space(pattern)
 	if len(p) == 0 || p == "*" {
-		return _pull_wildcard(cursor, allocator)
+		return _pull_wildcard(cursor, visited, allocator)
 	}
 	if p[0] == '{' && p[len(p) - 1] == '}' {
 		inner := strings.trim_space(p[1 : len(p) - 1])
 		specs := _split_top_level_pull_specs(inner, allocator)
 		entries := make([dynamic]Pull_Map_Entry, 0, len(specs), allocator)
 		for spec in specs {
-			entry, has_entry := _eval_pull_spec(cursor, spec, allocator) or_return
+			entry, has_entry := _eval_pull_spec(cursor, spec, visited, allocator) or_return
 			if has_entry {
 				append(&entries, entry)
 			}
 		}
 		return Pull_Map(entries[:]), nil
 	}
-	return _pull_wildcard(cursor, allocator)
+	return _pull_wildcard(cursor, visited, allocator)
 }
 
 // Lookup a key inside a `Pull_Map`.
@@ -1707,13 +1723,12 @@ pull_get :: proc(pv: Pull_Value, key: string) -> (res: Pull_Value, ok: bool) {
 }
 
 @(private = "file")
-_eval_pull_spec :: proc(cursor: Read_Cursor, spec: string, allocator: runtime.Allocator) -> (entry: Pull_Map_Entry, found: bool, err: Error) {
+_eval_pull_spec :: proc(cursor: Read_Cursor, spec: string, visited: ^map[i64]bool, allocator: runtime.Allocator) -> (entry: Pull_Map_Entry, found: bool, err: Error) {
 	s := strings.trim_space(spec)
 	if len(s) == 0 {
 		return {}, false, nil
 	}
 
-	// Check for nested `{...}` projection suffix
 	brace_idx := strings.index_byte(s, '{')
 	sub_pattern := "*"
 	path_part := s
@@ -1722,7 +1737,6 @@ _eval_pull_spec :: proc(cursor: Read_Cursor, spec: string, allocator: runtime.Al
 		sub_pattern = strings.trim_space(s[brace_idx:])
 	}
 
-	// Check for range slice suffix `[start..end]`
 	range_start: i64 = 0
 	range_end: i64 = -1
 	has_range := false
@@ -1750,18 +1764,18 @@ _eval_pull_spec :: proc(cursor: Read_Cursor, spec: string, allocator: runtime.Al
 		return {}, false, nil
 	}
 
-	label := steps[0].key if len(steps[0].key) > 0 else path_part
+	label := steps[len(steps) - 1].key if len(steps[len(steps) - 1].key) > 0 else path_part
 	if has_range {
-		list_vals := _pull_range(target_cur, range_start, range_end, sub_pattern, allocator) or_return
+		list_vals := _pull_range(target_cur, range_start, range_end, sub_pattern, visited, allocator) or_return
 		return Pull_Map_Entry{key = label, val = list_vals}, true, nil
 	}
 
-	pulled := pull(target_cur, sub_pattern, allocator) or_return
+	pulled := _pull_with_visited(target_cur, sub_pattern, visited, allocator) or_return
 	return Pull_Map_Entry{key = label, val = pulled}, true, nil
 }
 
 @(private = "file")
-_pull_range :: proc(cursor: Read_Cursor, start_idx, end_idx: i64, sub_pattern: string, allocator: runtime.Allocator) -> (res: Pull_Value, err: Error) {
+_pull_range :: proc(cursor: Read_Cursor, start_idx, end_idx: i64, sub_pattern: string, visited: ^map[i64]bool, allocator: runtime.Allocator) -> (res: Pull_Value, err: Error) {
 	slot := cursor_slot(cursor) or_return
 	it: Cursor_Iterator
 	#partial switch slot.tag {
@@ -1783,15 +1797,25 @@ _pull_range :: proc(cursor: Read_Cursor, start_idx, end_idx: i64, sub_pattern: s
 		if !ok {
 			break
 		}
-		v := pull(c, sub_pattern, allocator) or_return
+		v := _pull_with_visited(c, sub_pattern, visited, allocator) or_return
 		append(&items, v)
 	}
 	return Pull_List(items[:]), nil
 }
 
 @(private = "file")
-_pull_wildcard :: proc(cursor: Read_Cursor, allocator: runtime.Allocator) -> (res: Pull_Value, err: Error) {
+_pull_wildcard :: proc(cursor: Read_Cursor, visited: ^map[i64]bool, allocator: runtime.Allocator) -> (res: Pull_Value, err: Error) {
 	slot := cursor_slot(cursor) or_return
+	if _is_collection_tag(slot.tag) {
+		if visited[slot.value] {
+			return nil, nil
+		}
+		visited[slot.value] = true
+	}
+	defer if _is_collection_tag(slot.tag) {
+		delete_key(visited, slot.value)
+	}
+
 	#partial switch slot.tag {
 	case .None:
 		return nil, nil
@@ -1820,7 +1844,7 @@ _pull_wildcard :: proc(cursor: Read_Cursor, allocator: runtime.Allocator) -> (re
 			if !ok {
 				break
 			}
-			v := _pull_wildcard(c, allocator) or_return
+			v := _pull_wildcard(c, visited, allocator) or_return
 			append(&items, v)
 		}
 		return Pull_List(items[:]), nil
@@ -1834,7 +1858,7 @@ _pull_wildcard :: proc(cursor: Read_Cursor, allocator: runtime.Allocator) -> (re
 				break
 			}
 			kv := cursor_read_kv_pair(c, allocator) or_return
-			v := _pull_wildcard(kv.key_cursor, allocator) or_return
+			v := _pull_wildcard(kv.key_cursor, visited, allocator) or_return
 			append(&items, v)
 		}
 		return Pull_List(items[:]), nil
@@ -1852,7 +1876,7 @@ _pull_wildcard :: proc(cursor: Read_Cursor, allocator: runtime.Allocator) -> (re
 			if k_str == "__tx" {
 				continue
 			}
-			v := _pull_wildcard(kv.value_cursor, allocator) or_return
+			v := _pull_wildcard(kv.value_cursor, visited, allocator) or_return
 			append(&entries, Pull_Map_Entry{key = k_str, val = v})
 		}
 		return Pull_Map(entries[:]), nil
@@ -1919,7 +1943,8 @@ diff_moments :: proc(db: ^Database, moment_a, moment_b: i64, include_tx_meta := 
 
 diff_cursors :: proc(cur_a, cur_b: Read_Cursor, include_tx_meta := false, allocator := context.temp_allocator) -> (res: []Tx_Change, err: Error) {
 	changes := make([dynamic]Tx_Change, 0, 8, allocator)
-	_diff_recursive(cur_a, cur_b, "", include_tx_meta, &changes, allocator) or_return
+	visited := make(map[[2]i64]bool, 16, context.temp_allocator)
+	_diff_recursive(cur_a, cur_b, "", include_tx_meta, &changes, &visited, allocator) or_return
 	return changes[:], nil
 }
 
@@ -1929,14 +1954,32 @@ _diff_recursive :: proc(
 	prefix: string,
 	include_tx_meta: bool,
 	changes: ^[dynamic]Tx_Change,
+	visited: ^map[[2]i64]bool,
 	allocator: runtime.Allocator,
 ) -> Error {
 	slot_a := cursor_slot(cur_a) or_return
 	slot_b := cursor_slot(cur_b) or_return
 
-	// O(1) structural sharing shortcut: identical slots point to identical immutable subtrees
 	if slot_a == slot_b {
 		return nil
+	}
+
+	if _is_collection_tag(slot_a.tag) || _is_collection_tag(slot_b.tag) {
+		off_a := slot_a.value if _is_collection_tag(slot_a.tag) else -1
+		off_b := slot_b.value if _is_collection_tag(slot_b.tag) else -1
+		pair := [2]i64{off_a, off_b}
+		if visited[pair] {
+			return nil
+		}
+		visited[pair] = true
+		if off_b != -1 {
+			visited[[2]i64{-1, off_b}] = true
+		}
+	}
+
+	empty_cur := Read_Cursor{
+		slot_ptr = Slot_Pointer{position = nil, slot = Slot{}},
+		db       = cur_b.db,
 	}
 
 	if slot_a.tag == .None && (slot_b.tag == .Hash_Map || slot_b.tag == .Counted_Hash_Map || slot_b.tag == .Sorted_Map) {
@@ -1955,10 +1998,14 @@ _diff_recursive :: proc(
 			}
 			child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
 			val_b_slot := cursor_slot(kv_b.value_cursor) or_return
-			if len(prefix) == 0 && (val_b_slot.tag == .Array_List || val_b_slot.tag == .Linked_Array_List) {
-				defer delete(child_path, allocator)
-				empty_cur := Read_Cursor{slot_ptr = Slot_Pointer{position = nil, slot = Slot{}}, db = cur_b.db}
-				_diff_recursive(empty_cur, kv_b.value_cursor, child_path, include_tx_meta, changes, allocator) or_return
+			if _is_collection_tag(val_b_slot.tag) && !visited[[2]i64{-1, val_b_slot.value}] {
+				if len(prefix) == 0 && (val_b_slot.tag == .Array_List || val_b_slot.tag == .Linked_Array_List) {
+					delete(child_path, allocator)
+					sub_prefix := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = context.temp_allocator)
+					_diff_recursive(empty_cur, kv_b.value_cursor, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
+				} else {
+					append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
+				}
 			} else {
 				append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
 			}
@@ -1998,12 +2045,12 @@ _diff_recursive :: proc(
 				if !include_tx_meta && len(prefix) == 0 && k_str == "__tx" {
 					continue
 				}
-				child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
 				vb_maybe := hash_map_get_cursor(map_b, k_str) or_return
 				if vb_cur, has_b := vb_maybe.?; has_b {
-					defer delete(child_path, allocator)
-					_diff_recursive(kv_a.value_cursor, vb_cur, child_path, include_tx_meta, changes, allocator) or_return
+					sub_prefix := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = context.temp_allocator)
+					_diff_recursive(kv_a.value_cursor, vb_cur, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
 				} else {
+					child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
 					val_a_slot := cursor_slot(kv_a.value_cursor) or_return
 					append(changes, Tx_Change{op = .Remove, path_str = child_path, old_slot = val_a_slot, new_slot = Slot{}})
 				}
@@ -2023,9 +2070,14 @@ _diff_recursive :: proc(
 				}
 				va_maybe := hash_map_get_cursor(map_a, k_str) or_return
 				if va_maybe == nil {
-					child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
 					val_b_slot := cursor_slot(kv_b.value_cursor) or_return
-					append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
+					if _is_collection_tag(val_b_slot.tag) && !visited[[2]i64{-1, val_b_slot.value}] {
+						sub_prefix := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = context.temp_allocator)
+						_diff_recursive(empty_cur, kv_b.value_cursor, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
+					} else {
+						child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
+						append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
+					}
 				}
 			}
 			return nil
@@ -2042,12 +2094,12 @@ _diff_recursive :: proc(
 				}
 				kv_a := cursor_read_kv_pair(ca, context.temp_allocator) or_return
 				k_str := cursor_read_string(kv_a.key_cursor, 0, context.temp_allocator) or_return
-				child_path := fmt.aprintf("%s$%s", prefix, k_str, allocator = allocator)
 				vb_maybe := sorted_map_get_cursor(sm_b, k_str) or_return
 				if vb_cur, has_b := vb_maybe.?; has_b {
-					defer delete(child_path, allocator)
-					_diff_recursive(kv_a.value_cursor, vb_cur, child_path, include_tx_meta, changes, allocator) or_return
+					sub_prefix := fmt.aprintf("%s$%s", prefix, k_str, allocator = context.temp_allocator)
+					_diff_recursive(kv_a.value_cursor, vb_cur, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
 				} else {
+					child_path := fmt.aprintf("%s$%s", prefix, k_str, allocator = allocator)
 					val_a_slot := cursor_slot(kv_a.value_cursor) or_return
 					append(changes, Tx_Change{op = .Remove, path_str = child_path, old_slot = val_a_slot, new_slot = Slot{}})
 				}
@@ -2063,9 +2115,14 @@ _diff_recursive :: proc(
 				k_str := cursor_read_string(kv_b.key_cursor, 0, context.temp_allocator) or_return
 				va_maybe := sorted_map_get_cursor(sm_a, k_str) or_return
 				if va_maybe == nil {
-					child_path := fmt.aprintf("%s$%s", prefix, k_str, allocator = allocator)
 					val_b_slot := cursor_slot(kv_b.value_cursor) or_return
-					append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
+					if _is_collection_tag(val_b_slot.tag) && !visited[[2]i64{-1, val_b_slot.value}] {
+						sub_prefix := fmt.aprintf("%s$%s", prefix, k_str, allocator = context.temp_allocator)
+						_diff_recursive(empty_cur, kv_b.value_cursor, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
+					} else {
+						child_path := fmt.aprintf("%s$%s", prefix, k_str, allocator = allocator)
+						append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
+					}
 				}
 			}
 			return nil
@@ -2079,9 +2136,8 @@ _diff_recursive :: proc(
 				step := ll(i) if is_linked else al(i)
 				ea_maybe := read_steps_cursor(cur_a, []Path_Step{step}) or_return
 				eb_maybe := read_steps_cursor(cur_b, []Path_Step{step}) or_return
-				child_path := fmt.aprintf(is_linked ? "%s[[%d]]" : "%s[%d]", prefix, i, allocator = allocator)
-				defer delete(child_path, allocator)
-				_diff_recursive(ea_maybe.?, eb_maybe.?, child_path, include_tx_meta, changes, allocator) or_return
+				sub_prefix := fmt.aprintf(is_linked ? "%s[[%d]]" : "%s[%d]", prefix, i, allocator = context.temp_allocator)
+				_diff_recursive(ea_maybe.?, eb_maybe.?, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
 			}
 			if cnt_b > cnt_a {
 				for i := cnt_a; i < cnt_b; i += 1 {
@@ -3376,12 +3432,12 @@ _eval_pattern_steps :: proc(
 		switch clause.rhs_kind {
 		case .None:
 		case .Literal:
-			actual := _pull_wildcard(cur, allocator) or_return
+			actual := pull(cur, "*", allocator) or_return
 			if !_pull_value_equals(actual, clause.rhs_lit) {
 				return false, nil
 			}
 		case .Var:
-			actual := _pull_wildcard(cur, allocator) or_return
+			actual := pull(cur, "*", allocator) or_return
 			if next_env.bound[clause.rhs_var] {
 				if !_pull_value_equals(next_env.vals[clause.rhs_var], actual) {
 					return false, nil
