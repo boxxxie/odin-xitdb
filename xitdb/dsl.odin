@@ -215,9 +215,19 @@ parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (r
 				append(&steps, Path_Step{kind = .Linked_List_Idx, index = idx})
 				i += 2
 			} else if i + 1 < len(s) && (s[i + 1] == '"' || s[i + 1] == '\'') {
-				// Bracketed Hash_Map key: ["key"]
+				// Bracketed map key: ["key"] — inherits collection kind if preceded by $key or #key
 				key, next_i := _parse_bracketed_string(s, i) or_return
-				append(&steps, Path_Step{kind = .Hash_Map_Key, key = key})
+				step_kind := Step_Kind.Hash_Map_Key
+				if len(steps) == 1 {
+					if steps[0].kind == .Counted_Hash_Map_Key {
+						steps[0].kind = .Hash_Map_Key
+						step_kind = .Counted_Hash_Map_Key
+					} else if steps[0].kind == .Sorted_Map_Key {
+						steps[0].kind = .Hash_Map_Key
+						step_kind = .Sorted_Map_Key
+					}
+				}
+				append(&steps, Path_Step{kind = step_kind, key = key})
 				i = next_i
 			} else {
 				// Array_List index: [i]
@@ -797,29 +807,29 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 		}
 	}
 
-	// Compute structural diff between base moment and new moment if changes are requested or metadata is written
+	// Only compute the structural diff when __tx metadata or change tracking is requested
 	wants_tx_meta := len(tx.doc) > 0 || tx.instant != nil || len(tx.meta) > 0 || tx.track_changes
-	if ectx.has_parent {
-		base_cur := Read_Cursor{
-			slot_ptr = Slot_Pointer{position = nil, slot = ectx.base_slot},
-			db       = cursor.db,
-		}
-		diffs := diff_cursors(base_cur, moment.read_hash_map.cursor, false, tx.allocator) or_return
-		for d in diffs {
-			append(&ectx.recorded, d)
-		}
-	} else {
-		empty_cur := Read_Cursor{
-			slot_ptr = Slot_Pointer{position = nil, slot = Slot{}},
-			db       = cursor.db,
-		}
-		diffs := diff_cursors(empty_cur, moment.read_hash_map.cursor, false, tx.allocator) or_return
-		for d in diffs {
-			append(&ectx.recorded, d)
-		}
-	}
-
 	if wants_tx_meta {
+		if ectx.has_parent {
+			base_cur := Read_Cursor{
+				slot_ptr = Slot_Pointer{position = nil, slot = ectx.base_slot},
+				db       = cursor.db,
+			}
+			diffs := diff_cursors(base_cur, moment.read_hash_map.cursor, false, tx.allocator) or_return
+			for d in diffs {
+				append(&ectx.recorded, d)
+			}
+		} else {
+			empty_cur := Read_Cursor{
+				slot_ptr = Slot_Pointer{position = nil, slot = Slot{}},
+				db       = cursor.db,
+			}
+			diffs := diff_cursors(empty_cur, moment.read_hash_map.cursor, false, tx.allocator) or_return
+			for d in diffs {
+				append(&ectx.recorded, d)
+			}
+		}
+
 		tx_cur := hash_map_put_cursor(&moment, "__tx") or_return
 		tx_map := write_hash_map_init(tx_cur) or_return
 		if len(tx.doc) > 0 {
