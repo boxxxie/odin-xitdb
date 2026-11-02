@@ -38,11 +38,19 @@ g_append_primary: bool = false
 g_save_history:   bool = true
 g_jsonl_path:     string = "benchmarks/odin.jsonl"
 g_history_path:   string = "benchmarks/history.jsonl"
+g_groups_filter:  string = ""
+g_name_filter:    string = ""
 
 g_is_warmup:      bool = false
+g_group_base_rank: int = 0
 g_group_slot:     int = 0
 g_group_count:    int = 0
 g_group_accum:    [MAX_GROUP_BENCHES]Bench_Accum
+
+MAX_TOTAL_RANKS :: 128
+g_selective_run:  bool = false
+g_existing_lines: [MAX_TOTAL_RANKS]string
+g_updated_lines:  [MAX_TOTAL_RANKS]string
 
 resolve_git_commit :: proc(allocator := context.allocator) -> string {
 	head_bytes, err := os.read_entire_file(".git/HEAD", allocator)
@@ -132,8 +140,75 @@ parse_cli_args :: proc() {
 		} else if (arg == "--history" || arg == "-history") && i + 1 < len(args) {
 			g_history_path = args[i + 1]
 			i += 1
+		} else if (arg == "--groups" || arg == "-groups" || arg == "--group" || arg == "-group") && i + 1 < len(args) {
+			g_groups_filter = args[i + 1]
+			i += 1
+		} else if strings.has_prefix(arg, "--groups=") || strings.has_prefix(arg, "-groups:") || strings.has_prefix(arg, "--group=") || strings.has_prefix(arg, "-group:") {
+			eq := strings.index_any(arg, "=:")
+			g_groups_filter = arg[eq + 1:]
+		} else if (arg == "--filter" || arg == "-filter") && i + 1 < len(args) {
+			g_name_filter = args[i + 1]
+			i += 1
+		} else if strings.has_prefix(arg, "--filter=") || strings.has_prefix(arg, "-filter:") {
+			eq := strings.index_any(arg, "=:")
+			g_name_filter = arg[eq + 1:]
 		}
 		i += 1
+	}
+	g_selective_run = (len(g_groups_filter) > 0 && g_groups_filter != "all") || len(g_name_filter) > 0
+}
+
+should_run_group :: proc(group_name: string) -> bool {
+	if len(g_groups_filter) == 0 || g_groups_filter == "all" {
+		return true
+	}
+	parts := strings.split_multi(g_groups_filter, {",", "|"}, context.temp_allocator)
+	for raw_p in parts {
+		p := strings.to_lower(strings.trim_space(raw_p), context.temp_allocator)
+		if len(p) == 0 do continue
+		if p == "all" || p == group_name {
+			return true
+		}
+		if (p == "list" && group_name == "lists") ||
+		   ((p == "btree" || p == "sorted") && group_name == "sorted_map") ||
+		   (p == "compact" && group_name == "compaction") ||
+		   ((p == "hash" || p == "hasher" || p == "bytes") && group_name == "hashers") ||
+		   (p == "backend" && group_name == "backends") {
+			return true
+		}
+	}
+	return false
+}
+
+matches_name_filter :: proc(bench_name: string) -> bool {
+	if len(g_name_filter) == 0 {
+		return true
+	}
+	lower_name := strings.to_lower(bench_name, context.temp_allocator)
+	parts := strings.split_multi(g_name_filter, {"|", ","}, context.temp_allocator)
+	for raw_p in parts {
+		p := strings.to_lower(strings.trim_space(raw_p), context.temp_allocator)
+		if len(p) > 0 && strings.contains(lower_name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+load_existing_jsonl_ranks :: proc(path: string) {
+	data, err := os.read_entire_file(path, context.allocator)
+	if err != nil do return
+	lines := strings.split_lines(string(data), context.allocator)
+	prefix :: "{\"rank\":"
+	for raw_line in lines {
+		line := strings.trim_space(raw_line)
+		if !strings.has_prefix(line, prefix) do continue
+		rest := line[len(prefix):]
+		comma := strings.index_byte(rest, ',')
+		if comma <= 0 do continue
+		if r, ok := strconv.parse_int(rest[:comma]); ok && r >= 1 && r < MAX_TOTAL_RANKS {
+			g_existing_lines[r] = fmt.aprintf("%s\n", line)
+		}
 	}
 }
 
@@ -220,7 +295,12 @@ flush_group_results :: proc() {
 		n := acc.count
 		if n == 0 do continue
 
-		g_bench_rank += 1
+		rank := g_group_base_rank + slot + 1
+		g_bench_rank = rank
+		if !matches_name_filter(acc.name) {
+			continue
+		}
+
 		for i in 0 ..< n {
 			sorted_ns[i] = acc.samples_ns[i]
 			sorted_ms[i] = acc.samples_ms[i]
@@ -328,7 +408,11 @@ flush_group_results :: proc() {
 				samples_json,
 			)
 			if g_jsonl_file != nil {
-				_, _ = os.write_string(g_jsonl_file, line)
+				if g_selective_run && !g_append_primary && rank >= 1 && rank < MAX_TOTAL_RANKS {
+					g_updated_lines[rank] = strings.clone(line, context.allocator)
+				} else {
+					_, _ = os.write_string(g_jsonl_file, line)
+				}
 			}
 			if g_history_file != nil {
 				_, _ = os.write_string(g_history_file, line)
@@ -338,7 +422,11 @@ flush_group_results :: proc() {
 	free_all(context.temp_allocator)
 }
 
-run_group :: proc(group_fn: proc(int), param: int) {
+run_group :: proc(group_name: string, base_rank: int, group_fn: proc(int), param: int) {
+	if !should_run_group(group_name) {
+		return
+	}
+	g_group_base_rank = base_rank
 	g_is_warmup = true
 	for _ in 0 ..< g_warmup {
 		g_group_slot = 0
@@ -2319,6 +2407,10 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 main :: proc() {
 	parse_cli_args()
 
+	if g_selective_run && !g_append_primary {
+		load_existing_jsonl_ranks(g_jsonl_path)
+	}
+
 	primary_flags := os.File_Flags{.Write, .Create, .Append} if g_append_primary else os.File_Flags{.Write, .Create, .Trunc}
 	if f, err := os.open(g_jsonl_path, primary_flags, os.Permissions_Read_Write_All); err == nil {
 		g_jsonl_file = f
@@ -2337,12 +2429,23 @@ main :: proc() {
 	}
 
 	print_header()
-	run_group(bench_hamt, 2_000)
-	run_group(bench_lists, 2_000)
-	run_group(bench_sorted_map, 2_000)
-	run_group(bench_compaction_and_replication, 200)
-	run_group(bench_hashers_and_byte_streams, 2_000)
-	run_group(bench_backends, 500)
-	run_group(run_dsl_benchmarks, 0)
+	run_group("hamt", 0, bench_hamt, 2_000)
+	run_group("lists", 13, bench_lists, 2_000)
+	run_group("sorted_map", 27, bench_sorted_map, 2_000)
+	run_group("compaction", 38, bench_compaction_and_replication, 200)
+	run_group("hashers", 44, bench_hashers_and_byte_streams, 2_000)
+	run_group("backends", 57, bench_backends, 500)
+	run_group("dsl", 63, run_dsl_benchmarks, 0)
+
+	if g_selective_run && !g_append_primary && g_jsonl_file != nil {
+		for r in 1 ..< MAX_TOTAL_RANKS {
+			if len(g_updated_lines[r]) > 0 {
+				_, _ = os.write_string(g_jsonl_file, g_updated_lines[r])
+			} else if len(g_existing_lines[r]) > 0 {
+				_, _ = os.write_string(g_jsonl_file, g_existing_lines[r])
+			}
+		}
+	}
+
 	fmt.println("============================================================================================================================================")
 }

@@ -15,12 +15,13 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH_DIR = os.path.join(ROOT_DIR, "benchmarks")
@@ -171,10 +172,8 @@ def pool_by_lang_and_test(
     filtered = [r for r in records if r.get("lang") == lang and match_commit(str(r.get("commit", "unknown")), commit)]
     if not filtered and commit:
         return []
-    # If commit wasn't specified and multiple commits exist, default to the last commit seen in the file
-    if not commit and filtered:
-        latest_commit = filtered[-1].get("commit", "unknown")
-        filtered = [r for r in filtered if r.get("commit", "unknown") == latest_commit]
+
+    overall_latest_commit = filtered[-1].get("commit", "unknown") if filtered else "unknown"
 
     grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     order: List[str] = []
@@ -184,7 +183,16 @@ def pool_by_lang_and_test(
             order.append(name)
         grouped[name].append(r)
 
-    pooled = [compute_pooled_stats(grouped[name]) for name in order]
+    pooled = []
+    for name in order:
+        recs = grouped[name]
+        if not commit and recs:
+            latest_for_name = recs[-1].get("commit", "unknown")
+            recs = [r for r in recs if r.get("commit", "unknown") == latest_for_name]
+        stat = compute_pooled_stats(recs)
+        if not commit and overall_latest_commit != "unknown":
+            stat["commit"] = overall_latest_commit
+        pooled.append(stat)
     pooled.sort(key=lambda x: x["rank"])
     return pooled
 
@@ -195,12 +203,16 @@ def fmt_kb(bytes_used: int) -> str:
     return "-"
 
 
-def welch_z_score(a: Dict[str, Any], b: Dict[str, Any]) -> float:
+def welch_se(a: Dict[str, Any], b: Dict[str, Any]) -> float:
     var_a = a["variance_ns2"]
     var_b = b["variance_ns2"]
     n_a = max(a["runs"], 1)
     n_b = max(b["runs"], 1)
-    se = math.sqrt((var_a / n_a) + (var_b / n_b))
+    return math.sqrt((var_a / n_a) + (var_b / n_b))
+
+
+def welch_z_score(a: Dict[str, Any], b: Dict[str, Any]) -> float:
+    se = welch_se(a, b)
     if se < 1e-6:
         return 99.0 if abs(a["mean_ns"] - b["mean_ns"]) >= 1.0 else 0.0
     return abs(a["mean_ns"] - b["mean_ns"]) / se
@@ -341,9 +353,13 @@ def compare_commits(records: List[Dict[str, Any]], sha_a: str, sha_b: str, lang:
         med_b = max(b["median_ns"], 1.0)
         delta_pct = ((med_b - med_a) / med_a) * 100.0
         speedup = med_a / med_b
+        se = welch_se(a, b)
         z = welch_z_score(a, b)
+        med_z = (abs(med_b - med_a) / se) if se >= 1e-6 else (99.0 if abs(med_b - med_a) >= 1.0 else 0.0)
 
-        is_sig = (z >= 1.96) and (abs(delta_pct) >= 3.0) and (abs(med_b - med_a) >= 2.0)
+        # Require 99% confidence (both mean z and median z >= 2.58), >= 10% relative shift, and >= 5 ns absolute shift
+        # so cross-invocation CPU clock/turbo drift (~5-8%) or single-sample outliers are not misclassified.
+        is_sig = (z >= 2.58) and (med_z >= 2.58) and (abs(delta_pct) >= 10.0) and (abs(med_b - med_a) >= 5.0)
         if is_sig and med_b < med_a:
             verdict = "FASTER"
             faster += 1
@@ -446,6 +462,261 @@ def load_all_history() -> List[Dict[str, Any]]:
     return records
 
 
+ALL_ODIN_GROUPS = ["hamt", "lists", "sorted_map", "compaction", "hashers", "backends", "dsl"]
+ALL_ZIG_GROUPS = ["hamt", "lists", "sorted_map", "compaction", "hashers", "backends"]
+
+GROUP_RANGES = {
+    "hamt": "#1–#13 (HAMT Hash_Map)",
+    "lists": "#14–#27 (Array_List & Linked_Array_List)",
+    "sorted_map": "#28–#38 (B+Tree Sorted_Map)",
+    "compaction": "#39–#44 (Compaction & Replication)",
+    "hashers": "#45–#57 (Hashers & Byte Streams)",
+    "backends": "#58–#63 (Storage Backends & Durability)",
+    "dsl": "#64–#75 (5-Layer DSL & Datalog Engine)",
+}
+
+
+def resolve_diff_target(git_ref: Optional[str]) -> Tuple[List[str], str]:
+    """
+    Determines the `git diff` arguments and human-readable label for change mapping.
+    1. If `git_ref` is given explicitly:
+       - If it contains `..`, use `[git_ref]`.
+       - Otherwise treat a commit ref `<sha>` as `[f"{git_ref}~1..{git_ref}"]` (unless `git_ref == "WORKTREE"`, which diffs `HEAD`).
+    2. If `git_ref` is None or `"auto"`:
+       - Check if `xitdb/` or `reference/xitdb-zig/src/` has uncommitted changes vs `HEAD`.
+       - Otherwise find the most recent commit touching `xitdb/` or `reference/xitdb-zig/src/` and diff `<sha>~1..<sha>`.
+    """
+    code_paths = ["xitdb/", "reference/xitdb-zig/src/", "benchmarks/bench_xitdb.odin", "benchmarks/bench_xitdb.zig"]
+    if git_ref and git_ref != "auto":
+        if git_ref.upper() == "WORKTREE":
+            return ["HEAD"], "working tree vs HEAD"
+        if ".." in git_ref:
+            return [git_ref], git_ref
+        return [f"{git_ref}~1..{git_ref}"], f"{git_ref}~1..{git_ref}"
+
+    status_out = subprocess.check_output(
+        ["git", "status", "--porcelain", "--"] + code_paths,
+        cwd=ROOT_DIR,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).strip()
+    if status_out:
+        return ["HEAD"], "working tree vs HEAD"
+
+    log_out = subprocess.check_output(
+        ["git", "log", "-n", "1", "--format=%h", "--"] + code_paths,
+        cwd=ROOT_DIR,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).strip()
+    if log_out:
+        return [f"{log_out}~1..{log_out}"], f"{log_out}~1..{log_out}"
+    return ["HEAD~1..HEAD"], "HEAD~1..HEAD"
+
+
+def map_changes_to_benchmarks(git_ref: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Inspects `git diff` across `xitdb/*.odin` and `reference/xitdb-zig/src/**` (down to
+    file and procedure/hunk level) and maps code changes to the minimal set of
+    Odin and Zig benchmark groups and name filters that need to run.
+    """
+    diff_args, diff_label = resolve_diff_target(git_ref)
+    diff_cmd = ["git", "diff", "--unified=0"] + diff_args + [
+        "--",
+        "xitdb/",
+        "reference/xitdb-zig/src/",
+        "benchmarks/bench_xitdb.odin",
+        "benchmarks/bench_xitdb.zig",
+    ]
+    raw_diff = subprocess.check_output(diff_cmd, cwd=ROOT_DIR, stderr=subprocess.DEVNULL, text=True)
+
+    changed_files: Set[str] = set()
+    procs_by_file: Dict[str, Set[str]] = defaultdict(set)
+    current_file: Optional[str] = None
+
+    odin_proc_re = re.compile(r"^[+-]\s*([A-Za-z0-9_]+)\s*::\s*proc\b")
+    zig_fn_re = re.compile(r"^[+-]\s*(?:pub\s+)?fn\s+([A-Za-z0-9_]+)\b")
+    hunk_re = re.compile(r"^@@\s+[^@]+@@\s*(.*)$")
+
+    for line in raw_diff.splitlines():
+        if line.startswith("+++ b/"):
+            current_file = line[6:].strip()
+            changed_files.add(current_file)
+        elif current_file and line.startswith("@@"):
+            m = hunk_re.match(line)
+            if m and m.group(1):
+                ctx = m.group(1).strip()
+                pm = re.match(r"([A-Za-z0-9_]+)\s*::\s*proc", ctx) or re.search(r"fn\s+([A-Za-z0-9_]+)", ctx)
+                if pm:
+                    procs_by_file[current_file].add(pm.group(1))
+        elif current_file and (line.startswith("+") or line.startswith("-")) and not line.startswith(("+++", "---")):
+            om = odin_proc_re.match(line)
+            if om:
+                procs_by_file[current_file].add(om.group(1))
+            zm = zig_fn_re.match(line)
+            if zm:
+                procs_by_file[current_file].add(zm.group(1))
+
+    odin_groups_set: Set[str] = set()
+    zig_groups_set: Set[str] = set()
+    filter_patterns: List[str] = []
+    can_narrow_filter = True
+    reasons: List[str] = []
+
+    odin_files = sorted(f for f in changed_files if f.startswith("xitdb/") or f == "benchmarks/bench_xitdb.odin")
+    zig_files = sorted(f for f in changed_files if f.startswith("reference/xitdb-zig/") or f == "benchmarks/bench_xitdb.zig")
+
+    for f in odin_files:
+        f_procs = procs_by_file.get(f, set())
+        if f in ("xitdb/core.odin", "xitdb/cursor.odin", "xitdb/database.odin", "xitdb/types.odin"):
+            odin_groups_set.update(ALL_ODIN_GROUPS)
+            can_narrow_filter = False
+            reasons.append(f"{f} (core/storage/cursor primitive -> all 7 Odin groups)")
+        elif f == "xitdb/hamt.odin":
+            odin_groups_set.update(["hamt", "hashers", "backends", "compaction", "dsl"])
+            can_narrow_filter = False
+            reasons.append(f"{f} (HAMT implementation -> hamt, hashers, backends, compaction, dsl)")
+        elif f == "xitdb/collections.odin":
+            if f_procs and all(p.startswith(("array_list_", "linked_array_list_", "read_array_list", "write_array_list", "read_linked_array_list", "write_linked_array_list")) for p in f_procs):
+                odin_groups_set.update(["lists", "compaction", "dsl"])
+                can_narrow_filter = False
+                reasons.append(f"{f} [{', '.join(sorted(f_procs))}] (list operations -> lists, compaction, dsl)")
+            else:
+                odin_groups_set.update(["hamt", "lists", "sorted_map", "compaction", "dsl"])
+                can_narrow_filter = False
+                reasons.append(f"{f} (collection wrappers -> hamt, lists, sorted_map, compaction, dsl)")
+        elif f == "xitdb/btree.odin":
+            odin_groups_set.update(["sorted_map", "compaction", "dsl"])
+            can_narrow_filter = False
+            reasons.append(f"{f} (B+Tree implementation -> sorted_map, compaction, dsl)")
+        elif f == "xitdb/compact_replicate.odin":
+            odin_groups_set.add("compaction")
+            if f_procs and all("replicate" in p for p in f_procs):
+                filter_patterns.append("Replication")
+                reasons.append(f"{f} [{', '.join(sorted(f_procs))}] -> group=compaction, filter=Replication")
+            elif f_procs and all("compact" in p for p in f_procs):
+                filter_patterns.append("Compaction")
+                reasons.append(f"{f} [{', '.join(sorted(f_procs))}] -> group=compaction, filter=Compaction")
+            else:
+                can_narrow_filter = False
+                reasons.append(f"{f} -> group=compaction (#39–#44)")
+        elif f == "xitdb/dsl.odin":
+            odin_groups_set.add("dsl")
+            if not f_procs:
+                can_narrow_filter = False
+                reasons.append(f"{f} -> group=dsl (#64–#75)")
+            else:
+                dsl_pats: Set[str] = set()
+                unmapped_proc = False
+                for p in f_procs:
+                    pl = p.lower()
+                    if any(k in pl for k in ("datalog", "_eval_", "reach")):
+                        dsl_pats.add("Datalog")
+                    elif any(k in pl for k in ("secondary_index", "index_on")):
+                        dsl_pats.update(["Secondary Index", "Tx Commit"])
+                    elif any(k in pl for k in ("pull", "diff_")):
+                        dsl_pats.update(["Cyclic", "diff_moments", "pull", "Tx Commit"])
+                    elif "history_of" in pl:
+                        dsl_pats.add("history_of")
+                    elif "marshal" in pl:
+                        dsl_pats.add("Struct")
+                    elif any(k in pl for k in ("select_", "get_at", "compile_path")):
+                        dsl_pats.update(["Compiled Selector", "Wildcard", "history_of"])
+                    elif any(k in pl for k in ("tx_", "apply_op", "_execute_")):
+                        dsl_pats.update(["Tx Commit", "Secondary Index", "Cyclic"])
+                    else:
+                        unmapped_proc = True
+                if unmapped_proc or not dsl_pats:
+                    can_narrow_filter = False
+                    reasons.append(f"{f} [{', '.join(sorted(f_procs))}] -> group=dsl (#64–#75)")
+                else:
+                    filter_patterns.extend(sorted(dsl_pats))
+                    reasons.append(
+                        f"{f} [{', '.join(sorted(f_procs))}] -> group=dsl, filter={'|'.join(sorted(dsl_pats))}"
+                    )
+        elif f == "benchmarks/bench_xitdb.odin":
+            for p in f_procs:
+                if "hamt" in p:
+                    odin_groups_set.add("hamt")
+                elif "list" in p:
+                    odin_groups_set.add("lists")
+                elif "sorted_map" in p:
+                    odin_groups_set.add("sorted_map")
+                elif "compaction" in p:
+                    odin_groups_set.add("compaction")
+                elif "hashers" in p:
+                    odin_groups_set.add("hashers")
+                elif "backends" in p:
+                    odin_groups_set.add("backends")
+                elif "dsl" in p:
+                    odin_groups_set.add("dsl")
+            if not odin_groups_set:
+                odin_groups_set.update(ALL_ODIN_GROUPS)
+            can_narrow_filter = False
+            reasons.append(f"{f} [{', '.join(sorted(f_procs)) or 'harness'}]")
+
+    for f in zig_files:
+        can_narrow_filter = False
+        if "hash_array_mapped_trie" in f:
+            zig_groups_set.update(["hamt", "hashers", "backends", "compaction"])
+            reasons.append(f"{f} -> Zig groups: hamt, hashers, backends, compaction")
+        elif "array_list" in f or "linked_array_list" in f:
+            zig_groups_set.update(["lists", "compaction"])
+            reasons.append(f"{f} -> Zig groups: lists, compaction")
+        elif "btree" in f or "sorted" in f:
+            zig_groups_set.update(["sorted_map", "compaction"])
+            reasons.append(f"{f} -> Zig groups: sorted_map, compaction")
+        elif "compact" in f or "replicate" in f:
+            zig_groups_set.add("compaction")
+            reasons.append(f"{f} -> Zig group: compaction")
+        else:
+            zig_groups_set.update(ALL_ZIG_GROUPS)
+            reasons.append(f"{f} -> all 6 Zig groups")
+
+    odin_groups = [g for g in ALL_ODIN_GROUPS if g in odin_groups_set]
+    zig_groups = [g for g in ALL_ZIG_GROUPS if g in zig_groups_set]
+    final_filter = "|".join(dict.fromkeys(filter_patterns)) if (can_narrow_filter and filter_patterns) else ""
+
+    return {
+        "diff_label": diff_label,
+        "changed_files": sorted(changed_files),
+        "procs_by_file": {k: sorted(v) for k, v in sorted(procs_by_file.items())},
+        "odin_groups": odin_groups,
+        "zig_groups": zig_groups,
+        "filter": final_filter,
+        "reasons": reasons,
+    }
+
+
+def print_benchmark_plan(plan: Dict[str, Any]) -> None:
+    print()
+    print("=" * 116)
+    print(f"  Code-Change-to-Benchmark Execution Plan (Diff: {plan['diff_label']})")
+    print("=" * 116)
+    if not plan["changed_files"]:
+        print("  Changed source files : (none in xitdb/ or reference/xitdb-zig/src/)")
+    else:
+        print(f"  Changed source files : {', '.join(plan['changed_files'])}")
+    if plan["procs_by_file"]:
+        for f, ps in plan["procs_by_file"].items():
+            print(f"  Modified procedures  : {f} -> {', '.join(ps)}")
+    for r in plan["reasons"]:
+        print(f"  Impact mapping       : {r}")
+    print("  " + "-" * 112)
+    if plan["odin_groups"]:
+        g_desc = ", ".join(f"{g} [{GROUP_RANGES[g]}]" for g in plan["odin_groups"])
+        print(f"  Odin groups to run   : {g_desc}")
+    else:
+        print("  Odin groups to run   : (skip — no Odin source changes)")
+    if plan["zig_groups"]:
+        g_desc = ", ".join(f"{g} [{GROUP_RANGES[g]}]" for g in plan["zig_groups"])
+        print(f"  Zig groups to run    : {g_desc}")
+    else:
+        print("  Zig groups to run    : (skip — no Zig source changes)")
+    print(f"  Benchmark filter     : {plan['filter'] if plan['filter'] else '(all tests in selected groups)'}")
+    print("=" * 116)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="xitdb Multi-Run Statistical Benchmark Runner & Analyzer")
     parser.add_argument("--runs", type=int, default=5, help="In-process measured trials per test (default: 5)")
@@ -464,8 +735,41 @@ def main() -> None:
     parser.add_argument("--lang", choices=["odin", "zig", "both"], default="odin", help="Language for --compare-commits")
     parser.add_argument("--list-commits", action="store_true", help="List all commits and run sessions in history")
     parser.add_argument("--inspect", type=str, default=None, help="Inspect all runs and sample distributions for matching tests")
+    parser.add_argument(
+        "--groups",
+        type=str,
+        default=None,
+        help="Comma-separated benchmark groups to run: hamt,lists,sorted_map,compaction,hashers,backends,dsl",
+    )
+    parser.add_argument(
+        "--filter",
+        type=str,
+        default=None,
+        help="Pipe- or comma-separated case-insensitive benchmark name substrings to run",
+    )
+    parser.add_argument(
+        "--affected",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="GIT_REF",
+        help="Map git diff changes (working tree or commit range) to affected benchmarks and run only those",
+    )
+    parser.add_argument(
+        "--plan",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="GIT_REF",
+        help="Dry-run: print the code-change-to-benchmark mapping plan for GIT_REF without executing benchmarks",
+    )
 
     args = parser.parse_args()
+
+    if args.plan is not None:
+        plan = map_changes_to_benchmarks(args.plan)
+        print_benchmark_plan(plan)
+        return
 
     if args.list_commits:
         list_commits(load_all_history())
@@ -484,7 +788,6 @@ def main() -> None:
         return
 
     if not args.from_jsonl:
-        zig_bin = find_zig()
         commit_sha = args.commit or current_git_commit()
         run_id = args.run_id or f"run-{int(time.time())}"
 
@@ -499,20 +802,63 @@ def main() -> None:
         if args.no_history:
             common_flags.append("--no-history")
 
-        run_cmd(
-            ["odin", "run", "benchmarks", "-o:speed", "-microarch:native", "--"] + common_flags,
-            "xitdb-odin (-o:speed -microarch:native)",
-        )
-        run_cmd(
-            [zig_bin, "build", "bench", "-Doptimize=ReleaseFast", "-Dcpu=native", "--"] + common_flags,
-            "xitdb-zig (-Doptimize=ReleaseFast -Dcpu=native)",
-        )
+        if args.affected is not None:
+            plan = map_changes_to_benchmarks(args.affected)
+            print_benchmark_plan(plan)
+            odin_groups = args.groups.split(",") if args.groups else plan["odin_groups"]
+            zig_groups = args.groups.split(",") if args.groups else plan["zig_groups"]
+            bench_filter = args.filter if args.filter is not None else plan["filter"]
+
+            if not odin_groups and not zig_groups:
+                print("==> No benchmark-affecting source changes detected; skipping execution.", file=sys.stderr)
+            else:
+                if odin_groups:
+                    odin_flags = list(common_flags) + ["--groups", ",".join(odin_groups)]
+                    if bench_filter:
+                        odin_flags += ["--filter", bench_filter]
+                    run_cmd(
+                        ["odin", "run", "benchmarks", "-o:speed", "-microarch:native", "--"] + odin_flags,
+                        f"xitdb-odin (selective: groups={','.join(odin_groups)}"
+                        + (f", filter={bench_filter})" if bench_filter else ")"),
+                    )
+                if zig_groups:
+                    zig_bin = find_zig()
+                    zig_flags = list(common_flags) + ["--groups", ",".join(zig_groups)]
+                    if bench_filter:
+                        zig_flags += ["--filter", bench_filter]
+                    run_cmd(
+                        [zig_bin, "build", "bench", "-Doptimize=ReleaseFast", "-Dcpu=native", "--"] + zig_flags,
+                        f"xitdb-zig (selective: groups={','.join(zig_groups)}"
+                        + (f", filter={bench_filter})" if bench_filter else ")"),
+                    )
+        else:
+            extra_flags: List[str] = []
+            if args.groups:
+                extra_flags += ["--groups", args.groups]
+            if args.filter:
+                extra_flags += ["--filter", args.filter]
+
+            run_odin = args.lang in ("odin", "both") or args.groups is None
+            run_zig = (args.lang in ("zig", "both") or args.groups is None) and (args.groups != "dsl")
+
+            if run_odin:
+                run_cmd(
+                    ["odin", "run", "benchmarks", "-o:speed", "-microarch:native", "--"] + common_flags + extra_flags,
+                    "xitdb-odin (-o:speed -microarch:native)",
+                )
+            if run_zig:
+                zig_bin = find_zig()
+                run_cmd(
+                    [zig_bin, "build", "bench", "-Doptimize=ReleaseFast", "-Dcpu=native", "--"] + common_flags + extra_flags,
+                    "xitdb-zig (-Doptimize=ReleaseFast -Dcpu=native)",
+                )
 
     odin_raw = load_jsonl_file(ODIN_JSONL)
     zig_raw = load_jsonl_file(ZIG_JSONL)
 
-    odin_rows = pool_by_lang_and_test(odin_raw, "odin", args.commit)
-    zig_rows = pool_by_lang_and_test(zig_raw, "zig", args.commit)
+    snapshot_commit = args.commit if (args.from_jsonl and not args.affected and not args.groups and not args.filter) else None
+    odin_rows = pool_by_lang_and_test(odin_raw, "odin", snapshot_commit)
+    zig_rows = pool_by_lang_and_test(zig_raw, "zig", snapshot_commit)
 
     print_1v1_comparison(odin_rows, zig_rows)
 

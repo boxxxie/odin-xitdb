@@ -36,11 +36,18 @@ var g_append_primary: bool = false;
 var g_save_history: bool = true;
 var g_jsonl_path: []const u8 = "benchmarks/zig.jsonl";
 var g_history_path: []const u8 = "benchmarks/history.jsonl";
+var g_groups_filter: []const u8 = "";
+var g_name_filter: []const u8 = "";
 
 var g_is_warmup: bool = false;
+var g_group_base_rank: usize = 0;
 var g_group_slot: usize = 0;
 var g_group_count: usize = 0;
 var g_group_accum: [MAX_GROUP_BENCHES]BenchAccum = undefined;
+
+const MAX_TOTAL_RANKS = 128;
+var g_selective_run: bool = false;
+var g_existing_lines: [MAX_TOTAL_RANKS][]const u8 = @splat("");
 
 fn resolveGitCommit(io: std.Io) void {
     var head_buf: [256]u8 = undefined;
@@ -155,6 +162,72 @@ fn parseCliArgs(init: std.process.Init) !void {
             if (it.next()) |val| {
                 g_history_path = try init.arena.allocator().dupe(u8, val);
             }
+        } else if (std.mem.eql(u8, arg, "--groups") or std.mem.eql(u8, arg, "-groups") or std.mem.eql(u8, arg, "--group") or std.mem.eql(u8, arg, "-group")) {
+            if (it.next()) |val| {
+                g_groups_filter = try init.arena.allocator().dupe(u8, val);
+            }
+        } else if (std.mem.startsWith(u8, arg, "--groups=") or std.mem.startsWith(u8, arg, "-groups:") or std.mem.startsWith(u8, arg, "--group=") or std.mem.startsWith(u8, arg, "-group:")) {
+            const sep = std.mem.indexOfAny(u8, arg, "=:").?;
+            g_groups_filter = try init.arena.allocator().dupe(u8, arg[sep + 1 ..]);
+        } else if (std.mem.eql(u8, arg, "--filter") or std.mem.eql(u8, arg, "-filter")) {
+            if (it.next()) |val| {
+                g_name_filter = try init.arena.allocator().dupe(u8, val);
+            }
+        } else if (std.mem.startsWith(u8, arg, "--filter=") or std.mem.startsWith(u8, arg, "-filter:")) {
+            const sep = std.mem.indexOfAny(u8, arg, "=:").?;
+            g_name_filter = try init.arena.allocator().dupe(u8, arg[sep + 1 ..]);
+        }
+    }
+    g_selective_run = (g_groups_filter.len > 0 and !std.ascii.eqlIgnoreCase(g_groups_filter, "all")) or g_name_filter.len > 0;
+}
+
+fn shouldRunGroup(group_name: []const u8) bool {
+    if (g_groups_filter.len == 0 or std.ascii.eqlIgnoreCase(g_groups_filter, "all")) return true;
+    var it = std.mem.tokenizeAny(u8, g_groups_filter, ",| ");
+    while (it.next()) |tok| {
+        if (std.ascii.eqlIgnoreCase(tok, "all") or std.ascii.eqlIgnoreCase(tok, group_name)) return true;
+        if (std.ascii.eqlIgnoreCase(tok, "list") and std.mem.eql(u8, group_name, "lists")) return true;
+        if ((std.ascii.eqlIgnoreCase(tok, "btree") or std.ascii.eqlIgnoreCase(tok, "sorted")) and std.mem.eql(u8, group_name, "sorted_map")) return true;
+        if (std.ascii.eqlIgnoreCase(tok, "compact") and std.mem.eql(u8, group_name, "compaction")) return true;
+        if ((std.ascii.eqlIgnoreCase(tok, "hash") or std.ascii.eqlIgnoreCase(tok, "hasher") or std.ascii.eqlIgnoreCase(tok, "bytes")) and std.mem.eql(u8, group_name, "hashers")) return true;
+        if (std.ascii.eqlIgnoreCase(tok, "backend") and std.mem.eql(u8, group_name, "backends")) return true;
+    }
+    return false;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn matchesNameFilter(bench_name: []const u8) bool {
+    if (g_name_filter.len == 0) return true;
+    var it = std.mem.tokenizeAny(u8, g_name_filter, "|,");
+    while (it.next()) |raw_pat| {
+        const pat = std.mem.trim(u8, raw_pat, " \t");
+        if (pat.len > 0 and containsIgnoreCase(bench_name, pat)) return true;
+    }
+    return false;
+}
+
+fn loadExistingJsonlRanks(io: std.Io, arena: std.mem.Allocator, path: []const u8) void {
+    const buf = arena.alloc(u8, 256 * 1024) catch return;
+    const content = std.Io.Dir.cwd().readFile(io, path, buf) catch return;
+    const prefix = "{\"rank\":";
+    var line_it = std.mem.splitScalar(u8, content, '\n');
+    while (line_it.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        const rest = line[prefix.len..];
+        const comma = std.mem.indexOfScalar(u8, rest, ',') orelse continue;
+        const rank = std.fmt.parseInt(usize, rest[0..comma], 10) catch continue;
+        if (rank >= 1 and rank < MAX_TOTAL_RANKS) {
+            g_existing_lines[rank] = std.fmt.allocPrint(arena, "{s}\n", .{line}) catch "";
         }
     }
 }
@@ -280,7 +353,18 @@ fn flushGroupResults(stdout: *std.Io.Writer) !void {
         const n = acc.count;
         if (n == 0) continue;
 
-        g_bench_rank += 1;
+        const rank = g_group_base_rank + slot + 1;
+        g_bench_rank = rank;
+        if (!matchesNameFilter(acc.name)) {
+            if (g_selective_run and !g_append_primary and rank < MAX_TOTAL_RANKS and g_existing_lines[rank].len > 0) {
+                if (g_jsonl_writer) |jw| {
+                    try jw.writeAll(g_existing_lines[rank]);
+                    try jw.flush();
+                }
+            }
+            continue;
+        }
+
         @memcpy(sorted_ns[0..n], acc.samples_ns[0..n]);
         @memcpy(sorted_ms[0..n], acc.samples_ms[0..n]);
         sortF64(sorted_ns[0..n]);
@@ -351,9 +435,26 @@ fn runGroup(
     io: std.Io,
     allocator: std.mem.Allocator,
     stdout: *std.Io.Writer,
+    group_name: []const u8,
+    base_rank: usize,
+    group_benches: usize,
     comptime groupFn: fn (std.Io, std.mem.Allocator, *std.Io.Writer, usize) anyerror!void,
     param: usize,
 ) !void {
+    if (!shouldRunGroup(group_name)) {
+        if (g_selective_run and !g_append_primary) {
+            if (g_jsonl_writer) |jw| {
+                for (base_rank + 1 .. base_rank + group_benches + 1) |r| {
+                    if (r < MAX_TOTAL_RANKS and g_existing_lines[r].len > 0) {
+                        try jw.writeAll(g_existing_lines[r]);
+                    }
+                }
+                try jw.flush();
+            }
+        }
+        return;
+    }
+    g_group_base_rank = base_rank;
     g_is_warmup = true;
     for (0..g_warmup) |_| {
         g_group_slot = 0;
@@ -2185,6 +2286,10 @@ pub fn main(init: std.process.Init) !void {
 
     try parseCliArgs(init);
 
+    if (g_selective_run and !g_append_primary) {
+        loadExistingJsonlRanks(io, init.arena.allocator(), g_jsonl_path);
+    }
+
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
@@ -2214,12 +2319,12 @@ pub fn main(init: std.process.Init) !void {
     };
 
     try printHeader(stdout);
-    try runGroup(io, allocator, stdout, benchHamt, 2_000);
-    try runGroup(io, allocator, stdout, benchLists, 2_000);
-    try runGroup(io, allocator, stdout, benchSortedMap, 2_000);
-    try runGroup(io, allocator, stdout, benchCompactionAndReplication, 200);
-    try runGroup(io, allocator, stdout, benchHashersAndByteStreams, 2_000);
-    try runGroup(io, allocator, stdout, benchBackends, 500);
+    try runGroup(io, allocator, stdout, "hamt", 0, 13, benchHamt, 2_000);
+    try runGroup(io, allocator, stdout, "lists", 13, 14, benchLists, 2_000);
+    try runGroup(io, allocator, stdout, "sorted_map", 27, 11, benchSortedMap, 2_000);
+    try runGroup(io, allocator, stdout, "compaction", 38, 6, benchCompactionAndReplication, 200);
+    try runGroup(io, allocator, stdout, "hashers", 44, 13, benchHashersAndByteStreams, 2_000);
+    try runGroup(io, allocator, stdout, "backends", 57, 6, benchBackends, 500);
     try stdout.writeAll("============================================================================================================================================\n");
     try stdout.flush();
 }
