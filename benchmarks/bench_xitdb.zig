@@ -883,14 +883,17 @@ fn benchSortedMap(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
         }
     };
 
+    const sz_before_sset = try db.committedSize();
     const t9 = std.Io.Clock.awake.now(io);
     try history.appendContext(.{ .slot = .{} }, SSetPutCtx{ .keys = keys });
     const elapsed_sset_put = t9.untilNow(io, .awake).nanoseconds;
+    const sz_after_sset = try db.committedSize();
 
     try printResult(stdout, .{
         .name = "Sorted_Set (B+Tree) key-only put (1 tx)",
         .ops = n,
         .elapsed_ns = elapsed_sset_put,
+        .bytes_used = sz_after_sset - sz_before_sset,
     });
 
     const ss_cur = (try history.getCursor(-1)).?;

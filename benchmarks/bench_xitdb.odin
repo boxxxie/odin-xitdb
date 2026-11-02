@@ -895,14 +895,17 @@ bench_sorted_map :: proc(n: int) {
 		return nil
 	}
 
+	sz_before_sset, _ := xitdb.database_committed_size(&db)
 	t9 := time.now()
 	_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, sset_put_cb, &sctx)
 	elapsed_sset_put := time.since(t9)
+	sz_after_sset, _ := xitdb.database_committed_size(&db)
 
 	print_result(Bench_Result{
-		name    = "Sorted_Set (B+Tree) key-only put (1 tx)",
-		ops     = n,
-		elapsed = elapsed_sset_put,
+		name       = "Sorted_Set (B+Tree) key-only put (1 tx)",
+		ops        = n,
+		elapsed    = elapsed_sset_put,
+		bytes_used = sz_after_sset - sz_before_sset,
 	})
 
 	ss_cur, _ := xitdb.array_list_get_cursor(history, -1)

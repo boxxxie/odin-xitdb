@@ -274,7 +274,8 @@ compacted_db, _   := xitdb.database_compact(&db, &compacted_core)
 │   ├── btree.odin              # Count-augmented B-Tree & B+Tree implementation
 │   └── compact_replicate.odin  # Garbage-collecting compactor & incremental log replication
 ├── tests/                      # 3-layer ATDD executable specification & unit test suite
-└── benchmarks/                 # Throughput, latency & memory allocation benchmark suite
+├── benchmarks/                 # Throughput, latency & memory allocation benchmark suite
+└── reference/xitdb-zig/        # Upstream Zig reference submodule for feature parity & 1v1 benchmarks
 ```
 
 ## Running Tests
