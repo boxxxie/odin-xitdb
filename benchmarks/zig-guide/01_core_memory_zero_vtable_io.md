@@ -6,13 +6,14 @@
 
 This foundational overhead affects every in-memory operation in `xitdb`, and is isolated most clearly on benchmarks where algorithmic tree work is minimal:
 
-| # | Benchmark | Odin (`-o:speed`) | Zig (`ReleaseFast`) | Speedup | Slice |
-| ---: | :--- | ---: | ---: | :--- | :--- |
-| 15 | `Array_List (Radix Trie) random get` | **46 ns** | 138 ns | **3.00x Odin** | [Slice #15](../slices/15_array_list_radix_trie_random_get.md) |
-| 18 | `Array_List (Radix Trie) index-seek page(10)` | **347 ns** | 1,545 ns | **4.45x Odin** | [Slice #18](../slices/18_array_list_radix_trie_index_seek_page_10.md) |
-| 48 | `Bytes: External Bytes read_bytes_buf` | **9 ns** | 39 ns | **4.33x Odin** | [Slice #48](../slices/48_bytes_external_bytes_read_bytes_buf.md) |
-| 53 | `Stream: Cursor_Reader random seek + 64B read` | **6 ns** | 28 ns | **4.67x Odin** | [Slice #53](../slices/53_stream_cursor_reader_random_seek_64b_read.md) |
-| 63 | `DB: Re-open & trailer checksum verify` | **56 ns** | 249 ns | **4.45x Odin** | [Slice #63](../slices/63_db_re_open_trailer_checksum_verify.md) |
+| # | Benchmark | Odin (`-o:speed`) | Upstream Zig | Patched Zig | Zig Speedup | Slice |
+| ---: | :--- | ---: | ---: | ---: | :--- | :--- |
+| 15 | `Array_List (Radix Trie) random get` | **46 ns** | 138 ns | **85 ns** | **1.62x faster** | [Slice #15](../slices/15_array_list_radix_trie_random_get.md) |
+| 16 | `Array_List (Radix Trie) iterator scan` | **13 ns** | 34 ns | **20 ns** | **1.67x faster** | [Slice #16](../slices/16_array_list_radix_trie_iterator_scan.md) |
+| 18 | `Array_List (Radix Trie) index-seek page(10)` | **347 ns** | 1,545 ns | **925 ns** | **1.67x faster** | [Slice #18](../slices/18_array_list_radix_trie_index_seek_page_10.md) |
+| 48 | `Bytes: External Bytes read_bytes_buf` | **9 ns** | 39 ns | **13 ns** | **2.98x faster** | [Slice #48](../slices/48_bytes_external_bytes_read_bytes_buf.md) |
+| 53 | `Stream: Cursor_Reader random seek + 64B read` | 6 ns | 28 ns | **5 ns** | **5.67x faster** *(beats Odin!)* | [Slice #53](../slices/53_stream_cursor_reader_random_seek_64b_read.md) |
+| 63 | `DB: Re-open & trailer checksum verify` | **56 ns** | 249 ns | **224 ns** | **1.11x faster** | [Slice #63](../slices/63_db_re_open_trailer_checksum_verify.md) |
 
 ---
 
@@ -95,15 +96,14 @@ const CoreMemory = struct {
     pub const Reader = struct {
         parent: *CoreMemory,
         interface: std.Io.Reader,
+        pos: u64 = 0, // retained because `src/test.zig` asserts `reader.pos` directly
 
         pub fn seekTo(self: *Reader, offset: u64) !void {
+            self.pos = offset;
             const bytes = self.parent.buffer.written();
-            self.interface = .fixed(bytes);
+            self.interface.buffer = @constCast(bytes);
+            self.interface.end = bytes.len;
             self.interface.seek = @intCast(@min(offset, bytes.len));
-        }
-
-        pub fn logicalPos(self: Reader) u64 {
-            return self.interface.seek;
         }
     };
 
@@ -117,7 +117,7 @@ const CoreMemory = struct {
 };
 ```
 
-> **Note on `start_position = core_reader.pos`:** Three call sites in `Cursor` ([`lib.zig#L3245`](../../reference/xitdb-zig/src/lib.zig#L3245), [`lib.zig#L3303`](../../reference/xitdb-zig/src/lib.zig#L3303), and [`lib.zig#L3372`](../../reference/xitdb-zig/src/lib.zig#L3372)) read `core_reader.pos` right after `takeInt(u64)` to get `slot_ptr.slot.value + 8`. Using `slot_ptr.slot.value + byteSizeOf(u64)` directly (or `core_reader.logicalPos()`) works uniformly across `CoreMemory`, `CoreFile`, and `CoreBufferedFile`, and lets you delete `CoreMemory.Reader.stream` completely.
+> **Note on `reader.pos` and `start_position`:** `src/test.zig` directly inspects `reader.pos` in unit tests (`test.zig#L154-L170`), so keeping `pos: u64 = 0` on `CoreMemory.Reader` and updating `self.pos = offset` in `seekTo()` ensures 100% test compatibility. In `Cursor` ([`lib.zig#L3245`](../../reference/xitdb-zig/src/lib.zig#L3245), [`lib.zig#L3303`](../../reference/xitdb-zig/src/lib.zig#L3303), and [`lib.zig#L3372`](../../reference/xitdb-zig/src/lib.zig#L3372)), using `slot_ptr.slot.value + byteSizeOf(u64)` after `takeInt(u64)` works uniformly across `CoreMemory`, `CoreFile`, and `CoreBufferedFile`, and lets you delete `CoreMemory.Reader.stream` completely. Also replacing `std.Io.Reader.fixed` inside `Cursor.Iter.readSlotBlock` with direct `std.mem.readInt` over the 144-byte buffer speeds up all collection iterators (`#6`, `#16`, `#22`, `#31`) by **1.52x–1.73x**.
 
 ### Maintainability & Readability Impact
 - **Net LOC:** **-12 lines** (`CoreMemory.Reader.stream` is removed completely).

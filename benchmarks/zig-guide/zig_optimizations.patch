@@ -1,0 +1,1271 @@
+diff --git a/src/lib.zig b/src/lib.zig
+index 7252580..8319630 100644
+--- a/src/lib.zig
++++ b/src/lib.zig
+@@ -1697,30 +1697,54 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                                 .value => SlotPointer{ .position = value_slot_pos, .slot = kv_pair.value_slot },
+                             },
+                             .is_empty = false,
+                         };
+                     } else {
+-                        switch (write_mode) {
+-                            .read_only => return error.KeyNotFound,
+-                            .read_write => {
+-                                // append new index block
+-                                if (key_offset + 1 >= (HASH_SIZE * 8) / BIT_COUNT) {
++                    switch (write_mode) {
++                        .read_only => return error.KeyNotFound,
++                        .read_write => {
++                            // Build the chain of shared-nibble index blocks iteratively
++                            // before inserting the new kv_pair (avoids recursive index allocations).
++                            const slot_len = comptime byteSizeOf(Slot);
++                            var cur_offset = key_offset;
++                            var cur_index_pos = index_pos;
++                            var cur_slot_pos = slot_pos;
++                            while (true) {
++                                if (cur_offset + 1 >= (HASH_SIZE * 8) / BIT_COUNT) {
+                                     return error.KeyOffsetExceeded;
+                                 }
+-                                const next_i: u4 = @intCast((kv_pair.hash >> @intCast((key_offset + 1) * BIT_COUNT)) & MASK);
++                                cur_offset += 1;
++                                const existing_i: u4 = @intCast((kv_pair.hash >> @intCast(cur_offset * BIT_COUNT)) & MASK);
++                                const new_i: u4 = @intCast((key_hash >> @intCast(cur_offset * BIT_COUNT)) & MASK);
+                                 const next_index_pos = try self.core.length();
+                                 var index_block: [INDEX_BLOCK_SIZE]u8 = @splat(0);
+-                                try writer.seekTo(next_index_pos);
+-                                try writer.interface.writeAll(&index_block);
+-                                try writer.seekTo(next_index_pos + (byteSizeOf(Slot) * next_i));
+-                                try writer.interface.writeInt(SlotInt, @bitCast(slot), .big);
+-                                const res = try self.readMapSlot(next_index_pos, key_hash, key_offset + 1, write_mode, target, frozen_at);
+-                                try writer.seekTo(slot_pos);
+-                                try writer.interface.writeInt(SlotInt, @bitCast(Slot{ .value = next_index_pos, .tag = .index }), .big);
+-                                return res;
+-                            },
+-                        }
++                                if (existing_i != new_i) {
++                                    std.mem.writeInt(
++                                        SlotInt,
++                                        index_block[@as(usize, existing_i) * slot_len ..][0..slot_len],
++                                        @bitCast(slot),
++                                        .big,
++                                    );
++                                    try writer.seekTo(next_index_pos);
++                                    try writer.interface.writeAll(&index_block);
++                                    try writer.seekTo(cur_slot_pos);
++                                    try writer.interface.writeInt(SlotInt, @bitCast(Slot{ .value = next_index_pos, .tag = .index }), .big);
++                                    cur_index_pos = next_index_pos;
++                                    cur_slot_pos = cur_index_pos + (@as(u64, new_i) * slot_len);
++                                    break;
++                                } else {
++                                    try writer.seekTo(next_index_pos);
++                                    try writer.interface.writeAll(&index_block);
++                                    try writer.seekTo(cur_slot_pos);
++                                    try writer.interface.writeInt(SlotInt, @bitCast(Slot{ .value = next_index_pos, .tag = .index }), .big);
++                                    cur_index_pos = next_index_pos;
++                                    cur_slot_pos = cur_index_pos + (@as(u64, new_i) * slot_len);
++                                }
++                            }
++                            return self.readMapSlot(cur_index_pos, key_hash, cur_offset, write_mode, target, frozen_at);
++                        },
++                    }
+                     }
+                 },
+                 else => return error.UnexpectedTag,
+             }
+         }
+@@ -1731,25 +1755,16 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+             }
+ 
+             var reader = self.core.reader();
+             var writer = self.core.writer();
+ 
+-            // read block
+-            var slot_block: [SLOT_COUNT]Slot = @splat(.{});
+-            try reader.seekTo(index_pos);
+-            var index_block: [INDEX_BLOCK_SIZE]u8 = @splat(0);
+-            try reader.interface.readSliceAll(&index_block);
+-            var block_reader = std.Io.Reader.fixed(&index_block);
+-            for (&slot_block) |*block_slot| {
+-                block_slot.* = @bitCast(try takeInt(&block_reader, SlotInt, .big));
+-                try block_slot.tag.validate();
+-            }
+-
+-            // get the current slot
++            // read only the target slot on the way down
+             const i: u4 = @intCast((key_hash >> @intCast(key_offset * BIT_COUNT)) & MASK);
+             const slot_pos = index_pos + (byteSizeOf(Slot) * i);
+-            const slot = slot_block[i];
++            try reader.seekTo(slot_pos);
++            const slot: Slot = @bitCast(try takeInt(&reader.interface, SlotInt, .big));
++            try slot.tag.validate();
+ 
+             // get the slot that will replace the current slot
+             const next_slot: Slot = switch (slot.tag) {
+                 .none => return error.KeyNotFound,
+                 .index => try self.removeMapSlot(slot.value, key_hash, key_offset + 1, frozen_at),
+@@ -1763,49 +1778,54 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                     }
+                 },
+                 else => return error.UnexpectedTag,
+             };
+ 
+-            // if we're the root node, just write the new slot and finish
+-            if (key_offset == 0) {
+-                try writer.seekTo(slot_pos);
++            // if we're the root node, or the child is still a branch (.index),
++            // this index block cannot collapse into a single .kv_pair or .none
++            if (key_offset == 0 or next_slot.tag == .index) {
++                const next_index_pos = if (key_offset == 0) index_pos else try self.copyIndexBlockIfOld(index_pos, frozen_at);
++                try writer.seekTo(next_index_pos + (byteSizeOf(Slot) * i));
+                 try writer.interface.writeInt(SlotInt, @bitCast(next_slot), .big);
+-                return .{ .value = index_pos, .tag = .index };
++                return .{ .value = next_index_pos, .tag = .index };
+             }
+ 
+-            // get slot to return if there is only one used slot
+-            // in this index block
++            // child collapsed to .none or .kv_pair at depth > 0: read sibling slots to check for singleton collapse
++            try reader.seekTo(index_pos);
++            var index_block: [INDEX_BLOCK_SIZE]u8 = undefined;
++            try reader.interface.readSliceAll(&index_block);
++
++            const slot_len = comptime byteSizeOf(Slot);
+             var slot_to_return_maybe: ?Slot = .{ .tag = .none };
+-            slot_block[i] = next_slot;
+-            for (slot_block) |block_slot| {
++            for (0..SLOT_COUNT) |j| {
++                const block_slot: Slot = if (j == i)
++                    next_slot
++                else blk: {
++                    const off = j * slot_len;
++                    const s: Slot = @bitCast(std.mem.readInt(SlotInt, index_block[off..][0..slot_len], .big));
++                    try s.tag.validate();
++                    break :blk s;
++                };
+                 if (block_slot.tag == .none) continue;
+ 
+-                // if there is already a slot to return, that
+-                // means there is more than one used slot in this
+-                // index block, so we can't return just a single slot
+                 if (slot_to_return_maybe) |slot_to_return| {
+                     if (slot_to_return.tag != .none) {
+                         slot_to_return_maybe = null;
+                         break;
+                     }
+                 }
+ 
+                 slot_to_return_maybe = block_slot;
+             }
+ 
+-            // if there were either no used slots, or a single .kv_pair
+-            // slot, this index block doesn't need to exist anymore
+             if (slot_to_return_maybe) |slot_to_return| {
+                 switch (slot_to_return.tag) {
+                     .none, .kv_pair => return slot_to_return,
+                     else => {},
+                 }
+             }
+ 
+-            // there was more than one used slot, or a single .index slot,
+-            // so we must keep this index block. update the slot in it,
+-            // copying the block first unless it belongs to this transaction.
+             const next_index_pos = try self.copyIndexBlockIfOld(index_pos, frozen_at);
+             try writer.seekTo(next_index_pos + (byteSizeOf(Slot) * i));
+             try writer.interface.writeInt(SlotInt, @bitCast(next_slot), .big);
+             return .{ .value = next_index_pos, .tag = .index };
+         }
+@@ -1944,29 +1964,42 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+         // b-tree
+ 
+         fn readBTreeNode(self: *Database(db_kind, HashInt), ptr: u64) !BTreeNode {
+             var reader = self.core.reader();
+             try reader.seekTo(ptr);
+-            const kind_int = try takeInt(&reader.interface, u8, .big);
+-            const kind = std.enums.fromInt(BTreeNodeKind, kind_int) orelse return error.InvalidBTreeNodeKind;
+-            const num = try takeInt(&reader.interface, u8, .big);
++            var hdr: [BTREE_NODE_HEADER_SIZE]u8 = undefined;
++            try reader.interface.readSliceAll(&hdr);
++            const kind = std.enums.fromInt(BTreeNodeKind, hdr[0]) orelse return error.InvalidBTreeNodeKind;
++            const num = hdr[1];
+             if (num > BTREE_SLOT_COUNT) return error.InvalidBTreeNode;
+             var node = BTreeNode{ .kind = kind, .num = num };
++            const slot_len = comptime byteSizeOf(Slot);
++            const u64_len = comptime byteSizeOf(u64);
+             switch (kind) {
+                 .leaf => {
+-                    for (&node.values) |*s| {
+-                        s.* = @bitCast(try takeInt(&reader.interface, SlotInt, .big));
++                    var body: [BTREE_LEAF_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = undefined;
++                    try reader.interface.readSliceAll(&body);
++                    for (0..num) |i| {
++                        const off = i * slot_len;
++                        const s: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
+                         try s.tag.validate();
++                        node.values[i] = s;
+                     }
+                 },
+                 .branch => {
+-                    for (&node.children) |*s| {
+-                        s.* = @bitCast(try takeInt(&reader.interface, SlotInt, .big));
++                    const slots_len = BTREE_SLOT_COUNT * slot_len;
++                    var body: [BTREE_BRANCH_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = undefined;
++                    try reader.interface.readSliceAll(&body);
++                    for (0..num) |i| {
++                        const off = i * slot_len;
++                        const s: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
+                         try s.tag.validate();
++                        node.children[i] = s;
+                     }
+-                    for (&node.counts) |*c| {
+-                        c.* = try takeInt(&reader.interface, u64, .big);
++                    for (0..num) |i| {
++                        const off = slots_len + i * u64_len;
++                        node.counts[i] = std.mem.readInt(u64, body[off..][0..u64_len], .big);
+                     }
+                 },
+             }
+             return node;
+         }
+@@ -1975,19 +2008,37 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+         // b-tree mutations are persistent: every node on the path from the root
+         // is rewritten, while untouched subtrees are shared by pointer.
+         fn writeBTreeNodeAt(self: *Database(db_kind, HashInt), node: BTreeNode, ptr: u64) !void {
+             var writer = self.core.writer();
+             try writer.seekTo(ptr);
+-            try writer.interface.writeInt(u8, @backingInt(node.kind), .big);
+-            try writer.interface.writeInt(u8, node.num, .big);
++            const slot_len = comptime byteSizeOf(Slot);
++            const u64_len = comptime byteSizeOf(u64);
+             switch (node.kind) {
+                 .leaf => {
+-                    for (node.values) |s| try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
++                    var buf: [BTREE_LEAF_BLOCK_SIZE]u8 = @splat(0);
++                    buf[0] = @backingInt(node.kind);
++                    buf[1] = node.num;
++                    for (0..node.num) |i| {
++                        const off = BTREE_NODE_HEADER_SIZE + i * slot_len;
++                        std.mem.writeInt(SlotInt, buf[off..][0..slot_len], @bitCast(node.values[i]), .big);
++                    }
++                    try writer.interface.writeAll(&buf);
+                 },
+                 .branch => {
+-                    for (node.children) |s| try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
+-                    for (node.counts) |c| try writer.interface.writeInt(u64, c, .big);
++                    var buf: [BTREE_BRANCH_BLOCK_SIZE]u8 = @splat(0);
++                    buf[0] = @backingInt(node.kind);
++                    buf[1] = node.num;
++                    for (0..node.num) |i| {
++                        const off = BTREE_NODE_HEADER_SIZE + i * slot_len;
++                        std.mem.writeInt(SlotInt, buf[off..][0..slot_len], @bitCast(node.children[i]), .big);
++                    }
++                    const counts_base = BTREE_NODE_HEADER_SIZE + BTREE_SLOT_COUNT * slot_len;
++                    for (0..node.num) |i| {
++                        const off = counts_base + i * u64_len;
++                        std.mem.writeInt(u64, buf[off..][0..u64_len], node.counts[i], .big);
++                    }
++                    try writer.interface.writeAll(&buf);
+                 },
+             }
+         }
+ 
+         // appends `node` as a fresh block and returns its position.
+@@ -2019,25 +2070,45 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+         }
+ 
+         // descend to the value slot at the given rank (0-based), returning a
+         // pointer to it (its file position and current slot).
+         fn readBTreeSlot(self: *Database(db_kind, HashInt), root_ptr: u64, rank: u64) !SlotPointer {
++            var reader = self.core.reader();
+             var node_ptr = root_ptr;
+             var rem = rank;
+             while (true) {
+-                const node = try self.readBTreeNode(node_ptr);
+-                switch (node.kind) {
++                try reader.seekTo(node_ptr);
++                var hdr: [BTREE_NODE_HEADER_SIZE]u8 = undefined;
++                try reader.interface.readSliceAll(&hdr);
++                const kind = std.enums.fromInt(BTreeNodeKind, hdr[0]) orelse return error.InvalidBTreeNodeKind;
++                const num = hdr[1];
++                if (num > BTREE_SLOT_COUNT) return error.InvalidBTreeNode;
++
++                switch (kind) {
+                     .leaf => {
+                         const position = node_ptr + BTREE_NODE_HEADER_SIZE + rem * byteSizeOf(Slot);
+-                        return .{ .position = position, .slot = node.values[@intCast(rem)] };
++                        try reader.seekTo(position);
++                        const slot: Slot = @bitCast(try takeInt(&reader.interface, SlotInt, .big));
++                        try slot.tag.validate();
++                        return .{ .position = position, .slot = slot };
+                     },
+                     .branch => {
+-                        var i: u8 = 0;
+-                        while (i + 1 < node.num and rem >= node.counts[i]) : (i += 1) {
+-                            rem -= node.counts[i];
++                        const counts_pos = node_ptr + BTREE_NODE_HEADER_SIZE + BTREE_SLOT_COUNT * byteSizeOf(Slot);
++                        try reader.seekTo(counts_pos);
++                        var counts_buf: [BTREE_SLOT_COUNT * byteSizeOf(u64)]u8 = undefined;
++                        try reader.interface.readSliceAll(counts_buf[0 .. @as(usize, num) * byteSizeOf(u64)]);
++
++                        var i: usize = 0;
++                        while (i + 1 < num) : (i += 1) {
++                            const cnt = std.mem.readInt(u64, counts_buf[i * 8 ..][0..8], .big);
++                            if (rem < cnt) break;
++                            rem -= cnt;
+                         }
+-                        node_ptr = node.children[i].value;
++                        try reader.seekTo(node_ptr + BTREE_NODE_HEADER_SIZE + i * byteSizeOf(Slot));
++                        const child: Slot = @bitCast(try takeInt(&reader.interface, SlotInt, .big));
++                        try child.tag.validate();
++                        node_ptr = child.value;
+                     },
+                 }
+             }
+         }
+ 
+@@ -2479,52 +2550,90 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+         // sorted_map / sorted_set
+ 
+         fn readSortedNode(self: *Database(db_kind, HashInt), ptr: u64) !SortedNode {
+             var reader = self.core.reader();
+             try reader.seekTo(ptr);
+-            const kind_int = try takeInt(&reader.interface, u8, .big);
+-            const kind = std.enums.fromInt(SortedNodeKind, kind_int) orelse return error.InvalidBTreeNodeKind;
+-            const num = try takeInt(&reader.interface, u8, .big);
++            var hdr: [BTREE_NODE_HEADER_SIZE]u8 = undefined;
++            try reader.interface.readSliceAll(&hdr);
++            const kind = std.enums.fromInt(SortedNodeKind, hdr[0]) orelse return error.InvalidBTreeNodeKind;
++            const num = hdr[1];
+             if (num > BTREE_SLOT_COUNT) return error.InvalidBTreeNode;
+             var node = SortedNode{ .kind = kind, .num = num };
++            const slot_len = comptime byteSizeOf(Slot);
++            const u64_len = comptime byteSizeOf(u64);
+             switch (kind) {
+                 .leaf => {
+-                    for (&node.entries) |*s| {
+-                        s.* = @bitCast(try takeInt(&reader.interface, SlotInt, .big));
++                    var body: [SORTED_LEAF_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = undefined;
++                    try reader.interface.readSliceAll(&body);
++                    for (0..num) |i| {
++                        const off = i * slot_len;
++                        const s: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
+                         try s.tag.validate();
++                        node.entries[i] = s;
+                     }
+                 },
+                 .branch => {
+-                    for (&node.children) |*s| {
+-                        s.* = @bitCast(try takeInt(&reader.interface, SlotInt, .big));
++                    const slots_len = BTREE_SLOT_COUNT * slot_len;
++                    var body: [SORTED_BRANCH_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = undefined;
++                    try reader.interface.readSliceAll(&body);
++                    for (0..num) |i| {
++                        const off = i * slot_len;
++                        const s: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
+                         try s.tag.validate();
++                        node.children[i] = s;
+                     }
+-                    for (&node.separators) |*s| {
+-                        s.* = @bitCast(try takeInt(&reader.interface, SlotInt, .big));
++                    for (0..num) |i| {
++                        const off = slots_len + i * slot_len;
++                        const s: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
+                         try s.tag.validate();
++                        node.separators[i] = s;
+                     }
+-                    for (&node.counts) |*c| {
+-                        c.* = try takeInt(&reader.interface, u64, .big);
++                    const counts_base = slots_len * 2;
++                    for (0..num) |i| {
++                        const off = counts_base + i * u64_len;
++                        node.counts[i] = std.mem.readInt(u64, body[off..][0..u64_len], .big);
+                     }
+                 },
+             }
+             return node;
+         }
+ 
+         fn writeSortedNodeAt(self: *Database(db_kind, HashInt), node: SortedNode, ptr: u64) !void {
+             var writer = self.core.writer();
+             try writer.seekTo(ptr);
+-            try writer.interface.writeInt(u8, @backingInt(node.kind), .big);
+-            try writer.interface.writeInt(u8, node.num, .big);
++            const slot_len = comptime byteSizeOf(Slot);
++            const u64_len = comptime byteSizeOf(u64);
+             switch (node.kind) {
+                 .leaf => {
+-                    for (node.entries) |s| try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
++                    var buf: [SORTED_LEAF_BLOCK_SIZE]u8 = @splat(0);
++                    buf[0] = @backingInt(node.kind);
++                    buf[1] = node.num;
++                    for (0..node.num) |i| {
++                        const off = BTREE_NODE_HEADER_SIZE + i * slot_len;
++                        std.mem.writeInt(SlotInt, buf[off..][0..slot_len], @bitCast(node.entries[i]), .big);
++                    }
++                    try writer.interface.writeAll(&buf);
+                 },
+                 .branch => {
+-                    for (node.children) |s| try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
+-                    for (node.separators) |s| try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
+-                    for (node.counts) |c| try writer.interface.writeInt(u64, c, .big);
++                    var buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = @splat(0);
++                    buf[0] = @backingInt(node.kind);
++                    buf[1] = node.num;
++                    for (0..node.num) |i| {
++                        const off = BTREE_NODE_HEADER_SIZE + i * slot_len;
++                        std.mem.writeInt(SlotInt, buf[off..][0..slot_len], @bitCast(node.children[i]), .big);
++                    }
++                    const sep_base = BTREE_NODE_HEADER_SIZE + BTREE_SLOT_COUNT * slot_len;
++                    for (0..node.num) |i| {
++                        const off = sep_base + i * slot_len;
++                        std.mem.writeInt(SlotInt, buf[off..][0..slot_len], @bitCast(node.separators[i]), .big);
++                    }
++                    const counts_base = sep_base + BTREE_SLOT_COUNT * slot_len;
++                    for (0..node.num) |i| {
++                        const off = counts_base + i * u64_len;
++                        std.mem.writeInt(u64, buf[off..][0..u64_len], node.counts[i], .big);
++                    }
++                    try writer.interface.writeAll(&buf);
+                 },
+             }
+         }
+ 
+         fn writeSortedNode(self: *Database(db_kind, HashInt), node: SortedNode) !u64 {
+@@ -2627,55 +2736,96 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                 else => return error.UnexpectedTag,
+             }
+         }
+ 
+         const SortedSlot = struct { slot: Slot, position: u64 };
++        const SortedLeafSearch = struct { index: usize, found: bool };
++
++        fn sortedBranchSearch(self: *Database(db_kind, HashInt), node: *const SortedNode, key: []const u8) !u8 {
++            var lo: usize = 1;
++            var hi: usize = node.num;
++            while (lo < hi) {
++                const mid = lo + (hi - lo) / 2;
++                switch (try self.compareKey(node.separators[mid], key)) {
++                    .lt, .eq => lo = mid + 1,
++                    .gt => hi = mid,
++                }
++            }
++            return @intCast(lo - 1);
++        }
++
++        fn sortedLeafSearch(self: *Database(db_kind, HashInt), node: *const SortedNode, key: []const u8) !SortedLeafSearch {
++            var lo: usize = 0;
++            var hi: usize = node.num;
++            while (lo < hi) {
++                const mid = lo + (hi - lo) / 2;
++                const kv = try self.readKvPair(node.entries[mid]);
++                switch (try self.compareKey(kv.key_slot, key)) {
++                    .eq => return .{ .index = mid, .found = true },
++                    .lt => lo = mid + 1,
++                    .gt => hi = mid,
++                }
++            }
++            return .{ .index = lo, .found = false };
++        }
+ 
+         // descend by key to the matching leaf entry, or null
+         fn sortedGet(self: *Database(db_kind, HashInt), root_ptr: u64, key: []const u8) !?SortedSlot {
+             var node_ptr = root_ptr;
+             while (true) {
+                 const node = try self.readSortedNode(node_ptr);
+                 switch (node.kind) {
+                     .leaf => {
+-                        for (0..node.num) |i| {
+-                            const entry = node.entries[i];
+-                            const kv = try self.readKvPair(entry);
+-                            switch (try self.compareKey(kv.key_slot, key)) {
+-                                .eq => return .{ .slot = entry, .position = node_ptr + BTREE_NODE_HEADER_SIZE + i * byteSizeOf(Slot) },
+-                                .gt => return null,
+-                                .lt => {},
+-                            }
+-                        }
+-                        return null;
++                        const res = try self.sortedLeafSearch(&node, key);
++                        if (!res.found) return null;
++                        return .{ .slot = node.entries[res.index], .position = node_ptr + BTREE_NODE_HEADER_SIZE + res.index * byteSizeOf(Slot) };
+                     },
+                     .branch => {
+-                        var i: u8 = 0;
+-                        while (i + 1 < node.num and (try self.compareKey(node.separators[i + 1], key)) != .gt) : (i += 1) {}
++                        const i = try self.sortedBranchSearch(&node, key);
+                         node_ptr = node.children[i].value;
+                     },
+                 }
+             }
+         }
+ 
+         // descend by rank to the leaf entry at the given 0-based index
+         fn sortedGetByIndex(self: *Database(db_kind, HashInt), root_ptr: u64, rank: u64) !SortedSlot {
++            var reader = self.core.reader();
+             var node_ptr = root_ptr;
+             var rem = rank;
+             while (true) {
+-                const node = try self.readSortedNode(node_ptr);
+-                switch (node.kind) {
++                try reader.seekTo(node_ptr);
++                var hdr: [BTREE_NODE_HEADER_SIZE]u8 = undefined;
++                try reader.interface.readSliceAll(&hdr);
++                const kind = std.enums.fromInt(SortedNodeKind, hdr[0]) orelse return error.InvalidBTreeNodeKind;
++                const num = hdr[1];
++                if (num > BTREE_SLOT_COUNT) return error.InvalidBTreeNode;
++
++                switch (kind) {
+                     .leaf => {
+-                        const i: usize = @intCast(rem);
+-                        return .{ .slot = node.entries[i], .position = node_ptr + BTREE_NODE_HEADER_SIZE + i * byteSizeOf(Slot) };
++                        const position = node_ptr + BTREE_NODE_HEADER_SIZE + rem * byteSizeOf(Slot);
++                        try reader.seekTo(position);
++                        const slot: Slot = @bitCast(try takeInt(&reader.interface, SlotInt, .big));
++                        try slot.tag.validate();
++                        return .{ .slot = slot, .position = position };
+                     },
+                     .branch => {
+-                        var i: u8 = 0;
+-                        while (i + 1 < node.num and rem >= node.counts[i]) : (i += 1) {
+-                            rem -= node.counts[i];
++                        const counts_pos = node_ptr + BTREE_NODE_HEADER_SIZE + BTREE_SLOT_COUNT * byteSizeOf(Slot) * 2;
++                        try reader.seekTo(counts_pos);
++                        var counts_buf: [BTREE_SLOT_COUNT * byteSizeOf(u64)]u8 = undefined;
++                        try reader.interface.readSliceAll(counts_buf[0 .. @as(usize, num) * byteSizeOf(u64)]);
++
++                        var i: usize = 0;
++                        while (i + 1 < num) : (i += 1) {
++                            const cnt = std.mem.readInt(u64, counts_buf[i * 8 ..][0..8], .big);
++                            if (rem < cnt) break;
++                            rem -= cnt;
+                         }
+-                        node_ptr = node.children[i].value;
++                        try reader.seekTo(node_ptr + BTREE_NODE_HEADER_SIZE + i * byteSizeOf(Slot));
++                        const child: Slot = @bitCast(try takeInt(&reader.interface, SlotInt, .big));
++                        try child.tag.validate();
++                        node_ptr = child.value;
+                     },
+                 }
+             }
+         }
+ 
+@@ -2685,23 +2835,16 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+             var rank: u64 = 0;
+             while (true) {
+                 const node = try self.readSortedNode(node_ptr);
+                 switch (node.kind) {
+                     .leaf => {
+-                        for (0..node.num) |i| {
+-                            const kv = try self.readKvPair(node.entries[i]);
+-                            if ((try self.compareKey(kv.key_slot, key)) == .lt) {
+-                                rank += 1;
+-                            } else break;
+-                        }
+-                        return rank;
++                        const res = try self.sortedLeafSearch(&node, key);
++                        return rank + res.index;
+                     },
+                     .branch => {
+-                        var i: u8 = 0;
+-                        while (i + 1 < node.num and (try self.compareKey(node.separators[i + 1], key)) != .gt) : (i += 1) {
+-                            rank += node.counts[i];
+-                        }
++                        const i = try self.sortedBranchSearch(&node, key);
++                        for (0..i) |k| rank += node.counts[k];
+                         node_ptr = node.children[i].value;
+                     },
+                 }
+             }
+         }
+@@ -2736,27 +2879,13 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+         fn sortedPut(self: *Database(db_kind, HashInt), node_ptr: u64, key: []const u8, key_only: bool, frozen_at: u64) anyerror!SortedInsertResult {
+             const node = try self.readSortedNode(node_ptr);
+             switch (node.kind) {
+                 .leaf => {
+                     // find the matching or insertion index
+-                    var idx: usize = node.num;
+-                    var found = false;
+-                    for (0..node.num) |i| {
+-                        const kv = try self.readKvPair(node.entries[i]);
+-                        switch (try self.compareKey(kv.key_slot, key)) {
+-                            .eq => {
+-                                idx = i;
+-                                found = true;
+-                                break;
+-                            },
+-                            .gt => {
+-                                idx = i;
+-                                break;
+-                            },
+-                            .lt => {},
+-                        }
+-                    }
++                    const search = try self.sortedLeafSearch(&node, key);
++                    const idx = search.index;
++                    const found = search.found;
+ 
+                     if (found) {
+                         if (key_only) return .{ .node_ptr = node_ptr, .count = node.num, .entry = node.entries[idx], .added = false, .split = null };
+ 
+                         // replace: return a writable value slot, moving a key-only entry
+@@ -2807,12 +2936,11 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                         .added = true,
+                         .split = .{ .node_ptr = right_ptr, .count = right_n, .separator = separator },
+                     };
+                 },
+                 .branch => {
+-                    var i: u8 = 0;
+-                    while (i + 1 < node.num and (try self.compareKey(node.separators[i + 1], key)) != .gt) : (i += 1) {}
++                    const i = try self.sortedBranchSearch(&node, key);
+                     const child = try self.sortedPut(node.children[i].value, key, key_only, frozen_at);
+                     // nothing below changed, so don't copy this node for no reason
+                     if (!child.added and child.node_ptr == node.children[i].value) {
+                         return .{ .node_ptr = node_ptr, .count = node.subtreeCount(), .entry = child.entry, .added = false, .split = null };
+                     }
+@@ -2878,35 +3006,22 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+         // decrementing counts. an emptied leaf is left in place (see SortedRemoveResult).
+         fn sortedRemove(self: *Database(db_kind, HashInt), node_ptr: u64, key: []const u8, frozen_at: u64) anyerror!SortedRemoveResult {
+             const node = try self.readSortedNode(node_ptr);
+             switch (node.kind) {
+                 .leaf => {
+-                    var idx: usize = node.num;
+-                    var found = false;
+-                    for (0..node.num) |i| {
+-                        const kv = try self.readKvPair(node.entries[i]);
+-                        switch (try self.compareKey(kv.key_slot, key)) {
+-                            .eq => {
+-                                idx = i;
+-                                found = true;
+-                                break;
+-                            },
+-                            .gt => break,
+-                            .lt => {},
+-                        }
+-                    }
+-                    if (!found) return .{ .node_ptr = node_ptr, .found = false };
++                    const search = try self.sortedLeafSearch(&node, key);
++                    if (!search.found) return .{ .node_ptr = node_ptr, .found = false };
++                    const idx = search.index;
+ 
+                     var leaf = SortedNode{ .kind = .leaf, .num = node.num - 1 };
+                     @memcpy(leaf.entries[0..idx], node.entries[0..idx]);
+                     @memcpy(leaf.entries[idx .. node.num - 1], node.entries[idx + 1 .. node.num]);
+                     const ptr = try self.sortedWriteNode(leaf, node_ptr, frozen_at);
+                     return .{ .node_ptr = ptr, .found = true };
+                 },
+                 .branch => {
+-                    var i: u8 = 0;
+-                    while (i + 1 < node.num and (try self.compareKey(node.separators[i + 1], key)) != .gt) : (i += 1) {}
++                    const i = try self.sortedBranchSearch(&node, key);
+                     const child = try self.sortedRemove(node.children[i].value, key, frozen_at);
+                     if (!child.found) return .{ .node_ptr = node_ptr, .found = false };
+ 
+                     var branch = node;
+                     branch.children[i] = .{ .value = child.node_ptr, .tag = .index };
+@@ -2968,17 +3083,18 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                     start_position: u64,
+                     pos: u64,
+ 
+                     pub fn seekTo(self: *Reader, offset: u64) !void {
+                         const logical_pos = self.logicalPos();
+-                        if (offset < logical_pos or offset >= self.pos) {
++                        const window_start = self.pos - self.interface.end;
++                        if (offset < window_start or offset >= self.pos) {
+                             self.interface.seek = 0;
+                             self.interface.end = 0;
+                             self.pos = offset;
+                         } else {
+-                            const logical_delta: usize = @intCast(offset - logical_pos);
+-                            self.interface.seek += logical_delta;
++                            const logical_delta: isize = @intCast(@as(i65, @intCast(offset)) - @as(i65, @intCast(logical_pos)));
++                            self.interface.seek = @intCast(@as(isize, @intCast(self.interface.seek)) + logical_delta);
+                         }
+                     }
+ 
+                     pub fn logicalPos(self: Reader) u64 {
+                         return self.pos - self.interface.bufferedLen();
+@@ -3240,20 +3356,17 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                                 if (value_size > max_size) {
+                                     return error.StreamTooLong;
+                                 }
+                             }
+ 
+-                            const start_position = core_reader.pos;
+-
+                             const value = try allocator.alloc(u8, value_size);
+                             errdefer allocator.free(value);
+ 
+                             try core_reader.interface.readSliceAll(value);
+ 
+                             const format_tag = if (slot_ptr.slot.full) blk: {
+-                                try core_reader.seekTo(start_position + value_size);
+-                                var buf: [2]u8 = @splat(0);
++                                var buf: [2]u8 = undefined;
+                                 try core_reader.interface.readSliceAll(&buf);
+                                 break :blk buf;
+                             } else null;
+ 
+                             return .{ .value = value, .format_tag = format_tag };
+@@ -3298,18 +3411,15 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+ 
+                             if (value_size > buffer.len) {
+                                 return error.StreamTooLong;
+                             }
+ 
+-                            const start_position = core_reader.pos;
+-
+                             try core_reader.interface.readSliceAll(buffer[0..value_size]);
+                             const value = buffer[0..value_size];
+ 
+                             const format_tag = if (slot_ptr.slot.full) blk: {
+-                                try core_reader.seekTo(start_position + value_size);
+-                                var buf: [2]u8 = @splat(0);
++                                var buf: [2]u8 = undefined;
+                                 try core_reader.interface.readSliceAll(&buf);
+                                 break :blk buf;
+                             } else null;
+ 
+                             return .{ .value = value, .format_tag = format_tag };
+@@ -3367,11 +3477,24 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+ 
+                     switch (slot_ptr.slot.tag) {
+                         .bytes => {
+                             try core_reader.seekTo(slot_ptr.slot.value);
+                             const size: u64 = @intCast(try takeInt(&core_reader.interface, u64, .big));
+-                            const start_position = core_reader.pos;
++                            const start_position = slot_ptr.slot.value + byteSizeOf(u64);
++                            if (comptime db_kind == .memory) {
++                                const mem_bytes = self.db.core.buffer.written();
++                                if (start_position + size <= mem_bytes.len) {
++                                    const slice = mem_bytes[@intCast(start_position)..][0..@intCast(size)];
++                                    return .{
++                                        .parent = self,
++                                        .interface = .fixed(slice),
++                                        .size = size,
++                                        .start_position = start_position,
++                                        .pos = size,
++                                    };
++                                }
++                            }
+                             return .{
+                                 .parent = self,
+                                 .interface = .{
+                                     .vtable = &.{ .stream = Reader.stream },
+                                     .buffer = buffer,
+@@ -3651,27 +3774,19 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                         while (true) {
+                             const node = try cursor.db.readSortedNode(node_ptr);
+                             const position = node_ptr + BTREE_NODE_HEADER_SIZE;
+                             switch (node.kind) {
+                                 .leaf => {
+-                                    var li: u8 = node.num;
+-                                    for (0..node.num) |j| {
+-                                        const kv = try cursor.db.readKvPair(node.entries[j]);
+-                                        if ((try cursor.db.compareKey(kv.key_slot, key)) != .lt) {
+-                                            li = @intCast(j);
+-                                            break;
+-                                        }
+-                                    }
++                                    const res = try cursor.db.sortedLeafSearch(&node, key);
++                                    const li: u8 = @intCast(res.index);
+                                     before += li;
+                                     try stack.append(.{ .position = position, .block = node.entries, .index = li });
+                                     return .{ .stack = stack, .before = before };
+                                 },
+                                 .branch => {
+-                                    var i: u8 = 0;
+-                                    while (i + 1 < node.num and (try cursor.db.compareKey(node.separators[i + 1], key)) != .gt) : (i += 1) {
+-                                        before += node.counts[i];
+-                                    }
++                                    const i = try cursor.db.sortedBranchSearch(&node, key);
++                                    for (0..i) |k| before += node.counts[k];
+                                     try stack.append(.{ .position = position, .block = node.children, .index = i });
+                                     node_ptr = node.children[i].value;
+                                 },
+                             }
+                         }
+@@ -3747,16 +3862,17 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                     // read a 16-slot index block (the iterable structures all use
+                     // 9-byte slots in their index/node blocks)
+                     fn readSlotBlock(cursor: Cursor(write_mode), position: u64) ![SLOT_COUNT]Slot {
+                         var core_reader = cursor.db.core.reader();
+                         try core_reader.seekTo(position);
+-                        var index_block_bytes: [INDEX_BLOCK_SIZE]u8 = @splat(0);
++                        var index_block_bytes: [INDEX_BLOCK_SIZE]u8 = undefined;
+                         try core_reader.interface.readSliceAll(&index_block_bytes);
+                         var index_block: [SLOT_COUNT]Slot = undefined;
+-                        var block_reader = std.Io.Reader.fixed(&index_block_bytes);
+-                        for (&index_block) |*block_slot| {
+-                            block_slot.* = @bitCast(try takeInt(&block_reader, SlotInt, .big));
++                        const slot_len = comptime byteSizeOf(Slot);
++                        for (&index_block, 0..) |*block_slot, i| {
++                            const off = i * slot_len;
++                            block_slot.* = @bitCast(std.mem.readInt(SlotInt, index_block_bytes[off..][0..slot_len], .big));
+                             try block_slot.tag.validate();
+                         }
+                         return index_block;
+                     }
+ 
+@@ -4596,27 +4712,25 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                     var reader = self.source_core.reader();
+                     var writer = self.target_core.writer();
+ 
+                     // read 144-byte block (16 slots)
+                     try reader.seekTo(source_offset);
+-                    var block_bytes: [INDEX_BLOCK_SIZE]u8 = @splat(0);
++                    var block_bytes: [INDEX_BLOCK_SIZE]u8 = undefined;
+                     try reader.interface.readSliceAll(&block_bytes);
+ 
+-                    // remap each slot
+-                    var block_reader = std.Io.Reader.fixed(&block_bytes);
+-                    var remapped_slots: [SLOT_COUNT]Slot = undefined;
+-                    for (&remapped_slots) |*s| {
+-                        const child_slot: Slot = @bitCast(try takeInt(&block_reader, SlotInt, .big));
++                    const slot_len = comptime byteSizeOf(Slot);
++                    for (0..SLOT_COUNT) |i| {
++                        const off = i * slot_len;
++                        const child_slot: Slot = @bitCast(std.mem.readInt(SlotInt, block_bytes[off..][0..slot_len], .big));
+                         try child_slot.tag.validate();
+-                        s.* = try self.remapSlot(child_slot);
++                        const remapped = try self.remapSlot(child_slot);
++                        std.mem.writeInt(SlotInt, block_bytes[off..][0..slot_len], @bitCast(remapped), .big);
+                     }
+ 
+-                    // write remapped block to target
++                    // write remapped block to target in one batch
+                     try writer.seekTo(target_offset);
+-                    for (remapped_slots) |s| {
+-                        try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
+-                    }
++                    try writer.interface.writeAll(&block_bytes);
+                 }
+ 
+                 fn remapArrayListIndex(self: *Self, source_offset: u64, size: u64, shift: u6) anyerror!u64 {
+                     const child_size = @as(u64, 1) << (shift * BIT_COUNT);
+ 
+@@ -4628,32 +4742,34 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                     }
+ 
+                     const target_offset = try self.reserveBlock(INDEX_BLOCK_SIZE);
+                     var reader = self.source_core.reader();
+                     try reader.seekTo(source_offset);
+-                    var slots: [SLOT_COUNT]Slot = @splat(.{});
++                    var out_bytes: [INDEX_BLOCK_SIZE]u8 = @splat(0);
++                    const slot_len = comptime byteSizeOf(Slot);
+                     var remaining = size;
+-                    for (&slots) |*slot| {
++                    for (0..SLOT_COUNT) |i| {
+                         if (remaining == 0) break;
+                         const child_slot: Slot = @bitCast(try takeInt(&reader.interface, SlotInt, .big));
+                         try child_slot.tag.validate();
+                         const count = @min(remaining, child_size);
+-                        if (shift == 0) {
+-                            slot.* = try self.remapSlot(child_slot);
+-                        } else {
++                        const remapped: Slot = if (shift == 0)
++                            try self.remapSlot(child_slot)
++                        else blk: {
+                             if (child_slot.tag != .index) return error.UnexpectedTag;
+-                            slot.* = child_slot;
+-                            slot.value = try self.remapArrayListIndex(child_slot.value, count, shift - 1);
+-                        }
++                            var s = child_slot;
++                            s.value = try self.remapArrayListIndex(child_slot.value, count, shift - 1);
++                            break :blk s;
++                        };
++                        const off = i * slot_len;
++                        std.mem.writeInt(SlotInt, out_bytes[off..][0..slot_len], @bitCast(remapped), .big);
+                         remaining -= count;
+                     }
+ 
+                     var writer = self.target_core.writer();
+                     try writer.seekTo(target_offset);
+-                    for (slots) |slot| {
+-                        try writer.interface.writeInt(SlotInt, @bitCast(slot), .big);
+-                    }
++                    try writer.interface.writeAll(&out_bytes);
+                     return target_offset;
+                 }
+ 
+                 fn populateArrayList(self: *Self, source_offset: u64, target_offset: u64, _: void) anyerror!void {
+                     var reader = self.source_core.reader();
+@@ -4714,55 +4830,60 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                 fn populateBTreeLeaf(self: *Self, source_offset: u64, target_offset: u64, header: NodeHeader) anyerror!void {
+                     var reader = self.source_core.reader();
+                     var writer = self.target_core.writer();
+                     try reader.seekTo(source_offset + BTREE_NODE_HEADER_SIZE);
+ 
+-                    var body: [BTREE_LEAF_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = @splat(0);
++                    var body: [BTREE_LEAF_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = undefined;
+                     try reader.interface.readSliceAll(&body);
+-                    var body_reader = std.Io.Reader.fixed(&body);
+ 
+-                    var slots: [BTREE_SLOT_COUNT]Slot = undefined;
+-                    for (&slots) |*s| {
+-                        const value_slot: Slot = @bitCast(try takeInt(&body_reader, SlotInt, .big));
++                    var out: [BTREE_LEAF_BLOCK_SIZE]u8 = @splat(0);
++                    out[0] = header.kind_int;
++                    out[1] = header.num;
++                    const slot_len = comptime byteSizeOf(Slot);
++                    for (0..BTREE_SLOT_COUNT) |i| {
++                        const off = i * slot_len;
++                        const value_slot: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
+                         try value_slot.tag.validate();
+-                        s.* = try self.remapSlot(value_slot);
++                        if (i < header.num) {
++                            const remapped = try self.remapSlot(value_slot);
++                            std.mem.writeInt(SlotInt, out[BTREE_NODE_HEADER_SIZE + off ..][0..slot_len], @bitCast(remapped), .big);
++                        }
+                     }
+ 
+                     try writer.seekTo(target_offset);
+-                    try writer.interface.writeInt(u8, header.kind_int, .big);
+-                    try writer.interface.writeInt(u8, header.num, .big);
+-                    for (slots) |s| try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
++                    try writer.interface.writeAll(&out);
+                 }
+ 
+                 fn populateBTreeBranch(self: *Self, source_offset: u64, target_offset: u64, header: NodeHeader) anyerror!void {
+                     var reader = self.source_core.reader();
+                     var writer = self.target_core.writer();
+                     try reader.seekTo(source_offset + BTREE_NODE_HEADER_SIZE);
+ 
+-                    var body: [BTREE_BRANCH_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = @splat(0);
++                    var body: [BTREE_BRANCH_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = undefined;
+                     try reader.interface.readSliceAll(&body);
+-                    var body_reader = std.Io.Reader.fixed(&body);
+ 
+-                    var children: [BTREE_SLOT_COUNT]Slot = undefined;
+-                    for (&children) |*s| {
+-                        const child: Slot = @bitCast(try takeInt(&body_reader, SlotInt, .big));
++                    var out: [BTREE_BRANCH_BLOCK_SIZE]u8 = @splat(0);
++                    out[0] = header.kind_int;
++                    out[1] = header.num;
++                    const slot_len = comptime byteSizeOf(Slot);
++                    const children_bytes = BTREE_SLOT_COUNT * slot_len;
++                    for (0..BTREE_SLOT_COUNT) |i| {
++                        const off = i * slot_len;
++                        const child: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
+                         try child.tag.validate();
+-                        if (child.tag == .index) {
+-                            const remapped_ptr = try self.remapBTreeNode(child.value);
+-                            s.* = .{ .value = remapped_ptr, .tag = .index, .full = child.full };
+-                        } else {
+-                            s.* = child;
++                        if (i < header.num) {
++                            const remapped: Slot = if (child.tag == .index)
++                                .{ .value = try self.remapBTreeNode(child.value), .tag = .index, .full = child.full }
++                            else
++                                child;
++                            std.mem.writeInt(SlotInt, out[BTREE_NODE_HEADER_SIZE + off ..][0..slot_len], @bitCast(remapped), .big);
+                         }
+                     }
+-                    var counts: [BTREE_SLOT_COUNT]u64 = undefined;
+-                    for (&counts) |*c| c.* = try takeInt(&body_reader, u64, .big);
++                    @memcpy(out[BTREE_NODE_HEADER_SIZE + children_bytes ..], body[children_bytes..]);
+ 
+                     try writer.seekTo(target_offset);
+-                    try writer.interface.writeInt(u8, header.kind_int, .big);
+-                    try writer.interface.writeInt(u8, header.num, .big);
+-                    for (children) |s| try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
+-                    for (counts) |c| try writer.interface.writeInt(u64, c, .big);
++                    try writer.interface.writeAll(&out);
+                 }
+ 
+                 fn populateHashMapOrSet(self: *Self, source_offset: u64, target_offset: u64, _: void) anyerror!void {
+                     return self.populateHashMapOrSetCounted(source_offset, target_offset, false);
+                 }
+@@ -4778,30 +4899,28 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                     try reader.seekTo(source_offset);
+ 
+                     const count_value: ?u64 = if (counted) try takeInt(&reader.interface, u64, .big) else null;
+ 
+                     // read 144-byte root index block
+-                    var block_bytes: [INDEX_BLOCK_SIZE]u8 = @splat(0);
++                    var block_bytes: [INDEX_BLOCK_SIZE]u8 = undefined;
+                     try reader.interface.readSliceAll(&block_bytes);
+ 
+-                    // remap each child slot in the block
+-                    var block_reader = std.Io.Reader.fixed(&block_bytes);
+-                    var remapped_slots: [SLOT_COUNT]Slot = undefined;
+-                    for (&remapped_slots) |*s| {
+-                        const child_slot: Slot = @bitCast(try takeInt(&block_reader, SlotInt, .big));
++                    const slot_len = comptime byteSizeOf(Slot);
++                    for (0..SLOT_COUNT) |i| {
++                        const off = i * slot_len;
++                        const child_slot: Slot = @bitCast(std.mem.readInt(SlotInt, block_bytes[off..][0..slot_len], .big));
+                         try child_slot.tag.validate();
+-                        s.* = try self.remapSlot(child_slot);
++                        const remapped = try self.remapSlot(child_slot);
++                        std.mem.writeInt(SlotInt, block_bytes[off..][0..slot_len], @bitCast(remapped), .big);
+                     }
+ 
+                     // write [optional count][remapped block] contiguously to target
+                     try writer.seekTo(target_offset);
+                     if (count_value) |c| {
+                         try writer.interface.writeInt(u64, c, .big);
+                     }
+-                    for (remapped_slots) |s| {
+-                        try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
+-                    }
++                    try writer.interface.writeAll(&block_bytes);
+                 }
+ 
+                 fn populateKvPair(self: *Self, source_offset: u64, target_offset: u64, tag: Tag) anyerror!void {
+                     var reader = self.source_core.reader();
+                     try reader.seekTo(source_offset);
+@@ -4854,62 +4973,70 @@ pub fn Database(comptime db_kind: DatabaseKind, comptime HashInt: type) type {
+                 fn populateSortedMapLeaf(self: *Self, source_offset: u64, target_offset: u64, header: NodeHeader) anyerror!void {
+                     var reader = self.source_core.reader();
+                     var writer = self.target_core.writer();
+                     try reader.seekTo(source_offset + BTREE_NODE_HEADER_SIZE);
+ 
+-                    var body: [SORTED_LEAF_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = @splat(0);
++                    var body: [SORTED_LEAF_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = undefined;
+                     try reader.interface.readSliceAll(&body);
+-                    var body_reader = std.Io.Reader.fixed(&body);
+ 
+-                    var entries: [BTREE_SLOT_COUNT]Slot = undefined;
+-                    for (&entries) |*s| {
+-                        const entry: Slot = @bitCast(try takeInt(&body_reader, SlotInt, .big));
++                    var out: [SORTED_LEAF_BLOCK_SIZE]u8 = @splat(0);
++                    out[0] = header.kind_int;
++                    out[1] = header.num;
++                    const slot_len = comptime byteSizeOf(Slot);
++                    for (0..BTREE_SLOT_COUNT) |i| {
++                        const off = i * slot_len;
++                        const entry: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
+                         try entry.tag.validate();
+-                        s.* = try self.remapSlot(entry);
++                        if (i < header.num) {
++                            const remapped = try self.remapSlot(entry);
++                            std.mem.writeInt(SlotInt, out[BTREE_NODE_HEADER_SIZE + off ..][0..slot_len], @bitCast(remapped), .big);
++                        }
+                     }
+ 
+                     try writer.seekTo(target_offset);
+-                    try writer.interface.writeInt(u8, header.kind_int, .big);
+-                    try writer.interface.writeInt(u8, header.num, .big);
+-                    for (entries) |s| try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
++                    try writer.interface.writeAll(&out);
+                 }
+ 
+                 fn populateSortedMapBranch(self: *Self, source_offset: u64, target_offset: u64, header: NodeHeader) anyerror!void {
+                     var reader = self.source_core.reader();
+                     var writer = self.target_core.writer();
+                     try reader.seekTo(source_offset + BTREE_NODE_HEADER_SIZE);
+ 
+-                    var body: [SORTED_BRANCH_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = @splat(0);
++                    var body: [SORTED_BRANCH_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = undefined;
+                     try reader.interface.readSliceAll(&body);
+-                    var body_reader = std.Io.Reader.fixed(&body);
+ 
+-                    var children: [BTREE_SLOT_COUNT]Slot = undefined;
+-                    for (&children) |*s| {
+-                        const child: Slot = @bitCast(try takeInt(&body_reader, SlotInt, .big));
++                    var out: [SORTED_BRANCH_BLOCK_SIZE]u8 = @splat(0);
++                    out[0] = header.kind_int;
++                    out[1] = header.num;
++                    const slot_len = comptime byteSizeOf(Slot);
++                    const children_bytes = BTREE_SLOT_COUNT * slot_len;
++                    const seps_bytes = BTREE_SLOT_COUNT * slot_len;
++                    for (0..BTREE_SLOT_COUNT) |i| {
++                        const off = i * slot_len;
++                        const child: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
+                         try child.tag.validate();
+-                        if (child.tag == .index) {
+-                            const remapped_ptr = try self.remapSortedMapNode(child.value);
+-                            s.* = .{ .value = remapped_ptr, .tag = .index, .full = child.full };
+-                        } else {
+-                            s.* = child;
++                        if (i < header.num) {
++                            const remapped: Slot = if (child.tag == .index)
++                                .{ .value = try self.remapSortedMapNode(child.value), .tag = .index, .full = child.full }
++                            else
++                                child;
++                            std.mem.writeInt(SlotInt, out[BTREE_NODE_HEADER_SIZE + off ..][0..slot_len], @bitCast(remapped), .big);
+                         }
+                     }
+-                    var separators: [BTREE_SLOT_COUNT]Slot = undefined;
+-                    for (&separators) |*s| {
+-                        const sep: Slot = @bitCast(try takeInt(&body_reader, SlotInt, .big));
++                    for (0..BTREE_SLOT_COUNT) |i| {
++                        const off = children_bytes + i * slot_len;
++                        const sep: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
+                         try sep.tag.validate();
+-                        s.* = try self.remapSlot(sep);
++                        if (i < header.num) {
++                            const remapped = try self.remapSlot(sep);
++                            std.mem.writeInt(SlotInt, out[BTREE_NODE_HEADER_SIZE + off ..][0..slot_len], @bitCast(remapped), .big);
++                        }
+                     }
+-                    var counts: [BTREE_SLOT_COUNT]u64 = undefined;
+-                    for (&counts) |*c| c.* = try takeInt(&body_reader, u64, .big);
++                    @memcpy(out[BTREE_NODE_HEADER_SIZE + children_bytes + seps_bytes ..], body[children_bytes + seps_bytes ..]);
+ 
+                     try writer.seekTo(target_offset);
+-                    try writer.interface.writeInt(u8, header.kind_int, .big);
+-                    try writer.interface.writeInt(u8, header.num, .big);
+-                    for (children) |s| try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
+-                    for (separators) |s| try writer.interface.writeInt(SlotInt, @bitCast(s), .big);
+-                    for (counts) |c| try writer.interface.writeInt(u64, c, .big);
++                    try writer.interface.writeAll(&out);
+                 }
+             };
+         }
+     };
+ }
+@@ -4923,23 +5050,14 @@ const CoreMemory = struct {
+         interface: std.Io.Reader,
+         pos: u64 = 0,
+ 
+         pub fn seekTo(self: *Reader, offset: u64) !void {
+             self.pos = offset;
+-        }
+-
+-        fn stream(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+-            const r: *Reader = @alignCast(@fieldParentPtr("interface", io_r));
+-
+-            if (r.pos >= r.parent.buffer.written().len) return error.EndOfStream;
+-
+-            const max_size = @min(@backingInt(limit), r.parent.buffer.written().len - r.pos);
+-            if (max_size == 0) return 0;
+-
+-            const size = try io_w.write(r.parent.buffer.written()[r.pos..(r.pos + max_size)]);
+-            r.pos += size;
+-            return size;
++            const bytes = self.parent.buffer.written();
++            self.interface.buffer = @constCast(bytes);
++            self.interface.end = bytes.len;
++            self.interface.seek = @intCast(@min(offset, bytes.len));
+         }
+     };
+ 
+     const Writer = struct {
+         parent: *CoreMemory,
+@@ -4991,16 +5109,11 @@ const CoreMemory = struct {
+     };
+ 
+     pub fn reader(self: *CoreMemory) Reader {
+         return .{
+             .parent = self,
+-            .interface = .{
+-                .vtable = &.{ .stream = Reader.stream },
+-                .buffer = &.{},
+-                .seek = 0,
+-                .end = 0,
+-            },
++            .interface = .fixed(self.buffer.written()),
+         };
+     }
+ 
+     pub fn writer(self: *CoreMemory) Writer {
+         return .{
+@@ -5066,10 +5179,11 @@ const CoreFile = struct {
+ 
+ const CoreBufferedFile = struct {
+     memory: CoreMemory,
+     memory_max_size: u64,
+     memory_pos: u64 = 0,
++    flushed_len: usize = 0,
+     file: CoreFile,
+     // the file's length, cached so that `length` doesn't need to ask the OS
+     // every time data is allocated. another process may write to the file
+     // whenever this one isn't, so it is only set once we begin writing, and
+     // it is cleared when the writes are flushed.
+@@ -5130,39 +5244,52 @@ const CoreBufferedFile = struct {
+ 
+             for (data) |buf| {
+                 const n = buf.len;
+                 if (n == 0) continue;
+ 
+-                // the in-memory buffer is a single contiguous window of the file
+-                // starting at memory_pos. start a new window at this position if
+-                // the buffer is empty, the write is past the end of the window,
+-                // or the write would grow the window beyond the max size.
+                 const buffer_size = parent.memory.buffer.written().len;
++                if (parent.file_len == null) {
++                    parent.file_len = parent.file.length() catch return error.WriteFailed;
++                }
++
++                // Write strictly before the active tail window (e.g. RootHeader at offset 20):
++                // write directly to disk without evicting the hot tail read window!
++                if (buffer_size > 0 and w.pos + n <= parent.memory_pos) {
++                    parent.writeToFile(w.pos, buf) catch return error.WriteFailed;
++                    w.pos += n;
++                    return io_w.consume(n);
++                }
++
+                 if (buffer_size == 0 or
+                     w.pos > parent.memory_pos + buffer_size or
+                     (w.pos >= parent.memory_pos and w.pos - parent.memory_pos + n > parent.memory_max_size))
+                 {
+                     parent.flush() catch return error.WriteFailed;
++                    parent.memory.buffer.clearRetainingCapacity();
++                    parent.flushed_len = 0;
+                     parent.memory_pos = w.pos;
+-                }
+-
+-                if (parent.file_len == null) {
+-                    parent.file_len = parent.file.length() catch return error.WriteFailed;
++                    if (parent.file_len == null) {
++                        parent.file_len = parent.file.length() catch return error.WriteFailed;
++                    }
+                 }
+ 
+                 // write to the in-memory buffer
+                 if (w.pos >= parent.memory_pos and w.pos - parent.memory_pos + n <= parent.memory_max_size) {
++                    const rel_pos: usize = @intCast(w.pos - parent.memory_pos);
++                    if (rel_pos < parent.flushed_len) {
++                        parent.flushed_len = rel_pos;
++                    }
+                     var memory_writer = parent.memory.writer();
+-                    memory_writer.seekTo(w.pos - parent.memory_pos) catch return error.WriteFailed;
++                    memory_writer.seekTo(rel_pos) catch return error.WriteFailed;
+                     memory_writer.interface.writeAll(buf) catch return error.WriteFailed;
+                 }
+                 // write to the disk
+                 else {
+-                    // a direct disk write that overlaps the buffered region would be
+-                    // clobbered by a later flush of stale buffer bytes, so flush first
+                     if (w.pos < parent.memory_pos + parent.memory.buffer.written().len and w.pos + n > parent.memory_pos) {
+                         parent.flush() catch return error.WriteFailed;
++                        parent.memory.buffer.clearRetainingCapacity();
++                        parent.flushed_len = 0;
+                     }
+                     parent.writeToFile(w.pos, buf) catch return error.WriteFailed;
+                 }
+ 
+                 w.pos += n;
+@@ -5209,12 +5336,14 @@ const CoreBufferedFile = struct {
+         // a rollback must not depend on writing the data it is throwing away,
+         // because that write may be what failed (e.g. the disk is full).
+         const buffer_size = self.memory.buffer.written().len;
+         if (len <= self.memory_pos) {
+             self.memory.buffer.clearRetainingCapacity();
++            self.flushed_len = 0;
+         } else if (len < self.memory_pos + buffer_size) {
+             self.memory.buffer.shrinkRetainingCapacity(@intCast(len - self.memory_pos));
++            self.flushed_len = @min(self.flushed_len, self.memory.buffer.written().len);
+         }
+         self.file_len = null;
+         try self.file.setLength(len);
+     }
+ 
+@@ -5222,14 +5351,14 @@ const CoreBufferedFile = struct {
+         try self.flush();
+         try self.file.sync();
+     }
+ 
+     pub fn flush(self: *CoreBufferedFile) !void {
+-        self.file_len = null;
+-        if (self.memory.buffer.written().len > 0) {
+-            try self.writeToFile(self.memory_pos, self.memory.buffer.written());
+-            self.memory.buffer.clearRetainingCapacity();
++        const written = self.memory.buffer.written();
++        if (written.len > self.flushed_len) {
++            try self.writeToFile(self.memory_pos + self.flushed_len, written[self.flushed_len..]);
++            self.flushed_len = written.len;
+         }
+     }
+ 
+     fn writeToFile(self: *CoreBufferedFile, pos: u64, bytes: []const u8) !void {
+         // if the write fails partway, the file's length is unknown

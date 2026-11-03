@@ -6,14 +6,15 @@
 
 `LinkedArrayList` (`#20–#27`) shows some of the largest speedups in the suite (**4.6x to 44.9x**), with identical `45.3 KB` database footprints:
 
-| # | Benchmark | Odin (`-o:speed`) | Zig (`ReleaseFast`) | Speedup | Slice |
-| ---: | :--- | ---: | ---: | :--- | :--- |
-| 20 | `Linked_Array_List (B-Tree) append` | **231 ns** | 3,007 ns | **13.02x Odin** | [Slice #20](../slices/20_linked_array_list_b_tree_append.md) |
-| 21 | `Linked_Array_List (B-Tree) random get` | **53 ns** | 2,335 ns | **44.06x Odin** | [Slice #21](../slices/21_linked_array_list_b_tree_random_get.md) |
-| 23 | `Linked_Array_List (B-Tree) middle insert` | **258 ns** | 3,562 ns | **13.81x Odin** | [Slice #23](../slices/23_linked_array_list_b_tree_middle_insert.md) |
-| 24 | `Linked_Array_List (B-Tree) middle remove` | **349 ns** | 3,584 ns | **10.27x Odin** | [Slice #24](../slices/24_linked_array_list_b_tree_middle_remove.md) |
-| 25 | `Linked_Array_List (B-Tree) concat + slice` | **807 ns** | 36,262 ns | **44.93x Odin** | [Slice #25](../slices/25_linked_array_list_b_tree_concat_slice.md) |
-| 26 | `Linked_Array_List (B-Tree) in-place put` | **161 ns** | 2,481 ns | **15.41x Odin** | [Slice #26](../slices/26_linked_array_list_b_tree_in_place_put.md) |
+| # | Benchmark | Odin (`-o:speed`) | Upstream Zig | Patched Zig | Zig Speedup | Slice |
+| ---: | :--- | ---: | ---: | ---: | :--- | :--- |
+| 20 | `Linked_Array_List (B-Tree) append` | **231 ns** | 3,007 ns | **616 ns** | **4.88x faster** | [Slice #20](../slices/20_linked_array_list_b_tree_append.md) |
+| 21 | `Linked_Array_List (B-Tree) random get` | **53 ns** | 2,335 ns | **130 ns** | **17.96x faster** | [Slice #21](../slices/21_linked_array_list_b_tree_random_get.md) |
+| 23 | `Linked_Array_List (B-Tree) middle insert` | **258 ns** | 3,562 ns | **695 ns** | **5.13x faster** | [Slice #23](../slices/23_linked_array_list_b_tree_middle_insert.md) |
+| 24 | `Linked_Array_List (B-Tree) middle remove` | **349 ns** | 3,584 ns | **694 ns** | **5.16x faster** | [Slice #24](../slices/24_linked_array_list_b_tree_middle_remove.md) |
+| 25 | `Linked_Array_List (B-Tree) concat + slice` | **807 ns** | 36,262 ns | **5,978 ns** | **6.07x faster** | [Slice #25](../slices/25_linked_array_list_b_tree_concat_slice.md) |
+| 26 | `Linked_Array_List (B-Tree) in-place put` | **161 ns** | 2,481 ns | **297 ns** | **8.35x faster** | [Slice #26](../slices/26_linked_array_list_b_tree_in_place_put.md) |
+| 27 | `Linked_Array_List (B-Tree) index-seek page(10)` | **394 ns** | 3,525 ns | **1,129 ns** | **3.12x faster** | [Slice #27](../slices/27_linked_array_list_b_tree_index_seek_page_10.md) |
 
 ---
 
@@ -97,31 +98,32 @@ fn readBTreeNode(self: *Database(db_kind, HashInt), ptr: u64) !BTreeNode {
     if (num > BTREE_SLOT_COUNT) return error.InvalidBTreeNode;
 
     var node = BTreeNode{ .kind = kind, .num = num };
+    const slot_len = comptime byteSizeOf(Slot);
+    const u64_len = comptime byteSizeOf(u64);
     switch (kind) {
         .leaf => {
-            var body: [BTREE_SLOT_COUNT * byteSizeOf(Slot)]u8 = undefined;
-            const active_bytes = @as(usize, num) * byteSizeOf(Slot);
-            try reader.interface.readSliceAll(body[0..active_bytes]);
+            var body: [BTREE_LEAF_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = undefined;
+            try reader.interface.readSliceAll(&body);
             for (0..num) |i| {
-                const off = i * byteSizeOf(Slot);
-                const s: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..byteSizeOf(Slot)], .big));
+                const off = i * slot_len;
+                const s: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
                 try s.tag.validate();
                 node.values[i] = s;
             }
         },
         .branch => {
-            const slots_len = BTREE_SLOT_COUNT * byteSizeOf(Slot);
-            var body: [slots_len + BTREE_SLOT_COUNT * byteSizeOf(u64)]u8 = undefined;
-            try reader.interface.readSliceAll(body[0 .. slots_len + @as(usize, num) * byteSizeOf(u64)]);
+            const slots_len = BTREE_SLOT_COUNT * slot_len;
+            var body: [BTREE_BRANCH_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE]u8 = undefined;
+            try reader.interface.readSliceAll(&body);
             for (0..num) |i| {
-                const off = i * byteSizeOf(Slot);
-                const s: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..byteSizeOf(Slot)], .big));
+                const off = i * slot_len;
+                const s: Slot = @bitCast(std.mem.readInt(SlotInt, body[off..][0..slot_len], .big));
                 try s.tag.validate();
                 node.children[i] = s;
             }
             for (0..num) |i| {
-                const off = slots_len + i * byteSizeOf(u64);
-                node.counts[i] = std.mem.readInt(u64, body[off..][0..byteSizeOf(u64)], .big);
+                const off = slots_len + i * u64_len;
+                node.counts[i] = std.mem.readInt(u64, body[off..][0..u64_len], .big);
             }
         },
     }
@@ -131,14 +133,16 @@ fn readBTreeNode(self: *Database(db_kind, HashInt), ptr: u64) !BTreeNode {
 fn writeBTreeNodeAt(self: *Database(db_kind, HashInt), node: BTreeNode, ptr: u64) !void {
     var writer = self.core.writer();
     try writer.seekTo(ptr);
+    const slot_len = comptime byteSizeOf(Slot);
+    const u64_len = comptime byteSizeOf(u64);
     switch (node.kind) {
         .leaf => {
             var buf: [BTREE_LEAF_BLOCK_SIZE]u8 = @splat(0);
             buf[0] = @intFromEnum(node.kind);
             buf[1] = node.num;
             for (0..node.num) |i| {
-                const off = BTREE_NODE_HEADER_SIZE + i * byteSizeOf(Slot);
-                std.mem.writeInt(SlotInt, buf[off..][0..byteSizeOf(Slot)], @bitCast(node.values[i]), .big);
+                const off = BTREE_NODE_HEADER_SIZE + i * slot_len;
+                std.mem.writeInt(SlotInt, buf[off..][0..slot_len], @bitCast(node.values[i]), .big);
             }
             try writer.interface.writeAll(&buf);
         },
@@ -147,13 +151,13 @@ fn writeBTreeNodeAt(self: *Database(db_kind, HashInt), node: BTreeNode, ptr: u64
             buf[0] = @intFromEnum(node.kind);
             buf[1] = node.num;
             for (0..node.num) |i| {
-                const off = BTREE_NODE_HEADER_SIZE + i * byteSizeOf(Slot);
-                std.mem.writeInt(SlotInt, buf[off..][0..byteSizeOf(Slot)], @bitCast(node.children[i]), .big);
+                const off = BTREE_NODE_HEADER_SIZE + i * slot_len;
+                std.mem.writeInt(SlotInt, buf[off..][0..slot_len], @bitCast(node.children[i]), .big);
             }
-            const counts_base = BTREE_NODE_HEADER_SIZE + BTREE_SLOT_COUNT * byteSizeOf(Slot);
+            const counts_base = BTREE_NODE_HEADER_SIZE + BTREE_SLOT_COUNT * slot_len;
             for (0..node.num) |i| {
-                const off = counts_base + i * byteSizeOf(u64);
-                std.mem.writeInt(u64, buf[off..][0..byteSizeOf(u64)], node.counts[i], .big);
+                const off = counts_base + i * u64_len;
+                std.mem.writeInt(u64, buf[off..][0..u64_len], node.counts[i], .big);
             }
             try writer.interface.writeAll(&buf);
         },

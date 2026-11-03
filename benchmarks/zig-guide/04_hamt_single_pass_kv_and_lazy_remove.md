@@ -6,14 +6,14 @@
 
 Across all 15 HAMT benchmarks (`#1–#13`, `#45–#46`), Odin is **2.4x to 13.4x faster**, producing identical `214.5 KB` (`SHA-1`) and `248.7 KB` (`SHA-256`) database files:
 
-| # | Benchmark | Odin (`-o:speed`) | Zig (`ReleaseFast`) | Speedup | Slice |
-| ---: | :--- | ---: | ---: | :--- | :--- |
-| 1 | `HAMT Hash_Map bulk put (1 tx)` | **202 ns** | 798 ns | **3.95x Odin** | [Slice #1](../slices/01_hamt_hash_map_bulk_put_1_tx.md) |
-| 5 | `HAMT Hash_Map remove & branch shortening` | **167 ns** | 973 ns | **5.83x Odin** | [Slice #5](../slices/05_hamt_hash_map_remove_branch_shortening.md) |
-| 9 | `HAMT Counted_Hash_Map remove` | **165 ns** | 1,019 ns | **6.18x Odin** | [Slice #9](../slices/09_hamt_counted_hash_map_remove.md) |
-| 10 | `HAMT deep suffix-collision put (depth 10+)` | **193 ns** | 1,269 ns | **6.58x Odin** | [Slice #10](../slices/10_hamt_deep_suffix_collision_put_depth_10.md) |
-| 11 | `HAMT deep suffix-collision branch collapse` | **211 ns** | 2,816 ns | **13.35x Odin** | [Slice #11](../slices/11_hamt_deep_suffix_collision_branch_collapse.md) |
-| 12 | `HAMT Counted_Hash_Set key-only put (1 tx)` | **222 ns** | 538 ns | **2.42x Odin** | [Slice #12](../slices/12_hamt_counted_hash_set_key_only_put_1_tx.md) |
+| # | Benchmark | Odin (`-o:speed`) | Upstream Zig | Patched Zig | Zig Speedup | Slice |
+| ---: | :--- | ---: | ---: | ---: | :--- | :--- |
+| 1 | `HAMT Hash_Map bulk put (1 tx)` | **202 ns** | 798 ns | **670 ns** | **1.19x faster** | [Slice #1](../slices/01_hamt_hash_map_bulk_put_1_tx.md) |
+| 5 | `HAMT Hash_Map remove & branch shortening` | **167 ns** | 973 ns | **361 ns** | **2.70x faster** | [Slice #5](../slices/05_hamt_hash_map_remove_branch_shortening.md) |
+| 9 | `HAMT Counted_Hash_Map remove` | **165 ns** | 1,019 ns | **379 ns** | **2.69x faster** | [Slice #9](../slices/09_hamt_counted_hash_map_remove.md) |
+| 10 | `HAMT deep suffix-collision put (depth 10+)` | **193 ns** | 1,269 ns | **933 ns** | **1.36x faster** | [Slice #10](../slices/10_hamt_deep_suffix_collision_put_depth_10.md) |
+| 11 | `HAMT deep suffix-collision branch collapse` | **211 ns** | 2,816 ns | **485 ns** | **5.81x faster** | [Slice #11](../slices/11_hamt_deep_suffix_collision_branch_collapse.md) |
+| 12 | `HAMT Counted_Hash_Set key-only put (1 tx)` | **222 ns** | 538 ns | **456 ns** | **1.18x faster** | [Slice #12](../slices/12_hamt_counted_hash_set_key_only_put_1_tx.md) |
 
 Notice the telling contrast between `#1` (`Hash_Map bulk put`: **3.95x**) and `#12` (`Counted_Hash_Set key-only put`: **2.42x**)! `HashSet.put` traverses the HAMT **once**, whereas inserting a key + value into `HashMap` in Zig currently traverses the HAMT **twice**.
 
@@ -115,12 +115,13 @@ fn removeMapSlot(self: *Database(db_kind, HashInt), index_pos: u64, key_hash: Ha
     try reader.interface.readSliceAll(&raw_block);
 
     var slot_to_return: ?Slot = Slot{};
+    const slot_len = comptime byteSizeOf(Slot);
     for (0..SLOT_COUNT) |j| {
         const used_slot: Slot = if (j == i)
             next_slot
         else blk: {
-            const off = j * byteSizeOf(Slot);
-            const s: Slot = @bitCast(std.mem.readInt(SlotInt, raw_block[off..][0..byteSizeOf(Slot)], .big));
+            const off = j * slot_len;
+            const s: Slot = @bitCast(std.mem.readInt(SlotInt, raw_block[off..][0..slot_len], .big));
             try s.tag.validate();
             break :blk s;
         };

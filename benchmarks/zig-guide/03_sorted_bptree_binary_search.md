@@ -6,14 +6,18 @@
 
 Across all 11 `SortedMap` and `SortedSet` benchmarks (`#28–#38`), Odin is **4.1x to 51.3x faster** while producing byte-identical `115.4 KB` (`SortedMap`) and `80.0 KB` (`SortedSet`) B+Trees:
 
-| # | Benchmark | Odin (`-o:speed`) | Zig (`ReleaseFast`) | Speedup | Slice |
-| ---: | :--- | ---: | ---: | :--- | :--- |
-| 28 | `Sorted_Map (B+Tree) out-of-order put` | **388 ns** | 4,511 ns | **11.63x Odin** | [Slice #28](../slices/28_sorted_map_b_tree_out_of_order_put.md) |
-| 29 | `Sorted_Map (B+Tree) key lookup` | **163 ns** | 4,242 ns | **26.02x Odin** | [Slice #29](../slices/29_sorted_map_b_tree_key_lookup.md) |
-| 30 | `Sorted_Map (B+Tree) rank query` | **131 ns** | 4,205 ns | **32.10x Odin** | [Slice #30](../slices/30_sorted_map_b_tree_rank_query.md) |
-| 33 | `Sorted_Map (B+Tree) remove & rebalance` | **230 ns** | 5,966 ns | **25.94x Odin** | [Slice #33](../slices/33_sorted_map_b_tree_remove_rebalance.md) |
-| 34 | `Sorted_Map (B+Tree) get_index select` | **64 ns** | 3,280 ns | **51.25x Odin** | [Slice #34](../slices/34_sorted_map_b_tree_get_index_select.md) |
-| 38 | `Sorted_Set (B+Tree) contains lookup` | **144 ns** | 3,953 ns | **27.45x Odin** | [Slice #38](../slices/38_sorted_set_b_tree_contains_lookup.md) |
+| # | Benchmark | Odin (`-o:speed`) | Upstream Zig | Patched Zig | Zig Speedup | Slice |
+| ---: | :--- | ---: | ---: | ---: | :--- | :--- |
+| 28 | `Sorted_Map (B+Tree) out-of-order put` | **388 ns** | 4,511 ns | **1,349 ns** | **3.34x faster** | [Slice #28](../slices/28_sorted_map_b_tree_out_of_order_put.md) |
+| 29 | `Sorted_Map (B+Tree) key lookup` | **163 ns** | 4,242 ns | **661 ns** | **6.42x faster** | [Slice #29](../slices/29_sorted_map_b_tree_key_lookup.md) |
+| 30 | `Sorted_Map (B+Tree) rank query` | **131 ns** | 4,205 ns | **605 ns** | **6.95x faster** | [Slice #30](../slices/30_sorted_map_b_tree_rank_query.md) |
+| 32 | `Sorted_Map (B+Tree) lower-bound page(10)` | **466 ns** | 5,407 ns | **1,532 ns** | **3.53x faster** | [Slice #32](../slices/32_sorted_map_b_tree_lower_bound_page_10.md) |
+| 33 | `Sorted_Map (B+Tree) remove & rebalance` | **230 ns** | 5,966 ns | **1,021 ns** | **5.84x faster** | [Slice #33](../slices/33_sorted_map_b_tree_remove_rebalance.md) |
+| 34 | `Sorted_Map (B+Tree) get_index select` | **64 ns** | 3,280 ns | **169 ns** | **19.41x faster** | [Slice #34](../slices/34_sorted_map_b_tree_get_index_select.md) |
+| 35 | `Sorted_Map (B+Tree) index-seek page(10)` | **401 ns** | 4,388 ns | **1,197 ns** | **3.67x faster** | [Slice #35](../slices/35_sorted_map_b_tree_index_seek_page_10.md) |
+| 36 | `Sorted_Map (B+Tree) in-place overwrite` | **362 ns** | 4,757 ns | **953 ns** | **4.99x faster** | [Slice #36](../slices/36_sorted_map_b_tree_in_place_overwrite.md) |
+| 37 | `Sorted_Set (B+Tree) key-only put (1 tx)` | **343 ns** | 4,265 ns | **1,109 ns** | **3.85x faster** | [Slice #37](../slices/37_sorted_set_b_tree_key_only_put_1_tx.md) |
+| 38 | `Sorted_Set (B+Tree) contains lookup` | **144 ns** | 3,953 ns | **529 ns** | **7.47x faster** | [Slice #38](../slices/38_sorted_set_b_tree_contains_lookup.md) |
 
 ---
 
@@ -65,11 +69,10 @@ Extracting `sortedBranchSearch` and `sortedLeafSearch` *reduces* duplication acr
 const LeafSearchResult = struct {
     index: usize,
     found: bool,
-    key_slot: Slot = .{},
 };
 
 // Returns the child index `0 .. node.num - 1` whose key range contains `key`.
-fn sortedBranchSearch(self: *Database(db_kind, HashInt), node: *const SortedNode, key: []const u8) !usize {
+fn sortedBranchSearch(self: *Database(db_kind, HashInt), node: *const SortedNode, key: []const u8) !u8 {
     var lo: usize = 1;
     var hi: usize = node.num;
     while (lo < hi) {
@@ -79,19 +82,19 @@ fn sortedBranchSearch(self: *Database(db_kind, HashInt), node: *const SortedNode
             .gt => hi = mid,
         }
     }
-    return lo - 1;
+    return @intCast(lo - 1);
 }
 
-// Returns `{ .index = match_idx, .found = true, .key_slot = ks }` on exact match,
+// Returns `{ .index = match_idx, .found = true }` on exact match,
 // or `{ .index = lower_bound_idx, .found = false }` when absent.
 fn sortedLeafSearch(self: *Database(db_kind, HashInt), node: *const SortedNode, key: []const u8) !LeafSearchResult {
     var lo: usize = 0;
     var hi: usize = node.num;
     while (lo < hi) {
         const mid = lo + (hi - lo) / 2;
-        const ks = try self.sortedEntryKeySlot(node.entries[mid]);
-        switch (try self.compareKey(ks, key)) {
-            .eq => return .{ .index = mid, .found = true, .key_slot = ks },
+        const kv = try self.readKvPair(node.entries[mid]);
+        switch (try self.compareKey(kv.key_slot, key)) {
+            .eq => return .{ .index = mid, .found = true },
             .lt => lo = mid + 1,
             .gt => hi = mid,
         }
@@ -100,7 +103,7 @@ fn sortedLeafSearch(self: *Database(db_kind, HashInt), node: *const SortedNode, 
 }
 ```
 
-Now `sortedGet`, `sortedRank`, and `sortedPut` become **shorter and easier to read** than before:
+Now `sortedGet`, `sortedRank`, `sortedPut`, `sortedRemove`, and `sortedStackFromKey` become **shorter and easier to read** than before:
 
 ```zig
 fn sortedGet(self: *Database(db_kind, HashInt), root_ptr: u64, key: []const u8) !?SortedSlot {
@@ -113,7 +116,6 @@ fn sortedGet(self: *Database(db_kind, HashInt), root_ptr: u64, key: []const u8) 
                 if (!res.found) return null;
                 return .{
                     .slot = node.entries[res.index],
-                    .key_slot = res.key_slot,
                     .position = node_ptr + BTREE_NODE_HEADER_SIZE + res.index * byteSizeOf(Slot),
                 };
             },

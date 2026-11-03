@@ -4,14 +4,14 @@
 
 ## 1. Benchmark Evidence
 
-| # | Benchmark | Odin (`-o:speed`) | Zig (`ReleaseFast`) | Speedup | Slice |
-| ---: | :--- | ---: | ---: | :--- | :--- |
-| 48 | `Bytes: External Bytes read_bytes_buf` | **9 ns** | 39 ns | **4.33x Odin** | [Slice #48](../slices/48_bytes_external_bytes_read_bytes_buf.md) |
-| 50 | `Bytes: Tagged External Bytes read_bytes_buf` | **9 ns** | 57 ns | **6.33x Odin** | [Slice #50](../slices/50_bytes_tagged_external_bytes_read_bytes_buf.md) |
-| 51 | `Stream: Cursor_Writer (256 x 4KB = 1MB)` | **288 ns/chunk** | 1,674 ns/chunk | **5.81x Odin** | [Slice #51](../slices/51_stream_cursor_writer_256_x_4kb_1mb.md) |
-| 53 | `Stream: Cursor_Reader random seek + 64B read` | **6 ns** | 28 ns | **4.67x Odin** | [Slice #53](../slices/53_stream_cursor_reader_random_seek_64b_read.md) |
-| 55 | `Path: 4-level nested cursor_write_path` | **230 ns** | 1,548 ns | **6.73x Odin** | [Slice #55](../slices/55_path_4_level_nested_cursor_write_path.md) |
-| 56 | `Path: 4-level nested cursor_read_path` | **148 ns** | 1,293 ns | **8.74x Odin** | [Slice #56](../slices/56_path_4_level_nested_cursor_read_path.md) |
+| # | Benchmark | Odin (`-o:speed`) | Upstream Zig | Patched Zig | Zig Speedup | Slice |
+| ---: | :--- | ---: | ---: | ---: | :--- | :--- |
+| 48 | `Bytes: External Bytes read_bytes_buf` | **9 ns** | 39 ns | **13 ns** | **2.98x faster** | [Slice #48](../slices/48_bytes_external_bytes_read_bytes_buf.md) |
+| 50 | `Bytes: Tagged External Bytes read_bytes_buf` | **9 ns** | 57 ns | **19 ns** | **2.98x faster** | [Slice #50](../slices/50_bytes_tagged_external_bytes_read_bytes_buf.md) |
+| 52 | `Stream: Cursor_Reader (256 x 4KB = 1MB)` | **52 ns/chunk** | 83 ns/chunk | **57 ns/chunk** | **1.45x faster** | [Slice #52](../slices/52_stream_cursor_reader_256_x_4kb_1mb.md) |
+| 53 | `Stream: Cursor_Reader random seek + 64B read` | 6 ns | 28 ns | **5 ns** | **5.67x faster** *(beats Odin!)* | [Slice #53](../slices/53_stream_cursor_reader_random_seek_64b_read.md) |
+| 55 | `Path: 4-level nested cursor_write_path` | **230 ns** | 1,548 ns | **530 ns** | **2.92x faster** | [Slice #55](../slices/55_path_4_level_nested_cursor_write_path.md) |
+| 56 | `Path: 4-level nested cursor_read_path` | **148 ns** | 1,293 ns | **453 ns** | **2.85x faster** | [Slice #56](../slices/56_path_4_level_nested_cursor_read_path.md) |
 
 ---
 
@@ -80,15 +80,35 @@ If `db_kind == .memory` (known at `comptime` inside `Database(db_kind, HashInt)`
 ```zig
 // Inside Cursor.reader() (`lib.zig#L3370-L3385`), `.bytes` arm:
 if (comptime db_kind == .memory) {
-    const slice = self.db.core.buffer.written()[start_position..][0..@intCast(size)];
-    return .{
-        .parent = self,
-        .interface = .fixed(slice),
-        .size = size,
-        .start_position = start_position,
-        .pos = size, // all `size` bytes are already in `interface.buffer[0..size]`
-    };
+    const mem_bytes = self.db.core.buffer.written();
+    if (start_position + size <= mem_bytes.len) {
+        const slice = mem_bytes[@intCast(start_position)..][0..@intCast(size)];
+        return .{
+            .parent = self,
+            .interface = .fixed(slice),
+            .size = size,
+            .start_position = start_position,
+            .pos = size, // all `size` bytes are already in `interface.buffer[0..size]`
+        };
+    }
 }
 ```
 
-Look at [`Cursor.Reader.seekTo` (`lib.zig#L2971-L2981`)](../../reference/xitdb-zig/src/lib.zig#L2971-L2981): because `logical_pos` is `0` and `self.pos == size`, `seekTo(offset)` hits the existing `else` branch (`self.interface.seek += logical_delta`) and **already performs pure in-memory `seek` pointer arithmetic with zero vtable calls**!
+And in [`Cursor.Reader.seekTo` (`lib.zig#L2971-L2981`)](../../reference/xitdb-zig/src/lib.zig#L2971-L2981), checking `const window_start = self.pos - self.interface.end;` instead of `logical_pos` allows both forward **and backward** seeks (`try bar_reader.seekTo(0)` in `src/test.zig#L1468`) to stay inside the buffered window without invalidating `interface.end`:
+
+```zig
+pub fn seekTo(self: *Reader, offset: u64) !void {
+    const logical_pos = self.logicalPos();
+    const window_start = self.pos - self.interface.end;
+    if (offset < window_start or offset >= self.pos) {
+        self.interface.seek = 0;
+        self.interface.end = 0;
+        self.pos = offset;
+    } else {
+        const logical_delta: isize = @intCast(@as(i65, @intCast(offset)) - @as(i65, @intCast(logical_pos)));
+        self.interface.seek = @intCast(@as(isize, @intCast(self.interface.seek)) + logical_delta);
+    }
+}
+```
+
+With this in place, `#53 Stream: Cursor_Reader random seek + 64B read` drops from `28.4 ns` to **`5.0 ns` (5.67x faster, beating Odin's `6.1 ns`)**!

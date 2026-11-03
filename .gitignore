@@ -13,8 +13,10 @@ bin/
 .tmp/
 .worktrees/
 *.patch
+!benchmarks/**/*.patch
 .zig-cache/
 zig-out/
+__pycache__/
 
 # OS & Editor artifacts
 .DS_Store

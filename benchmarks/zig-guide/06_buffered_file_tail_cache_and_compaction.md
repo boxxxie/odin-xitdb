@@ -4,14 +4,14 @@
 
 ## 1. Benchmark Evidence
 
-| # | Benchmark | Odin (`-o:speed`) | Zig (`ReleaseFast`) | Speedup | Slice |
-| ---: | :--- | ---: | ---: | :--- | :--- |
-| 59 | `Backend: Core_Buffered_File commits` | **4,579 ns** | 18,568 ns | **4.06x Odin** | [Slice #59](../slices/59_backend_core_buffered_file_commits.md) |
-| 60 | `Backend: Core_File (unbuffered) commits` | **44,053 ns** | 48,505 ns | **1.10x Odin** | [Slice #60](../slices/60_backend_core_file_unbuffered_commits.md) |
-| 62 | `Tx: Aborted transaction rollback truncate` | **693 ns** | 1,930 ns | **2.78x Odin** | [Slice #62](../slices/62_tx_aborted_transaction_rollback_truncate.md) |
-| 63 | `DB: Re-open & trailer checksum verify` | **56 ns** | 249 ns | **4.45x Odin** | [Slice #63](../slices/63_db_re_open_trailer_checksum_verify.md) |
-| 39 | `Replication (genesis -> 200 moments)` | **104 ns/op** | 1,044 ns/op | **10.04x Odin** | [Slice #39](../slices/39_replication_genesis_200_moments.md) |
-| 43 | `Compaction (Heterogeneous DAG + dedup)` | 126.6 ms | **110.1 ms** | **1.15x Zig** | [Slice #43](../slices/43_compaction_heterogeneous_dag_dedup.md) |
+| # | Benchmark | Odin (`-o:speed`) | Upstream Zig | Patched Zig | Zig Speedup | Slice |
+| ---: | :--- | ---: | ---: | ---: | :--- | :--- |
+| 59 | `Backend: Core_Buffered_File commits` | **4,579 ns** | 18,568 ns | **6,296 ns** | **2.95x faster** | [Slice #59](../slices/59_backend_core_buffered_file_commits.md) |
+| 60 | `Backend: Core_File (unbuffered) commits` | **44,053 ns** | 48,505 ns | **47,654 ns** | **1.02x faster** | [Slice #60](../slices/60_backend_core_file_unbuffered_commits.md) |
+| 41 | `Compaction (Memory_Offset_Map, 200 -> 1)` | **3.71 ms** | 7.59 ms | **3.96 ms** | **1.92x faster** | [Slice #41](../slices/41_compaction_memory_offset_map_200_1.md) |
+| 42 | `Compaction (File_Offset_Map, 200 -> 1)` | **9.35 ms** | 13.71 ms | **10.26 ms** | **1.34x faster** | [Slice #42](../slices/42_compaction_file_offset_map_200_1.md) |
+| 43 | `Compaction (Heterogeneous DAG + dedup)` | 126.6 ms | 110.1 ms | **84.1 ms** | **1.31x faster** *(1.51x vs Odin!)* | [Slice #43](../slices/43_compaction_heterogeneous_dag_dedup.md) |
+| 63 | `DB: Re-open & trailer checksum verify` | **56 ns** | 249 ns | **224 ns** | **1.11x faster** | [Slice #63](../slices/63_db_re_open_trailer_checksum_verify.md) |
 
 ---
 
@@ -66,7 +66,7 @@ const CoreBufferedFile = struct {
     file_len: ?u64 = null,
 ```
 
-1. **In `flush()` (`lib.zig#L5226-L5231`):** Write only the un-flushed tail `[flushed_len..]`, keep the clean bytes in `memory.buffer` for subsequent reads, and only clear `file_len` when external writers could run (or update `file_len = @max(fl, memory_pos + written.len)`):
+1. **In `flush()` (`lib.zig#L5226-L5231`):** Write only the un-flushed tail `[flushed_len..]` and keep the clean bytes in `memory.buffer` for subsequent reads. Note that `writeToFile` (`lib.zig#L5242`) already updates `if (file_len) |len| self.file_len = @max(len, pos + bytes.len);`, so omitting `self.file_len = null;` in `flush()` also eliminates 2 redundant `fstat` (`file.length()`) syscalls per commit:
    ```zig
    pub fn flush(self: *CoreBufferedFile) !void {
        const written = self.memory.buffer.written();
@@ -74,7 +74,6 @@ const CoreBufferedFile = struct {
            try self.writeToFile(self.memory_pos + self.flushed_len, written[self.flushed_len..]);
            self.flushed_len = written.len;
        }
-       self.file_len = null;
    }
    ```
 2. **In `Writer.drain()` (`lib.zig#L5139-L5166`):**
