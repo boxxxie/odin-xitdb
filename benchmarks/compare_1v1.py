@@ -727,6 +727,929 @@ def print_benchmark_plan(plan: Dict[str, Any]) -> None:
     print("=" * 116)
 
 
+SLICES_DIR = os.path.join(BENCH_DIR, "slices")
+
+
+def strip_code_line(line: str, in_block_comment: bool = False) -> Tuple[str, bool]:
+    """
+    Replaces string/char literals and comments with spaces so brace counting
+    and identifier extraction are never confused by literals or comments.
+    """
+    out: List[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        if in_block_comment:
+            end_idx = line.find("*/", i)
+            if end_idx == -1:
+                return "".join(out), True
+            i = end_idx + 2
+            in_block_comment = False
+            out.append(" ")
+            continue
+
+        ch = line[i]
+        nxt = line[i + 1] if i + 1 < n else ""
+
+        if ch == "/" and nxt == "/":
+            break
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if ch in ('"', "'", "`"):
+            quote = ch
+            out.append(" ")
+            i += 1
+            while i < n:
+                c = line[i]
+                if c == "\\" and quote != "`":
+                    i += 2
+                    continue
+                if c == quote:
+                    i += 1
+                    break
+                i += 1
+            out.append(" ")
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out), in_block_comment
+
+
+def slugify_bench_name(rank: int, name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return f"{rank:02d}_{slug}"
+
+
+def scan_harness_file(file_path: str, lang: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Parses bench_xitdb.odin or bench_xitdb.zig and maps each benchmark name to:
+      - start_line, end_line (1-indexed inclusive)
+      - rel_url (e.g. 'bench_xitdb.odin#L469-L494')
+      - snippet (raw source lines of the benchmark block)
+      - direct_calls (ordered list of xitdb functions invoked by this benchmark)
+    """
+    if not os.path.isfile(file_path):
+        return {}
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        raw_lines = f.read().splitlines()
+
+    clean_lines: List[str] = []
+    in_bc = False
+    for ln in raw_lines:
+        cl, in_bc = strip_code_line(ln, in_bc)
+        clean_lines.append(cl)
+
+    if lang == "odin":
+        fn_re = re.compile(r"^\s*(bench_[A-Za-z0-9_]+|run_dsl_benchmarks)\s*::\s*proc\b")
+        cb_re = re.compile(r"^\s*([A-Za-z0-9_]+)\s*::\s*proc\b")
+        print_re = re.compile(r"\bprint_result\s*\(")
+    else:
+        fn_re = re.compile(r"^\s*fn\s+(bench[A-Za-z0-9_]+)\s*\(")
+        cb_re = re.compile(r"^\s*const\s+([A-Za-z0-9_]+)\s*=\s*struct\b")
+        print_re = re.compile(r"\bprintResult\s*\(")
+
+    section_comment_re = re.compile(r"^\s*//\s*[0-9]+[a-z]?[\.\-\s]")
+    bench_filename = os.path.basename(file_path)
+    results: Dict[str, Dict[str, Any]] = {}
+
+    i = 0
+    total = len(raw_lines)
+    while i < total:
+        m_fn = fn_re.match(clean_lines[i])
+        if not m_fn:
+            i += 1
+            continue
+
+        fn_name = m_fn.group(1)
+        fn_start = i + 1
+        brace_depth = 0
+        opened = False
+        fn_end = total
+        for j in range(i, total):
+            for ch in clean_lines[j]:
+                if ch == "{":
+                    brace_depth += 1
+                    opened = True
+                elif ch == "}":
+                    brace_depth -= 1
+            if opened and brace_depth <= 0:
+                fn_end = j + 1
+                break
+
+        # Discover local helper callbacks inside this group procedure (e.g. put_cb, tx_cb)
+        local_callbacks: List[Tuple[str, int, int]] = []
+        for j in range(fn_start, fn_end - 1):
+            m_cb = cb_re.match(clean_lines[j])
+            if m_cb:
+                cb_name = m_cb.group(1)
+                if cb_name == fn_name:
+                    continue
+                cb_depth = 0
+                cb_opened = False
+                cb_end = j + 1
+                for k in range(j, fn_end):
+                    for ch in clean_lines[k]:
+                        if ch == "{":
+                            cb_depth += 1
+                            cb_opened = True
+                        elif ch == "}":
+                            cb_depth -= 1
+                    if cb_opened and cb_depth <= 0:
+                        cb_end = k + 1
+                        break
+                local_callbacks.append((cb_name, j + 1, cb_end))
+
+        # Find all print_result / printResult invocations in this group function
+        prev_end = fn_start
+        is_first_in_fn = True
+        j = fn_start - 1
+        while j < fn_end:
+            if print_re.search(clean_lines[j]):
+                p_start = j + 1
+                paren_depth = 0
+                p_opened = False
+                p_end = p_start
+                for k in range(j, fn_end):
+                    for ch in clean_lines[k]:
+                        if ch == "(":
+                            paren_depth += 1
+                            p_opened = True
+                        elif ch == ")":
+                            paren_depth -= 1
+                    if p_opened and paren_depth <= 0:
+                        p_end = k + 1
+                        break
+
+                seg_start = prev_end + 1
+                while seg_start < p_start:
+                    s_line = raw_lines[seg_start - 1].strip()
+                    if (
+                        not s_line
+                        or s_line in ("}", "};")
+                        or s_line.startswith("free_all(")
+                        or s_line == "_ = rep"
+                    ):
+                        seg_start += 1
+                    else:
+                        break
+
+                # If the first benchmark in a group has a preamble before '// 1a.' / '// 5a.',
+                # start the highlight at the section comment.
+                if is_first_in_fn:
+                    for k_line in range(seg_start, p_start):
+                        if section_comment_re.match(raw_lines[k_line - 1]):
+                            seg_start = k_line
+                            break
+
+                # Extract benchmark name(s) from the print_result block
+                p_block_text = "\n".join(raw_lines[p_start - 1 : p_end])
+                names_found: List[str] = []
+                m_lit = re.search(r'\.?name\s*=\s*"([^"]+)"', p_block_text)
+                if m_lit:
+                    names_found.append(m_lit.group(1))
+                else:
+                    m_var = re.search(r"\.?name\s*=\s*([A-Za-z_][A-Za-z0-9_]*)", p_block_text)
+                    if m_var:
+                        var_name = m_var.group(1)
+                        seg_text = "\n".join(raw_lines[seg_start - 1 : p_end])
+                        for m_assign in re.finditer(
+                            rf"\b{re.escape(var_name)}\s*:?=\s*(.+)", seg_text
+                        ):
+                            names_found.extend(
+                                s
+                                for s in re.findall(r'"([^"]+)"', m_assign.group(1))
+                                if len(s) > 6
+                            )
+
+                # Extract direct xitdb calls in [seg_start..p_end] + any referenced local callbacks
+                seg_clean = "\n".join(clean_lines[seg_start - 1 : p_end])
+                seg_raw = "\n".join(raw_lines[seg_start - 1 : p_end])
+                defined_in_seg = {
+                    cb_n for cb_n, cb_s, cb_e in local_callbacks if seg_start <= cb_s <= p_end
+                }
+                for cb_name, cb_s, cb_e in local_callbacks:
+                    if cb_name not in defined_in_seg and cb_e < seg_start:
+                        if re.search(rf"\b{re.escape(cb_name)}\b", seg_clean):
+                            seg_clean += "\n" + "\n".join(clean_lines[cb_s - 1 : cb_e])
+
+                direct_calls: List[str] = []
+                if lang == "odin":
+                    for m_call in re.finditer(r"\bxitdb\.([A-Za-z_][A-Za-z0-9_]*)\s*\(", seg_clean):
+                        callee = m_call.group(1)
+                        if callee == "database_committed_size":
+                            continue
+                        if callee not in direct_calls:
+                            direct_calls.append(callee)
+                else:
+                    for m_call in re.finditer(r"\.([A-Za-z_][A-Za-z0-9_]*)\s*\(", seg_clean):
+                        callee = m_call.group(1)
+                        if callee not in direct_calls:
+                            direct_calls.append(callee)
+
+                for b_name in names_found:
+                    calls_for_bench = list(direct_calls)
+                    if "SHA-1" in b_name and "sha256_hasher" in calls_for_bench:
+                        calls_for_bench.remove("sha256_hasher")
+                    elif "SHA-256" in b_name and "sha1_hasher" in calls_for_bench:
+                        calls_for_bench.remove("sha1_hasher")
+
+                    results[b_name] = {
+                        "group_fn": fn_name,
+                        "start_line": seg_start,
+                        "end_line": p_end,
+                        "rel_url": f"{bench_filename}#L{seg_start}-L{p_end}",
+                        "snippet": seg_raw,
+                        "direct_calls": calls_for_bench,
+                    }
+
+                prev_end = p_end
+                is_first_in_fn = False
+                j = p_end
+                continue
+            j += 1
+
+        i = fn_end
+
+    return results
+
+
+PATH_PART_TYPES = {
+    "Array_List_Init",
+    "Array_List_Get",
+    "Array_List_Append",
+    "Array_List_Slice",
+    "Linked_Array_List_Init",
+    "Linked_Array_List_Get",
+    "Linked_Array_List_Append",
+    "Linked_Array_List_Slice",
+    "Linked_Array_List_Concat",
+    "Linked_Array_List_Insert",
+    "Linked_Array_List_Remove",
+    "Hash_Map_Init",
+    "Hash_Map_Get",
+    "Hash_Map_Remove",
+    "Sorted_Map_Init",
+    "Sorted_Map_Get",
+    "Sorted_Map_Get_Index",
+    "Sorted_Map_Remove",
+    "Write_Data",
+    "Write_KV_Data",
+    "Context",
+}
+
+
+def parse_odin_library_procs() -> Dict[str, Dict[str, Any]]:
+    """
+    Parses all procedures and proc{...} overload groups across xitdb/*.odin
+    (excluding *_test.odin) and builds the static call graph, including per-variant
+    arms inside `_exec_path_part`.
+    """
+    xitdb_dir = os.path.join(ROOT_DIR, "xitdb")
+    if not os.path.isdir(xitdb_dir):
+        return {}
+
+    proc_decl_re = re.compile(
+        r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*::\s*(?:#force_inline\s+)?proc\b"
+    )
+    procs: Dict[str, Dict[str, Any]] = {}
+
+    for fname in sorted(os.listdir(xitdb_dir)):
+        if not fname.endswith(".odin") or fname.endswith("_test.odin"):
+            continue
+        fpath = os.path.join(xitdb_dir, fname)
+        rel_file = f"xitdb/{fname}"
+        with open(fpath, "r", encoding="utf-8") as f:
+            raw_lines = f.read().splitlines()
+
+        clean_lines: List[str] = []
+        in_bc = False
+        for ln in raw_lines:
+            cl, in_bc = strip_code_line(ln, in_bc)
+            clean_lines.append(cl)
+
+        i = 0
+        total = len(raw_lines)
+        while i < total:
+            m = proc_decl_re.match(clean_lines[i])
+            if not m:
+                i += 1
+                continue
+
+            pname = m.group(1)
+            start_line = i + 1
+            # Include any @(private) / @(require_results) attribute immediately above
+            while start_line > 1 and raw_lines[start_line - 2].strip().startswith("@("):
+                start_line -= 1
+
+            brace_depth = 0
+            opened = False
+            end_line = i + 1
+            is_proc_group = bool(re.search(r"::\s*proc\s*\{", clean_lines[i]))
+
+            for j in range(i, total):
+                for ch in clean_lines[j]:
+                    if ch == "{":
+                        brace_depth += 1
+                        opened = True
+                    elif ch == "}":
+                        brace_depth -= 1
+                if opened and brace_depth <= 0:
+                    end_line = j + 1
+                    break
+
+            procs[pname] = {
+                "name": pname,
+                "file": rel_file,
+                "start_line": start_line,
+                "end_line": end_line,
+                "line_count": end_line - start_line + 1,
+                "is_proc_group": is_proc_group,
+                "raw_lines": raw_lines[start_line - 1 : end_line],
+                "clean_lines": clean_lines[start_line - 1 : end_line],
+                "callees": [],
+                "path_parts": [],
+                "case_arms": {},
+            }
+            i = end_line
+
+    ident_re = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
+    call_re = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+    known_names = set(procs.keys())
+
+    for pname, info in procs.items():
+        if pname == "_exec_path_part":
+            # Split _exec_path_part into per-Path_Part case arms so benchmarks only pull in
+            # collection implementations for Path_Part variants they actually construct.
+            arm_re = re.compile(r"^\tcase\s+([A-Za-z_][A-Za-z0-9_]*)\s*:")
+            arm_starts: List[Tuple[str, int]] = []
+            for idx_ln, raw_ln in enumerate(info["raw_lines"]):
+                m_arm = arm_re.match(raw_ln)
+                if m_arm and m_arm.group(1) in PATH_PART_TYPES:
+                    arm_starts.append((m_arm.group(1), idx_ln))
+
+            for a_idx, (part_name, rel_start) in enumerate(arm_starts):
+                rel_end = (
+                    arm_starts[a_idx + 1][1]
+                    if a_idx + 1 < len(arm_starts)
+                    else len(info["raw_lines"]) - 3
+                )
+                while rel_end > rel_start and not info["raw_lines"][rel_end - 1].strip():
+                    rel_end -= 1
+                arm_clean = info["clean_lines"][rel_start:rel_end]
+                arm_callees: List[str] = []
+                arm_parts: List[str] = []
+                for cl in arm_clean:
+                    for m_c in call_re.finditer(cl):
+                        tok = m_c.group(1)
+                        if tok != pname and tok in known_names and tok not in arm_callees:
+                            arm_callees.append(tok)
+                    for m_id in ident_re.finditer(cl):
+                        tok = m_id.group(1)
+                        if tok in PATH_PART_TYPES and tok not in arm_parts:
+                            arm_parts.append(tok)
+                info["case_arms"][part_name] = {
+                    "part": part_name,
+                    "start_line": info["start_line"] + rel_start,
+                    "end_line": info["start_line"] + rel_end - 1,
+                    "raw_lines": info["raw_lines"][rel_start:rel_end],
+                    "clean_lines": arm_clean,
+                    "callees": arm_callees,
+                    "path_parts": arm_parts,
+                }
+            continue
+
+        callees: List[str] = []
+        path_parts: List[str] = []
+        search_re = ident_re if info["is_proc_group"] else call_re
+        for cl in info["clean_lines"]:
+            for m_id in search_re.finditer(cl):
+                tok = m_id.group(1)
+                if tok != pname and tok in known_names and tok not in callees:
+                    callees.append(tok)
+            if pname not in ("init_part_for", "init_tag"):
+                for m_pt in ident_re.finditer(cl):
+                    tok = m_pt.group(1)
+                    if tok in PATH_PART_TYPES and tok not in path_parts:
+                        path_parts.append(tok)
+        info["callees"] = callees
+        info["path_parts"] = path_parts
+
+    return procs
+
+
+def compute_benchmark_slice(
+    entry_calls: List[str], odin_procs: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Computes the transitive closure of reachable xitdb procedures starting from
+    `entry_calls`, specializing `_exec_path_part` to only the `Path_Part` variants
+    constructed by reachable procedures.
+    """
+    visited_depth: Dict[str, int] = {}
+    called_by: Dict[str, List[str]] = defaultdict(list)
+    order: List[str] = []
+    queue: List[Tuple[str, int]] = []
+    active_parts: Set[str] = set()
+    activated_arms: Set[str] = set()
+
+    def add_path_part(pt: str) -> None:
+        if pt in active_parts:
+            return
+        active_parts.add(pt)
+        if pt.startswith("Array_List_"):
+            active_parts.add("Array_List_Init")
+        elif pt.startswith("Linked_Array_List_"):
+            active_parts.add("Linked_Array_List_Init")
+        elif pt.startswith("Hash_Map_"):
+            active_parts.add("Hash_Map_Init")
+        elif pt.startswith("Sorted_Map_"):
+            active_parts.add("Sorted_Map_Init")
+
+    for c in entry_calls:
+        if c in odin_procs and c not in visited_depth:
+            visited_depth[c] = 0
+            order.append(c)
+            queue.append((c, 0))
+            called_by[c].append("benchmark harness")
+
+    idx = 0
+    while idx < len(queue):
+        curr, depth = queue[idx]
+        idx += 1
+        pinfo = odin_procs[curr]
+
+        for pt in pinfo.get("path_parts", []):
+            add_path_part(pt)
+
+        if curr == "_exec_path_part":
+            callees_to_visit: List[str] = []
+            for pt in list(active_parts):
+                if pt not in activated_arms and pt in pinfo["case_arms"]:
+                    activated_arms.add(pt)
+                    arm = pinfo["case_arms"][pt]
+                    for sub_pt in arm["path_parts"]:
+                        add_path_part(sub_pt)
+                    for callee in arm["callees"]:
+                        if callee not in callees_to_visit:
+                            callees_to_visit.append(callee)
+        else:
+            callees_to_visit = list(pinfo["callees"])
+
+        for callee in callees_to_visit:
+            if curr not in called_by[callee]:
+                called_by[callee].append(curr)
+            if callee not in visited_depth:
+                visited_depth[callee] = depth + 1
+                order.append(callee)
+                queue.append((callee, depth + 1))
+
+        # If newly discovered path parts unlocked additional _exec_path_part arms,
+        # enqueue their callees as well.
+        if "_exec_path_part" in visited_depth:
+            exec_depth = visited_depth["_exec_path_part"]
+            exec_info = odin_procs["_exec_path_part"]
+            for pt in list(active_parts):
+                if pt not in activated_arms and pt in exec_info["case_arms"]:
+                    activated_arms.add(pt)
+                    arm = exec_info["case_arms"][pt]
+                    for sub_pt in arm["path_parts"]:
+                        add_path_part(sub_pt)
+                    for callee in arm["callees"]:
+                        if "_exec_path_part" not in called_by[callee]:
+                            called_by[callee].append("_exec_path_part")
+                        if callee not in visited_depth:
+                            visited_depth[callee] = exec_depth + 1
+                            order.append(callee)
+                            queue.append((callee, exec_depth + 1))
+
+    by_file: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    total_lines = 0
+    for pname in order:
+        pinfo = odin_procs[pname]
+        if pname == "_exec_path_part" and activated_arms:
+            arms_sorted = sorted(
+                (pinfo["case_arms"][pt] for pt in activated_arms if pt in pinfo["case_arms"]),
+                key=lambda a: a["start_line"],
+            )
+            sliced_raw: List[str] = list(pinfo["raw_lines"][:13])
+            sliced_clean: List[str] = list(pinfo["clean_lines"][:13])
+            sliced_line_numbers: List[int] = list(
+                range(pinfo["start_line"], pinfo["start_line"] + 13)
+            )
+            for arm in arms_sorted:
+                sliced_raw.extend(arm["raw_lines"])
+                sliced_clean.extend(arm["clean_lines"])
+                sliced_line_numbers.extend(
+                    range(arm["start_line"], arm["start_line"] + len(arm["raw_lines"]))
+                )
+            sliced_raw.extend(pinfo["raw_lines"][-3:])
+            sliced_clean.extend(pinfo["clean_lines"][-3:])
+            sliced_line_numbers.extend(
+                range(pinfo["end_line"] - 2, pinfo["end_line"] + 1)
+            )
+            p_copy = {
+                **pinfo,
+                "line_count": len(sliced_raw),
+                "raw_lines": sliced_raw,
+                "clean_lines": sliced_clean,
+                "line_numbers": sliced_line_numbers,
+                "active_arms": [a["part"] for a in arms_sorted],
+                "depth": visited_depth[pname],
+                "callers": called_by[pname],
+            }
+        else:
+            p_copy = {
+                **pinfo,
+                "line_numbers": list(
+                    range(pinfo["start_line"], pinfo["end_line"] + 1)
+                ),
+                "depth": visited_depth[pname],
+                "callers": called_by[pname],
+            }
+
+        total_lines += p_copy["line_count"]
+        by_file[pinfo["file"]].append(p_copy)
+
+    for f in by_file:
+        by_file[f].sort(key=lambda x: x["start_line"])
+
+    return {
+        "order": order,
+        "depths": visited_depth,
+        "called_by": dict(called_by),
+        "by_file": dict(sorted(by_file.items())),
+        "procs_count": len(order),
+        "files_count": len(by_file),
+        "lines_count": total_lines,
+    }
+
+
+def build_code_map() -> Dict[str, Dict[str, Any]]:
+    """
+    Builds the complete mapping from benchmark name -> harness #L<start>-L<end> links
+    and xitdb library slice metadata.
+    """
+    odin_harness = scan_harness_file(os.path.join(BENCH_DIR, "bench_xitdb.odin"), "odin")
+    zig_harness = scan_harness_file(os.path.join(BENCH_DIR, "bench_xitdb.zig"), "zig")
+    odin_procs = parse_odin_library_procs()
+
+    # Determine canonical ranks from odin.jsonl if present, else appearance order
+    ranks_by_name: Dict[str, int] = {}
+    for r in load_jsonl_file(ODIN_JSONL):
+        if "name" in r and "rank" in r:
+            ranks_by_name[r["name"]] = int(r["rank"])
+
+    code_map: Dict[str, Dict[str, Any]] = {}
+    for idx, (b_name, o_info) in enumerate(odin_harness.items(), 1):
+        rank = ranks_by_name.get(b_name, idx)
+        slug = slugify_bench_name(rank, b_name)
+        z_info = zig_harness.get(b_name)
+        slice_info = compute_benchmark_slice(o_info["direct_calls"], odin_procs)
+
+        code_map[b_name] = {
+            "rank": rank,
+            "name": b_name,
+            "slug": slug,
+            "odin_bench_url": o_info["rel_url"],
+            "odin_start_line": o_info["start_line"],
+            "odin_end_line": o_info["end_line"],
+            "zig_bench_url": z_info["rel_url"] if z_info else "",
+            "zig_start_line": z_info["start_line"] if z_info else 0,
+            "zig_end_line": z_info["end_line"] if z_info else 0,
+            "slice_url": f"slices/{slug}.md",
+            "entry_calls": o_info["direct_calls"],
+            "odin_procs_count": slice_info["procs_count"],
+            "odin_files_count": slice_info["files_count"],
+            "odin_lines_count": slice_info["lines_count"],
+        }
+
+    return code_map
+
+
+def generate_all_slices() -> None:
+    """
+    Generates:
+      1. benchmarks/slices/<rank>_<slug>.md for every benchmark
+      2. benchmarks/slices/README.md index
+      3. benchmarks/slices/index.html interactive single-page codebase slice viewer
+    """
+    os.makedirs(SLICES_DIR, exist_ok=True)
+    odin_harness = scan_harness_file(os.path.join(BENCH_DIR, "bench_xitdb.odin"), "odin")
+    zig_harness = scan_harness_file(os.path.join(BENCH_DIR, "bench_xitdb.zig"), "zig")
+    odin_procs = parse_odin_library_procs()
+    code_map = build_code_map()
+
+    known_procs = set(odin_procs.keys())
+    ident_re = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
+
+    sorted_items = sorted(code_map.values(), key=lambda x: x["rank"])
+    index_rows: List[str] = [
+        "# xitdb Per-Benchmark Code Slices & Call-Graph Projections",
+        "",
+        "Each slice below projects `xitdb/*.odin` down to **only the procedures and call paths touched by that benchmark**, with direct `#L<start>-L<end>` links into both the benchmark harness and the library source files.",
+        "",
+        "| # | Benchmark | Harness (Odin / Zig) | Touched Library Scope | Entry `xitdb` Calls |",
+        "| ---: | :--- | :--- | :--- | :--- |",
+    ]
+
+    html_payload: List[Dict[str, Any]] = []
+
+    for item in sorted_items:
+        b_name = item["name"]
+        rank = item["rank"]
+        slug = item["slug"]
+        o_info = odin_harness[b_name]
+        z_info = zig_harness.get(b_name)
+        slice_info = compute_benchmark_slice(o_info["direct_calls"], odin_procs)
+        reached_set = set(slice_info["order"])
+
+        odin_link_from_root = f"../{item['odin_bench_url']}"
+        zig_link_from_root = f"../{item['zig_bench_url']}" if item["zig_bench_url"] else ""
+
+        harness_links = f"[Odin (`L{item['odin_start_line']}–L{item['odin_end_line']}`)](../{item['odin_bench_url']})"
+        if item["zig_bench_url"]:
+            harness_links += f" · [Zig (`L{item['zig_start_line']}–L{item['zig_end_line']}`)](../{item['zig_bench_url']})"
+
+        entry_calls_md = ", ".join(f"`{c}`" for c in item["entry_calls"])
+        scope_md = f"[**{item['odin_procs_count']} procs · {item['odin_files_count']} files · {item['odin_lines_count']} LOC**]({slug}.md)"
+        index_rows.append(
+            f"| {rank} | [`{b_name}`]({slug}.md) | {harness_links} | {scope_md} | {entry_calls_md} |"
+        )
+
+        md: List[str] = [
+            f"# #{rank}. `{b_name}` — Code Slice",
+            "",
+            f"[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [Odin Harness (`bench_xitdb.odin#L{item['odin_start_line']}-L{item['odin_end_line']}`)]({odin_link_from_root})"
+            + (
+                f" · [Zig Harness (`bench_xitdb.zig#L{item['zig_start_line']}-L{item['zig_end_line']}`)]({zig_link_from_root})"
+                if zig_link_from_root
+                else ""
+            ),
+            "",
+            f"- **Touched Library Scope:** **{item['odin_procs_count']}** procedures across **{item['odin_files_count']}** `xitdb/*.odin` files (**{item['odin_lines_count']}** lines of library code)",
+            f"- **Direct Benchmark Entry Points:** {entry_calls_md}",
+            "",
+            "---",
+            "",
+            "## 1. Benchmark Harness Code",
+            "",
+            f"### Odin (`benchmarks/{item['odin_bench_url']}`)",
+            "",
+            "```odin",
+        ]
+
+        for offset, raw_ln in enumerate(o_info["snippet"].splitlines()):
+            ln_no = item["odin_start_line"] + offset
+            md.append(f"{ln_no:4d} | {raw_ln}")
+        md.append("```")
+
+        if z_info:
+            md.extend(
+                [
+                    "",
+                    "<details>",
+                    f"<summary><strong>Zig Benchmark Harness (<code>benchmarks/{item['zig_bench_url']}</code>)</strong></summary>",
+                    "",
+                    "```zig",
+                ]
+            )
+            for offset, raw_ln in enumerate(z_info["snippet"].splitlines()):
+                ln_no = item["zig_start_line"] + offset
+                md.append(f"{ln_no:4d} | {raw_ln}")
+            md.extend(["```", "</details>"])
+
+        md.extend(
+            [
+                "",
+                "---",
+                "",
+                "## 2. Reached `xitdb` Call Graph & File Coverage",
+                "",
+                "| File | Procedure | Role / Call Depth | Lines | Source Link |",
+                "| :--- | :--- | :--- | ---: | :--- |",
+            ]
+        )
+
+        for pname in slice_info["order"]:
+            p = odin_procs[pname]
+            depth = slice_info["depths"][pname]
+            callers = ", ".join(f"`{c}`" for c in slice_info["called_by"].get(pname, [])[:3])
+            role = "**Entry Point** (`depth 0`)" if depth == 0 else f"`depth {depth}` (from {callers})"
+            src_url = f"../../{p['file']}#L{p['start_line']}-L{p['end_line']}"
+            md.append(
+                f"| `{p['file']}` | `{pname}` | {role} | {p['line_count']} | [`{p['file']}#L{p['start_line']}-L{p['end_line']}`]({src_url}) |"
+            )
+
+        md.extend(
+            [
+                "",
+                "---",
+                "",
+                "## 3. Highlighted Library Code Slice (`xitdb/*.odin`)",
+                "",
+                "> Only procedures reachable when running **`"
+                + b_name
+                + "`** are included below. Lines that dispatch to another touched procedure in this slice are marked with `// <== [calls ...]`. ",
+                "",
+            ]
+        )
+
+        for rel_file, file_procs in slice_info["by_file"].items():
+            file_loc = sum(p["line_count"] for p in file_procs)
+            ranges_md = ", ".join(
+                f"[`L{p['start_line']}–L{p['end_line']}`](../../{rel_file}#L{p['start_line']}-L{p['end_line']})"
+                for p in file_procs
+            )
+            md.extend(
+                [
+                    f"### `{rel_file}` ({len(file_procs)} procedures · {file_loc} lines: {ranges_md})",
+                    "",
+                ]
+            )
+            for p in file_procs:
+                src_url = f"../../{rel_file}#L{p['start_line']}-L{p['end_line']}"
+                depth = p["depth"]
+                badge = "ENTRY POINT" if depth == 0 else f"DEPTH {depth}"
+                arms_note = (
+                    f" — Active `Path_Part` arms: {', '.join(f'`{a}`' for a in p['active_arms'])}"
+                    if p.get("active_arms")
+                    else ""
+                )
+                md.extend(
+                    [
+                        f"#### [`{p['name']}`]({src_url}) — `{badge}` (`L{p['start_line']}–L{p['end_line']}`){arms_note}",
+                        "",
+                        "```odin",
+                    ]
+                )
+                line_nums = p.get(
+                    "line_numbers",
+                    list(range(p["start_line"], p["start_line"] + len(p["raw_lines"]))),
+                )
+                prev_ln = None
+                for idx_ln, (ln_no, raw_ln, clean_ln) in enumerate(
+                    zip(line_nums, p["raw_lines"], p["clean_lines"])
+                ):
+                    if prev_ln is not None and ln_no > prev_ln + 1:
+                        md.append(
+                            f"   ... | \t// ... [lines {prev_ln + 1}–{ln_no - 1}: untouched Path_Part arms omitted] ..."
+                        )
+                    prev_ln = ln_no
+                    called_here: List[str] = []
+                    if idx_ln > 0:
+                        for m_id in ident_re.finditer(clean_ln):
+                            tok = m_id.group(1)
+                            if (
+                                tok != p["name"]
+                                and tok in reached_set
+                                and tok in known_procs
+                                and tok not in called_here
+                            ):
+                                called_here.append(tok)
+                    marker = (
+                        f"  // <== [calls {', '.join(called_here)}]"
+                        if called_here
+                        else ""
+                    )
+                    md.append(f"{ln_no:4d} | {raw_ln}{marker}")
+                md.extend(["```", ""])
+
+        slice_path = os.path.join(SLICES_DIR, f"{slug}.md")
+        with open(slice_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(md) + "\n")
+
+        html_payload.append(
+            {
+                "rank": rank,
+                "name": b_name,
+                "slug": slug,
+                "odin_url": f"../{item['odin_bench_url']}",
+                "zig_url": f"../{item['zig_bench_url']}" if item["zig_bench_url"] else "",
+                "odin_snippet": o_info["snippet"],
+                "odin_start": item["odin_start_line"],
+                "procs_count": item["odin_procs_count"],
+                "files_count": item["odin_files_count"],
+                "lines_count": item["odin_lines_count"],
+                "reached_procs": slice_info["order"],
+                "depths": slice_info["depths"],
+            }
+        )
+
+    with open(os.path.join(SLICES_DIR, "README.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(index_rows) + "\n")
+
+    # Generate interactive single-page viewer (benchmarks/slices/index.html)
+    html_procs = {
+        k: {
+            "name": v["name"],
+            "file": v["file"],
+            "start_line": v["start_line"],
+            "end_line": v["end_line"],
+            "code": "\n".join(v["raw_lines"]),
+            "callees": v["callees"],
+        }
+        for k, v in odin_procs.items()
+    }
+    html_doc = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>xitdb Benchmark Codebase Slice Explorer</title>
+<style>
+  body {{ margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: #0d1117; color: #c9d1d9; display: flex; height: 100vh; overflow: hidden; }}
+  #sidebar {{ width: 380px; border-right: 1px solid #30363d; overflow-y: auto; padding: 12px; background: #161b22; }}
+  #main {{ flex: 1; overflow-y: auto; padding: 20px; }}
+  .bench-item {{ padding: 8px 10px; border-radius: 6px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent; font-size: 12px; }}
+  .bench-item:hover {{ background: #21262d; }}
+  .bench-item.active {{ background: #1f6feb22; border-color: #58a6ff; color: #58a6ff; }}
+  .badge {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; background: #21262d; color: #8b949e; }}
+  .badge.entry {{ background: #23863644; color: #3fb950; border: 1px solid #238636; }}
+  pre {{ background: #161b22; padding: 12px; border-radius: 6px; border: 1px solid #30363d; overflow-x: auto; font-size: 12px; line-height: 1.45; }}
+  .proc-card {{ margin-bottom: 16px; }}
+  a {{ color: #58a6ff; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  input {{ width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 10px; background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; border-radius: 6px; }}
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h3 style="margin-top:0">xitdb Benchmark Slices</h3>
+  <input id="search" type="text" placeholder="Filter 75 benchmarks..." oninput="renderList()">
+  <div id="bench-list"></div>
+</div>
+<div id="main"><div id="content"></div></div>
+<script>
+const BENCHMARKS = {json.dumps(html_payload)};
+const PROCS = {json.dumps(html_procs)};
+let activeIdx = 0;
+
+function escapeHtml(s) {{
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}}
+
+function renderList() {{
+  const q = document.getElementById("search").value.toLowerCase();
+  const el = document.getElementById("bench-list");
+  el.innerHTML = BENCHMARKS.map((b, i) => {{
+    if (q && !b.name.toLowerCase().includes(q)) return "";
+    const cls = i === activeIdx ? "bench-item active" : "bench-item";
+    return `<div class="${{cls}}" onclick="selectBench(${{i}})">
+      <strong>#${{b.rank}}</strong> ${{escapeHtml(b.name)}}<br>
+      <span class="badge">${{b.procs_count}} procs · ${{b.files_count}} files · ${{b.lines_count}} LOC</span>
+    </div>`;
+  }}).join("");
+}}
+
+function selectBench(idx) {{
+  activeIdx = idx;
+  renderList();
+  const b = BENCHMARKS[idx];
+  const reached = new Set(b.reached_procs);
+  const byFile = {{}};
+  for (const pname of b.reached_procs) {{
+    const p = PROCS[pname];
+    if (!byFile[p.file]) byFile[p.file] = [];
+    byFile[p.file].push(p);
+  }}
+  let html = `<h2>#${{b.rank}}. ${{escapeHtml(b.name)}}</h2>
+    <p><a href="${{b.slug}}.md">Markdown Slice (${{b.slug}}.md)</a> ·
+       <a href="${{b.odin_url}}">Odin Harness</a>
+       ${{b.zig_url ? ` · <a href="${{b.zig_url}}">Zig Harness</a>` : ""}}</p>
+    <h3>Benchmark Harness (bench_xitdb.odin)</h3>
+    <pre>${{escapeHtml(b.odin_snippet)}}</pre>
+    <h3>Touched Library Code (${{b.procs_count}} procedures across ${{b.files_count}} xitdb/*.odin files)</h3>`;
+  for (const [file, procs] of Object.entries(byFile)) {{
+    procs.sort((a, c) => a.start_line - c.start_line);
+    html += `<h4>${{file}} (${{procs.length}} procedures)</h4>`;
+    for (const p of procs) {{
+      const d = b.depths[p.name];
+      const badgeCls = d === 0 ? "badge entry" : "badge";
+      const badgeTxt = d === 0 ? "ENTRY POINT" : `DEPTH ${{d}}`;
+      html += `<div class="proc-card">
+        <div><strong>${{p.name}}</strong> <span class="${{badgeCls}}">${{badgeTxt}}</span>
+        <span class="badge">L${{p.start_line}}–L${{p.end_line}}</span></div>
+        <pre>${{escapeHtml(p.code)}}</pre>
+      </div>`;
+    }}
+  }}
+  document.getElementById("content").innerHTML = html;
+}}
+
+renderList();
+if (BENCHMARKS.length > 0) selectBench(0);
+</script>
+</body>
+</html>
+"""
+    with open(os.path.join(SLICES_DIR, "index.html"), "w", encoding="utf-8") as f:
+        f.write(html_doc)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="xitdb Multi-Run Statistical Benchmark Runner & Analyzer")
     parser.add_argument("--runs", type=int, default=5, help="In-process measured trials per test (default: 5)")
@@ -781,8 +1704,28 @@ def main() -> None:
         metavar="GIT_REF",
         help="Output the code-change-to-benchmark mapping plan as JSON",
     )
+    parser.add_argument(
+        "--code-map-json",
+        action="store_true",
+        help="Output JSON mapping benchmark names to #L<start>-L<end> harness links and slice metadata",
+    )
+    parser.add_argument(
+        "--generate-slices",
+        action="store_true",
+        help="Generate per-benchmark code slices in benchmarks/slices/ (.md and interactive index.html)",
+    )
 
     args = parser.parse_args()
+
+    if args.generate_slices:
+        generate_all_slices()
+        if not args.code_map_json and args.from_jsonl is False and args.affected is None:
+            print(f"Generated benchmark code slices in {SLICES_DIR}", file=sys.stderr)
+            return
+
+    if args.code_map_json:
+        print(json.dumps(build_code_map()))
+        return
 
     if args.plan_json is not None:
         print(json.dumps(map_changes_to_benchmarks(args.plan_json)))

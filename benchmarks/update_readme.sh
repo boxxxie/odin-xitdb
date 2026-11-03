@@ -25,8 +25,10 @@ fi
 INPUT_FILES+=("${ODIN_JSONL}" "${ZIG_JSONL}")
 
 PLAN_JSON="$("${SCRIPT_DIR}/compare_1v1.py" --plan-json)"
+"${SCRIPT_DIR}/compare_1v1.py" --generate-slices >/dev/null
+CODE_MAP_JSON="$("${SCRIPT_DIR}/compare_1v1.py" --code-map-json)"
 
-TABLES=$(jq -rn --arg target_commit "${TARGET_COMMIT}" --argjson plan "${PLAN_JSON}" '
+TABLES=$(jq -rn --arg target_commit "${TARGET_COMMIT}" --argjson plan "${PLAN_JSON}" --argjson code_map "${CODE_MAP_JSON}" '
 def commify:
   tostring |
   if test("^-?[0-9]+$") then
@@ -39,6 +41,27 @@ def commify:
 
 def nbsp:
   gsub(" "; "\u00a0");
+
+def bench_link($name; $mode):
+  ($code_map[$name] // null) as $m |
+  if $m == null then
+    "`\($name | nbsp)`"
+  elif $mode == "zig" then
+    (if ($m.zig_bench_url // "") != "" then "[`\($name | nbsp)`](\($m.zig_bench_url))" else "`\($name | nbsp)`" end) +
+    (if ($m.slice_url // "") != "" then "\u00a0[🔍\u00a0\($m.odin_procs_count)p](\($m.slice_url))" else "" end)
+  elif $mode == "1v1" then
+    (if ($m.odin_bench_url // "") != "" then "[`\($name | nbsp)`](\($m.odin_bench_url))" else "`\($name | nbsp)`" end) +
+    (if ($m.zig_bench_url // "") != "" and ($m.slice_url // "") != "" then
+      "\u00a0([Zig](\($m.zig_bench_url))\u00a0·\u00a0[🔍\u00a0\($m.odin_procs_count)p](\($m.slice_url)))"
+     elif ($m.zig_bench_url // "") != "" then
+      "\u00a0([Zig](\($m.zig_bench_url)))"
+     elif ($m.slice_url // "") != "" then
+      "\u00a0[🔍\u00a0\($m.odin_procs_count)p](\($m.slice_url))"
+     else "" end)
+  else
+    (if ($m.odin_bench_url // "") != "" then "[`\($name | nbsp)`](\($m.odin_bench_url))" else "`\($name | nbsp)`" end) +
+    (if ($m.slice_url // "") != "" then "\u00a0[🔍\u00a0\($m.odin_procs_count)p](\($m.slice_url))" else "" end)
+  end;
 
 def fmt_dec1($v):
   (($v * 10 | round) / 10 | tostring) as $s |
@@ -230,7 +253,7 @@ def tier_table_ns($list; $sha; $is_selective):
   "| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ($list[] |
     fmt_ops_bounds(.min_ns; .max_ns) as $ops_b |
-    "| \(rank_cell(.; $sha; $is_selective)) | `\(.name | nbsp)` | **\(.ns_per_op | commify)** | \(.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma(.stddev_ns)) | \(fmt_dec1(.cv_pct))% | \($ops_b[0]) | \($ops_b[1]) | \(.iqr_ns | round | commify) | \(.p95_ns | commify) | \(.p99_ns | commify) | \(.min_ns | commify) | \(.max_ns | commify) | \(fmt_ops_count(.ops)) |"
+    "| \(rank_cell(.; $sha; $is_selective)) | \(bench_link(.name; .lang)) | **\(.ns_per_op | commify)** | \(.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma(.stddev_ns)) | \(fmt_dec1(.cv_pct))% | \($ops_b[0]) | \($ops_b[1]) | \(.iqr_ns | round | commify) | \(.p95_ns | commify) | \(.p99_ns | commify) | \(.min_ns | commify) | \(.max_ns | commify) | \(fmt_ops_count(.ops)) |"
   );
 
 def tier_table_us($list; $sha; $is_selective):
@@ -238,7 +261,7 @@ def tier_table_us($list; $sha; $is_selective):
   "| ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ($list[] |
     fmt_ops_bounds(.min_ns; .max_ns) as $ops_b |
-    "| \(rank_cell(.; $sha; $is_selective)) | `\(.name | nbsp)` | **\(fmt_us(.median_ns))** | \(fmt_us(.mean_ns))\u00a0±\u00a0\(fmt_us(.stddev_ns)) | \(fmt_dec1(.cv_pct))% | \($ops_b[0]) | \($ops_b[1]) | \(fmt_us(.iqr_ns)) | \(fmt_us(.p95_ns)) | \(fmt_us(.p99_ns)) | \(fmt_us(.min_ns)) | \(fmt_us(.max_ns)) | \(fmt_ops_count(.ops)) |"
+    "| \(rank_cell(.; $sha; $is_selective)) | \(bench_link(.name; .lang)) | **\(fmt_us(.median_ns))** | \(fmt_us(.mean_ns))\u00a0±\u00a0\(fmt_us(.stddev_ns)) | \(fmt_dec1(.cv_pct))% | \($ops_b[0]) | \($ops_b[1]) | \(fmt_us(.iqr_ns)) | \(fmt_us(.p95_ns)) | \(fmt_us(.p99_ns)) | \(fmt_us(.min_ns)) | \(fmt_us(.max_ns)) | \(fmt_ops_count(.ops)) |"
   );
 
 def single_lang_section($sec_num; $lang_label; $flags; $sha; $list):
@@ -273,7 +296,7 @@ def compare_1v1_table($list; $zig_map; $unit):
       "\(fmt_us($z.mean_ns))\u00a0±\u00a0\(fmt_us($z.stddev_ns))" as $z_ms |
       fmt_us($o.p95_ns) as $o_p95 |
       fmt_us($z.p95_ns) as $z_p95 |
-      "| \($o.rank) | `\($o.name | nbsp)` | \(if $odin_wins then "**\(fmt_speedup($o.ns_per_op; $z.ns_per_op))**" else fmt_speedup($o.ns_per_op; $z.ns_per_op) end) | \($o_med) | \($z_med) | \($sig_col) | \($o_ms) | \(fmt_dec1($o.cv_pct))% | \($o_p95) | \($z_ms) | \(fmt_dec1($z.cv_pct))% | \($z_p95) |"
+      "| \($o.rank) | \(bench_link($o.name; "1v1")) | \(if $odin_wins then "**\(fmt_speedup($o.ns_per_op; $z.ns_per_op))**" else fmt_speedup($o.ns_per_op; $z.ns_per_op) end) | \($o_med) | \($z_med) | \($sig_col) | \($o_ms) | \(fmt_dec1($o.cv_pct))% | \($o_p95) | \($z_ms) | \(fmt_dec1($z.cv_pct))% | \($z_p95) |"
      else
       (if $odin_wins then "**\($o.ns_per_op | commify)**" else ($o.ns_per_op | commify) end) as $o_med |
       (if $odin_wins then ($z.ns_per_op | commify) else "**\($z.ns_per_op | commify)**" end) as $z_med |
@@ -281,7 +304,7 @@ def compare_1v1_table($list; $zig_map; $unit):
       "\($z.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma($z.stddev_ns))" as $z_ms |
       ($o.p95_ns | commify) as $o_p95 |
       ($z.p95_ns | commify) as $z_p95 |
-      "| \($o.rank) | `\($o.name | nbsp)` | \(if $odin_wins then "**\(fmt_speedup($o.ns_per_op; $z.ns_per_op))**" else fmt_speedup($o.ns_per_op; $z.ns_per_op) end) | \($o_med) | \($z_med) | \($sig_col) | \($o_ms) | \(fmt_dec1($o.cv_pct))% | \($o_p95) | \($z_ms) | \(fmt_dec1($z.cv_pct))% | \($z_p95) |"
+      "| \($o.rank) | \(bench_link($o.name; "1v1")) | \(if $odin_wins then "**\(fmt_speedup($o.ns_per_op; $z.ns_per_op))**" else fmt_speedup($o.ns_per_op; $z.ns_per_op) end) | \($o_med) | \($z_med) | \($sig_col) | \($o_ms) | \(fmt_dec1($o.cv_pct))% | \($o_p95) | \($z_ms) | \(fmt_dec1($z.cv_pct))% | \($z_p95) |"
      end)
   );
 
@@ -291,9 +314,9 @@ def compare_commits_table($list; $prev_map; $prev_sha; $curr_sha; $unit):
   ($list[] | . as $curr | ($prev_map[$curr.name] // null) as $base |
     if $base == null then
       (if $unit == "µs" then
-        "| \($curr.rank) | `\($curr.name | nbsp)` | **NEW** | `—` | — | — | **\(fmt_us($curr.median_ns))** | `—` | — | \(fmt_us($curr.mean_ns))\u00a0±\u00a0\(fmt_us($curr.stddev_ns)) |"
+        "| \($curr.rank) | \(bench_link($curr.name; "odin")) | **NEW** | `—` | — | — | **\(fmt_us($curr.median_ns))** | `—` | — | \(fmt_us($curr.mean_ns))\u00a0±\u00a0\(fmt_us($curr.stddev_ns)) |"
        else
-        "| \($curr.rank) | `\($curr.name | nbsp)` | **NEW** | `—` | — | — | **\($curr.ns_per_op | commify)** | `—` | — | \($curr.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma($curr.stddev_ns)) |"
+        "| \($curr.rank) | \(bench_link($curr.name; "odin")) | **NEW** | `—` | — | — | **\($curr.ns_per_op | commify)** | `—` | — | \($curr.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma($curr.stddev_ns)) |"
        end)
     else
       ([$base.median_ns, 1.0] | max) as $med_a |
@@ -307,9 +330,9 @@ def compare_commits_table($list; $prev_map; $prev_sha; $curr_sha; $unit):
        else "`~NOISE`" end) as $verdict |
       (if $delta_pct >= 0 then "+\(fmt_dec1($delta_pct))%" else "\(fmt_dec1($delta_pct))%" end) as $delta_str |
       (if $unit == "µs" then
-        "| \($curr.rank) | `\($curr.name | nbsp)` | \($verdict) | `\($delta_str)` | \(fmt_speedup($curr.ns_per_op; $base.ns_per_op)) | \(fmt_us($base.median_ns)) | **\(fmt_us($curr.median_ns))** | `\(fmt_dec1($wz))` | \(fmt_us($base.mean_ns))\u00a0±\u00a0\(fmt_us($base.stddev_ns)) | \(fmt_us($curr.mean_ns))\u00a0±\u00a0\(fmt_us($curr.stddev_ns)) |"
+        "| \($curr.rank) | \(bench_link($curr.name; "odin")) | \($verdict) | `\($delta_str)` | \(fmt_speedup($curr.ns_per_op; $base.ns_per_op)) | \(fmt_us($base.median_ns)) | **\(fmt_us($curr.median_ns))** | `\(fmt_dec1($wz))` | \(fmt_us($base.mean_ns))\u00a0±\u00a0\(fmt_us($base.stddev_ns)) | \(fmt_us($curr.mean_ns))\u00a0±\u00a0\(fmt_us($curr.stddev_ns)) |"
        else
-        "| \($curr.rank) | `\($curr.name | nbsp)` | \($verdict) | `\($delta_str)` | \(fmt_speedup($curr.ns_per_op; $base.ns_per_op)) | \($base.ns_per_op | commify) | **\($curr.ns_per_op | commify)** | `\(fmt_dec1($wz))` | \($base.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma($base.stddev_ns)) | \($curr.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma($curr.stddev_ns)) |"
+        "| \($curr.rank) | \(bench_link($curr.name; "odin")) | \($verdict) | `\($delta_str)` | \(fmt_speedup($curr.ns_per_op; $base.ns_per_op)) | \($base.ns_per_op | commify) | **\($curr.ns_per_op | commify)** | `\(fmt_dec1($wz))` | \($base.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma($base.stddev_ns)) | \($curr.mean_ns | round | commify)\u00a0±\u00a0\(fmt_sigma($curr.stddev_ns)) |"
        end)
     end
   );
@@ -373,7 +396,7 @@ compare_1v1_table($paired_heavy; $zig_map; "µs"),
 "| # | Benchmark | Ops | Odin\u00a0Size | Zig\u00a0Size |",
 "| ---: | :--- | ---: | ---: | ---: |",
 ($odin_list[] | select(.bytes_used > 0) | . as $o | ($zig_map[$o.name] // null) as $z |
-  "| \($o.rank) | `\($o.name | nbsp)` | \(fmt_ops_count($o.ops)) | \(fmt_kb($o.bytes_used)) | \(if $z != null and $z.bytes_used > 0 then fmt_kb($z.bytes_used) else "—" end) |"
+  "| \($o.rank) | \(bench_link($o.name; "odin")) | \(fmt_ops_count($o.ops)) | \(fmt_kb($o.bytes_used)) | \(if $z != null and $z.bytes_used > 0 then fmt_kb($z.bytes_used) else "—" end) |"
 )
 ' "${INPUT_FILES[@]}")
 
