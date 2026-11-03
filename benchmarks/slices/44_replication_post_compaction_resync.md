@@ -1,6 +1,6 @@
 # #44. `Replication (Post-compaction resync)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices & Cross-Language Guide](README.md) · [Odin Harness (`bench_xitdb.odin#L1523-L1548`)](../bench_xitdb.odin#L1523-L1548) · [Zig Harness (`bench_xitdb.zig#L1605-L1635`)](../bench_xitdb.zig#L1605-L1635)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 06: CoreBufferedFile Hot-Tail Retention & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) · [Odin Harness (`bench_xitdb.odin#L1523-L1548`)](../bench_xitdb.odin#L1523-L1548) · [Zig Harness (`bench_xitdb.zig#L1605-L1635`)](../bench_xitdb.zig#L1605-L1635)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -13,15 +13,17 @@
 
 ## 2. Architectural Comparison: Odin Optimizations & Idiomatic Zig Improvements
 
+> **Deep-Dive Implementation Guide:** See [**Guide 06: CoreBufferedFile Hot-Tail Retention & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) for complete side-by-side `xitdb/*.odin` vs. `lib.zig` code examples and drop-in Zig `0.17` updates.
+
 ### What Odin Does Differently (`xitdb/*.odin`)
 
-- **Direct Slice Streaming in Replication ([`xitdb/compact_replicate.odin#L15-L148`](../../xitdb/compact_replicate.odin#L15-L148)):** On `#39 Replication (genesis -> 200 moments)` (**10.04x faster in Odin**) and `#40 Incremental 1-moment delta` (**2.25x faster**), Odin's `database_read_committed_bytes` and `database_apply_replicated_bytes` copy committed byte ranges directly between buffers and verify the 25-byte `Root_Trailer` CRC-64/XZ in place, avoiding `std.Io.Reader.stream` / `std.Io.Writer.drain` 256-byte chunking.
-- **Flat Open-Addressed `Memory_Offset_Map` & Buffered `File_Offset_Map` ([`xitdb/compact_replicate.odin#L150-L260`](../../xitdb/compact_replicate.odin#L150-L260)):** On `#41` (**2.05x faster**) and `#42` (**1.47x faster**), Odin pre-sizes the offset map and copies index blocks in single `core_read_exact` / `core_write_all` transfers.
+- **Direct Slice Copy in Replication ([`xitdb/compact_replicate.odin#L775-L887`](../../xitdb/compact_replicate.odin#L775-L887)):** On `#39 Replication (genesis -> 200 moments)` (**10.04x faster in Odin**) and `#40 Incremental 1-moment delta` (**2.25x faster**), Odin copies committed byte slices directly between buffers and verifies the 25-byte `Root_Trailer` CRC-64/XZ without unbuffered `std.Io` vtable streaming.
+- **Batch Output Writes & `0..<num` Traversal in Compaction ([`xitdb/compact_replicate.odin#L106-L773`](../../xitdb/compact_replicate.odin#L106-L773)):** On `#41` (**2.05x faster**) and `#42` (**1.47x faster**), Odin formats compacted blocks in stack buffers and visits `0 ..< num` active B-Tree slots, whereas `Compactor` in [`lib.zig#L4714-L4911`](../../reference/xitdb-zig/src/lib.zig#L4714-L4911) writes remapped slots via per-element `writeInt` calls and loops over all 16 slots.
 
 ### Suggested Zig Improvements (`reference/xitdb-zig/src/lib.zig` — Preserving Readability & Zero Code Explosion)
 
-- **Increase stream buffer size or slice directly in `readCommitted` / `applyReplicated` ([`lib.zig#L592-L637`](../../reference/xitdb-zig/src/lib.zig#L592-L637)):** Streaming via `CoreMemory`'s 256-byte `std.Io` buffer breaks a 250 KB replication delta into ~1,000 virtual `stream`/`drain` calls; exposing a direct slice fast path (or a 64 KB buffer) removes that overhead.
-- **Apply the B-Tree / Sorted-Node batch read optimization in `Compactor` ([`lib.zig#L4620-L4760`](../../reference/xitdb-zig/src/lib.zig#L4620-L4760)):** `Compactor.compactBTreeNode` and `compactSortedNode` call `readBTreeNode`/`readSortedNode` and `writeBTreeNodeAt`/`writeSortedNodeAt`, so batch-reading nodes speeds up compaction as well.
+- **Keep `std.AutoHashMap(u64, u64)` in `compact` ([`lib.zig#L650-L709`](../../reference/xitdb-zig/src/lib.zig#L650-L709)):** Zig's SwissTable `AutoHashMap` already gives Zig a **1.15x lead** on `#43`—keep it unchanged.
+- **Use `std.Io.Reader.fixed` in `CoreMemory` ([`lib.zig#L4993-L5003`](../../reference/xitdb-zig/src/lib.zig#L4993-L5003)) & batch-write remapped slots in `Compactor` ([`lib.zig#L4714-L4911`](../../reference/xitdb-zig/src/lib.zig#L4714-L4911)):** Eliminates vtable overhead in `readCommitted` / `applyReplicated` (`#39–#40`) and makes `Compactor` even faster by visiting `0..header.num` and writing each compacted node in one `writeAll`.
 
 ---
 
@@ -102,11 +104,12 @@
 
 | Zig Symbol / Section | Lines | Role in `reference/xitdb-zig/src/lib.zig` | Source Link |
 | :--- | ---: | :--- | :--- |
-| `Compactor` | 406 | Reachability-based garbage-collecting compactor (`MemoryOffsetMap` / `FileOffsetMap`) | [`lib.zig#L4508-L4913`](../../reference/xitdb-zig/src/lib.zig#L4508-L4913) |
+| `compact` | 60 | Top-level `Database.compact` reachability-copy entry point | [`lib.zig#L650-L709`](../../reference/xitdb-zig/src/lib.zig#L650-L709) |
+| `Compactor` | 406 | Reachability-based garbage-collecting compactor (`std.AutoHashMap` / custom `OffsetMap`) | [`lib.zig#L4508-L4913`](../../reference/xitdb-zig/src/lib.zig#L4508-L4913) |
 | `readCommitted` | 16 | Committed byte-range streaming for incremental replication | [`lib.zig#L592-L607`](../../reference/xitdb-zig/src/lib.zig#L592-L607) |
 | `applyReplicated` | 25 | Replica byte-stream application and root trailer verification | [`lib.zig#L613-L637`](../../reference/xitdb-zig/src/lib.zig#L613-L637) |
-| `CoreMemory` | 110 | In-memory `ArrayList(u8)` storage backend with `std.Io.Reader`/`Writer` vtable | [`lib.zig#L4918-L5027`](../../reference/xitdb-zig/src/lib.zig#L4918-L5027) |
-| `CoreBufferedFile` | 153 | Write-buffered OS file backend | [`lib.zig#L5068-L5220`](../../reference/xitdb-zig/src/lib.zig#L5068-L5220) |
+| `CoreMemory` | 111 | In-memory `Writer.Allocating` backend with unbuffered `.buffer = &.{}` `std.Io` vtables | [`lib.zig#L4917-L5027`](../../reference/xitdb-zig/src/lib.zig#L4917-L5027) |
+| `CoreBufferedFile` | 166 | Contiguous tail-buffered OS file backend (`flush` clears buffer on `sync`) | [`lib.zig#L5067-L5232`](../../reference/xitdb-zig/src/lib.zig#L5067-L5232) |
 
 ### Reached Odin Procedures (`42` procedures across `4` files · `968` LOC)
 

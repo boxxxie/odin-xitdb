@@ -1,6 +1,6 @@
 # #15. `Array_List (Radix Trie) random get` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices & Cross-Language Guide](README.md) · [Odin Harness (`bench_xitdb.odin#L830-L845`)](../bench_xitdb.odin#L830-L845) · [Zig Harness (`bench_xitdb.zig#L865-L880`)](../bench_xitdb.zig#L865-L880)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 01: Zero-Vtable CoreMemory Reads & takeInt Fast Path**](../zig-guide/01_core_memory_zero_vtable_io.md) · [Odin Harness (`bench_xitdb.odin#L830-L845`)](../bench_xitdb.odin#L830-L845) · [Zig Harness (`bench_xitdb.zig#L865-L880`)](../bench_xitdb.zig#L865-L880)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -13,15 +13,16 @@
 
 ## 2. Architectural Comparison: Odin Optimizations & Idiomatic Zig Improvements
 
+> **Deep-Dive Implementation Guide:** See [**Guide 01: Zero-Vtable CoreMemory Reads & takeInt Fast Path**](../zig-guide/01_core_memory_zero_vtable_io.md) for complete side-by-side `xitdb/*.odin` vs. `lib.zig` code examples and drop-in Zig `0.17` updates.
+
 ### What Odin Does Differently (`xitdb/*.odin`)
 
-- **Direct Slice-Backed `Core_Memory` Reads & Writes ([`xitdb/core.odin#L125-L192`](../../xitdb/core.odin#L125-L192), [`xitdb/hamt.odin#L345-L452`](../../xitdb/hamt.odin#L345-L452)):** Odin's `read_array_list_slot` and `read_array_list_slot_append` decode the 9-byte `Slot` directly from the in-memory `Core_Memory` buffer (`endian.unchecked_get_u64be`), whereas Zig's [`readArrayListSlot`](../../reference/xitdb-zig/src/lib.zig#L1856-L1904) instantiates `self.core.reader()` (a 256-byte buffered `std.Io.Reader`) and resets its stream window on every `seekTo`.
-- **Stack-Allocated `Cursor_Iterator` Without Per-Step Vtable Seeks ([`xitdb/cursor.odin#L630-L810`](../../xitdb/cursor.odin#L630-L810)):** On `#16 Array_List iterator scan` (**13 ns vs 33 ns**) and `#18 index-seek page(10)` (**4.45x faster in Odin**), Odin reads the 144-byte `index_block` once per radix node into the iterator's stack frame and steps through the 16 slots in memory.
+- **Zero-Vtable `Core_Memory` Slice Reads ([`xitdb/core.odin#L326-L340`](../../xitdb/core.odin#L326-L340), [`xitdb/hamt.odin#L345-L452`](../../xitdb/hamt.odin#L345-L452)):** Odin's `read_array_list_slot` decodes 9-byte `Slot`s directly from `Core_Memory.buf`, whereas Zig's [`CoreMemory.reader()`](../../reference/xitdb-zig/src/lib.zig#L4993-L5003) initializes `std.Io.Reader` with `.buffer = &.{}` (empty slice). Because `.buffer` is empty, every `takeInt` in `readArrayListSlot` misses `std.Io.Reader`'s inline fast path and dispatches through `vtable.readVec` → `CoreMemory.Reader.stream` → `Writer.fixed.drain` (two virtual calls per integer).
+- **Stack-Allocated `Cursor_Iterator` ([`xitdb/cursor.odin#L633-L1028`](../../xitdb/cursor.odin#L633-L1028)):** On `#16 Array_List iterator scan` (**13 ns vs 33 ns**) and `#18 index-seek page(10)` (**4.45x faster in Odin**), Odin decodes each 144-byte `index_block` directly from memory without per-slot `std.Io` vtable calls.
 
 ### Suggested Zig Improvements (`reference/xitdb-zig/src/lib.zig` — Preserving Readability & Zero Code Explosion)
 
-- **Use `std.Io.Reader.fixed` in `CoreMemory.reader()` ([`lib.zig#L4993-L5003`](../../reference/xitdb-zig/src/lib.zig#L4993-L5003)):** Pointing `std.Io.Reader` directly at `self.bytes.items[offset..]` eliminates the 256-byte `stream()` vtable copy on every `seekTo` + `takeInt` in `readArrayListSlot`.
-- **Combine slot clear + value write in `readArrayListSlotAppend` ([`lib.zig#L1841-L1846`](../../reference/xitdb-zig/src/lib.zig#L1841-L1846)):** When `ArrayList.append` is followed immediately by `.write`, skip writing the temporary empty slot before `.write` overwrites the exact same 9 bytes.
+- **Use `std.Io.Reader.fixed` in `CoreMemory.reader()` ([`lib.zig#L4993-L5003`](../../reference/xitdb-zig/src/lib.zig#L4993-L5003)):** Setting `self.interface = .fixed(self.parent.buffer.written())` (refreshed in `seekTo()`) lets `takeInt` and `readSliceAll` execute inline with zero vtable calls (`-12 net LOC`, removing `CoreMemory.Reader.stream`).
 
 ---
 
@@ -83,7 +84,7 @@
 | `readArrayListSlot` | 49 | 16-way Radix Trie O(log16 N) slot descent and CoW path copy | [`lib.zig#L1856-L1904`](../../reference/xitdb-zig/src/lib.zig#L1856-L1904) |
 | `readArrayListSlice` | 37 | 16-way Radix Trie truncation and root depth collapse | [`lib.zig#L1906-L1942`](../../reference/xitdb-zig/src/lib.zig#L1906-L1942) |
 | `Cursor` | 864 | Read/Write `Cursor`, `Cursor.Reader`, `Cursor.Writer`, and `Cursor.Iterator` | [`lib.zig#L2956-L3819`](../../reference/xitdb-zig/src/lib.zig#L2956-L3819) |
-| `CoreMemory` | 110 | In-memory `ArrayList(u8)` storage backend with `std.Io.Reader`/`Writer` vtable | [`lib.zig#L4918-L5027`](../../reference/xitdb-zig/src/lib.zig#L4918-L5027) |
+| `CoreMemory` | 111 | In-memory `Writer.Allocating` backend with unbuffered `.buffer = &.{}` `std.Io` vtables | [`lib.zig#L4917-L5027`](../../reference/xitdb-zig/src/lib.zig#L4917-L5027) |
 
 ### Reached Odin Procedures (`23` procedures across `6` files · `431` LOC) (Active `_exec_path_part` arms: `Array_List_Get`)
 

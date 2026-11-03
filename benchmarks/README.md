@@ -98,9 +98,10 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 
 ## Reference Results (`-o:speed -microarch:native`, `Core_Memory`)
 
-> **Interactive Code Links & Per-Benchmark Library Slices:**
+> **Interactive Code Links, Per-Benchmark Slices & Idiomatic Zig Guide:**
 > - Click any **benchmark title** in the tables below to jump directly to its highlighted implementation block (`#L<start>-L<end>`) in [`bench_xitdb.odin`](bench_xitdb.odin) or [`bench_xitdb.zig`](bench_xitdb.zig).
-> - Click **`[🔍 <N>p]`** next to any benchmark (or browse the [**Per-Benchmark Code Slices Index (`slices/README.md`)**](slices/README.md)) to inspect the exact `xitdb/*.odin` procedures and call graph touched by that benchmark.
+> - Click **`[🔍 <N>p]`** next to any benchmark (or browse [**Per-Benchmark Code Slices (`slices/README.md`)**](slices/README.md)) to inspect the exact `xitdb/*.odin` procedures, `lib.zig` equivalents, and architectural notes for that benchmark.
+> - Read the [**Idiomatic Zig Optimization Guide (`zig-guide/README.md`)**](zig-guide/README.md) for six standalone, peer-engineering deep dives ([`01 CoreMemory`](zig-guide/01_core_memory_zero_vtable_io.md) · [`02 LinkedArrayList`](zig-guide/02_btree_node_batch_io_and_leaf_seek.md) · [`03 SortedMap`](zig-guide/03_sorted_bptree_binary_search.md) · [`04 HAMT`](zig-guide/04_hamt_single_pass_kv_and_lazy_remove.md) · [`05 Cursor & Paths`](zig-guide/05_cursor_bytes_streams_and_paths.md) · [`06 CoreBufferedFile & Compactor`](zig-guide/06_buffered_file_tail_cache_and_compaction.md)) showing how to achieve the same speedups in Zig `0.17` in ~140 net LOC without sacrificing readability or wire compatibility.
 
 <!-- BEGIN_BENCHMARK_TABLE -->
 ### 1. Latest Code-Change Impact & Affected Benchmarks (`2d6f9a7120f3` → `40c719e2b02d`, Odin, 8 / 75 tests re-run)
