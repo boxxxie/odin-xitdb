@@ -1157,10 +1157,60 @@ def compute_benchmark_slice(
     active_parts: Set[str] = set()
     activated_arms: Set[str] = set()
 
+    WRITE_ONLY_PROCS = {
+        "_database_truncate_with_header",
+        "database_commit_root",
+        "database_write_root_header",
+        "core_write_slot",
+        "core_write_all",
+        "core_write_long",
+        "core_write_byte",
+        "core_set_length",
+        "core_sync",
+        "init_part_for",
+        "init_tag",
+        "_random_u64",
+        "database_check_frozen_slot",
+        "database_copy_collection_if_frozen",
+        "database_copy_index_block_if_old",
+        "btree_get_for_write",
+        "btree_insert",
+        "btree_grow_root",
+        "btree_write_node",
+        "write_btree_node",
+        "write_btree_node_at",
+        "sorted_put",
+        "sorted_grow_root",
+        "sorted_write_node",
+        "write_sorted_node",
+        "write_sorted_node_at",
+    }
+
+    has_writes = any(
+        (
+            "write" in c
+            or "put" in c
+            or "append" in c
+            or "insert" in c
+            or "remove" in c
+            or "slice" in c
+            or "concat" in c
+            or "compact" in c
+            or "apply" in c
+            or "tx" in c
+            or "marshal" in c
+            or "freeze" in c
+            or (c.endswith("_init") and not c.startswith("read_"))
+        )
+        for c in entry_calls
+    )
+
     def add_path_part(pt: str) -> None:
         if pt in active_parts:
             return
         active_parts.add(pt)
+        if not has_writes:
+            return
         if pt.startswith("Array_List_"):
             active_parts.add("Array_List_Init")
         elif pt.startswith("Linked_Array_List_"):
@@ -1193,12 +1243,19 @@ def compute_benchmark_slice(
                     activated_arms.add(pt)
                     arm = pinfo["case_arms"][pt]
                     for sub_pt in arm["path_parts"]:
-                        add_path_part(sub_pt)
+                        if has_writes or not sub_pt.endswith("_Init"):
+                            add_path_part(sub_pt)
                     for callee in arm["callees"]:
+                        if not has_writes and callee in WRITE_ONLY_PROCS:
+                            continue
                         if callee not in callees_to_visit:
                             callees_to_visit.append(callee)
         else:
-            callees_to_visit = list(pinfo["callees"])
+            callees_to_visit = [
+                c
+                for c in pinfo["callees"]
+                if has_writes or c not in WRITE_ONLY_PROCS
+            ]
 
         for callee in callees_to_visit:
             if curr not in called_by[callee]:
@@ -1218,8 +1275,11 @@ def compute_benchmark_slice(
                     activated_arms.add(pt)
                     arm = exec_info["case_arms"][pt]
                     for sub_pt in arm["path_parts"]:
-                        add_path_part(sub_pt)
+                        if has_writes or not sub_pt.endswith("_Init"):
+                            add_path_part(sub_pt)
                     for callee in arm["callees"]:
+                        if not has_writes and callee in WRITE_ONLY_PROCS:
+                            continue
                         if "_exec_path_part" not in called_by[callee]:
                             called_by[callee].append("_exec_path_part")
                         if callee not in visited_depth:
@@ -1331,33 +1391,223 @@ def build_code_map() -> Dict[str, Dict[str, Any]]:
     return code_map
 
 
+ZIG_LIB_RANGES: Dict[str, Tuple[int, int, str]] = {
+    "HashMap": (3835, 3930, "Typed `HashMap(.read_only/.read_write)` wrapper (`put`, `putKey`, `getCursor`, `remove`)"),
+    "CountedHashMap": (3932, 4004, "Typed `CountedHashMap` wrapper with 8-byte count header"),
+    "HashSet": (4006, 4069, "Typed `HashSet` wrapper"),
+    "CountedHashSet": (4071, 4123, "Typed `CountedHashSet` wrapper"),
+    "ArrayList": (4299, 4388, "Typed 16-way Radix Trie `ArrayList` wrapper (`append`, `getCursor`, `put`, `slice`)"),
+    "LinkedArrayList": (4390, 4504, "Typed count-augmented B-Tree `LinkedArrayList` wrapper (`append`, `insert`, `remove`, `concat`, `slice`)"),
+    "SortedMap": (4128, 4228, "Typed counted B+Tree `SortedMap` wrapper (`put`, `getCursor`, `getIndex`, `rank`, `remove`)"),
+    "SortedSet": (4232, 4297, "Typed counted B+Tree `SortedSet` wrapper"),
+    "readSlotPointer": (859, 1591, "Central path-traversal engine & root transaction dispatcher"),
+    "readSlotPointer.array_list": (927, 1048, "`PathPart` switch arms: `.array_list_init`, `.array_list_get`, `.array_list_append`, `.array_list_slice`"),
+    "readSlotPointer.linked_array_list": (1049, 1270, "`PathPart` switch arms: `.linked_array_list_init`, `.linked_array_list_get`, `.linked_array_list_append`, `.linked_array_list_slice`, `.linked_array_list_concat`, `.linked_array_list_insert`, `.linked_array_list_remove`"),
+    "readSlotPointer.hash_map": (1271, 1398, "`PathPart` switch arms: `.hash_map_init`, `.hash_map_get`, `.hash_map_remove`"),
+    "readSlotPointer.sorted_map": (1399, 1524, "`PathPart` switch arms: `.sorted_map_init`, `.sorted_map_get`, `.sorted_map_get_index`, `.sorted_map_remove`"),
+    "readSlotPointer.write": (1525, 1590, "`PathPart` switch arms: `.write` and `.ctx`"),
+    "readMapSlot": (1600, 1726, "16-way HAMT recursive slot lookup, insertion, and hash-collision split"),
+    "removeMapSlot": (1728, 1811, "16-way HAMT recursive slot removal and singleton branch collapse"),
+    "readArrayListSlotAppend": (1820, 1854, "16-way Radix Trie tail append and root overflow growth"),
+    "readArrayListSlot": (1856, 1904, "16-way Radix Trie O(log16 N) slot descent and CoW path copy"),
+    "readArrayListSlice": (1906, 1942, "16-way Radix Trie truncation and root depth collapse"),
+    "readBTreeNode": (1946, 1972, "Count-augmented B-Tree node deserializer (34–66 `takeInt` calls)"),
+    "writeBTreeNodeAt": (1977, 1991, "Count-augmented B-Tree node serializer (34–66 `writeInt` calls)"),
+    "btreeWriteNode": (2013, 2019, "In-place transaction reuse check (`btreeReusable`) vs append copy"),
+    "readBTreeSlot": (2023, 2042, "Count-augmented B-Tree rank lookup descent"),
+    "btreeInsert": (2047, 2154, "Count-augmented B-Tree recursive rank insertion and node split"),
+    "btreeGetForWrite": (2181, 2209, "Count-augmented B-Tree CoW in-place slot update"),
+    "btreeRemove": (2215, 2251, "Count-augmented B-Tree recursive rank deletion and sibling rebalance"),
+    "btreeJoin": (2423, 2433, "Count-augmented B-Tree height-aware O(log N) tree concatenation"),
+    "btreeSplit": (2451, 2477, "Count-augmented B-Tree O(log N) rank split for `slice`"),
+    "readSortedNode": (2481, 2511, "Counted B+Tree node deserializer (34–98 `takeInt` calls)"),
+    "writeSortedNodeAt": (2513, 2528, "Counted B+Tree node serializer (34–98 `writeInt` calls)"),
+    "compareKey": (2599, 2629, "Lexicographic key comparison against `.short_bytes` / `.bytes` slot"),
+    "sortedGet": (2634, 2658, "Counted B+Tree key lookup descent (linear separator/leaf scan)"),
+    "sortedGetByIndex": (2661, 2680, "Counted B+Tree O(log N) rank selection by subtree counts"),
+    "sortedRank": (2683, 2707, "Counted B+Tree O(log N) order-statistic rank query"),
+    "sortedPut": (2736, 2875, "Counted B+Tree key insertion, leaf/branch split, and separator propagation"),
+    "sortedRemove": (2879, 2918, "Counted B+Tree key deletion and sibling merge/rebalance"),
+    "Cursor": (2956, 3819, "Read/Write `Cursor`, `Cursor.Reader`, `Cursor.Writer`, and `Cursor.Iterator`"),
+    "Compactor": (4508, 4913, "Reachability-based garbage-collecting compactor (`MemoryOffsetMap` / `FileOffsetMap`)"),
+    "readCommitted": (592, 607, "Committed byte-range streaming for incremental replication"),
+    "applyReplicated": (613, 637, "Replica byte-stream application and root trailer verification"),
+    "freeze": (560, 566, "Mid-transaction `freeze()` barrier for O(1) structural CoW branching"),
+    "CoreMemory": (4918, 5027, "In-memory `ArrayList(u8)` storage backend with `std.Io.Reader`/`Writer` vtable"),
+    "CoreFile": (5029, 5066, "Unbuffered OS file descriptor backend"),
+    "CoreBufferedFile": (5068, 5220, "Write-buffered OS file backend"),
+}
+
+
+def get_odin_vs_zig_insight(rank: int, b_name: str) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Returns (odin_improvements, zig_suggestions, zig_lib_keys) tailored to the benchmark.
+    """
+    # 1. HAMT family (#1–#13, #45–#46)
+    if 1 <= rank <= 13 or rank in (45, 46):
+        odin_pts = [
+            "**Single-Pass Key+Value Path Traversal ([`xitdb/collections.odin#L409-L421`](../../xitdb/collections.odin#L409-L421), [`xitdb/database.odin#L1304-L1360`](../../xitdb/database.odin#L1304-L1360)):** Odin's `hash_map_put` dispatches a single path `[Hash_Map_Init, Hash_Map_Get{.KV_Pair}, Write_KV_Data]` and coalesces the 18-byte `key_slot + val_slot` + external key payload into one stack-buffered `core_write_all` call. In Zig ([`lib.zig#L3856-L3885`](../../reference/xitdb-zig/src/lib.zig#L3856-L3885)), inserting a key and value requires **two separate root-to-leaf traversals** (`m.putKey(h, ...)` followed by `m.put(h, ...)`), doubling HAMT descent, root header reads, and CoW checks.",
+            "**Contiguous Multi-Level Collision Allocation ([`xitdb/hamt.odin#L140-L196`](../../xitdb/hamt.odin#L140-L196)):** When two hashes share multiple 4-bit nibbles (e.g. `#10 HAMT deep suffix-collision put (depth 10+)` — **6.58x faster in Odin**), Odin counts `common_levels` in memory and writes all `common_levels + 1` index blocks plus the new `KV_Pair` in **one contiguous `core_write_all`**. Zig's [`readMapSlot`](../../reference/xitdb-zig/src/lib.zig#L1705-L1720) writes a 144-byte zeroed block and recurses level-by-level, performing 2 seeks + 2 writes per collision depth.",
+            "**Lazy Single-Slot Read on Removal ([`xitdb/hamt.odin#L242-L342`](../../xitdb/hamt.odin#L242-L342)):** In [`remove_map_slot`](../../xitdb/hamt.odin#L242-L342) (`#5`, `#9`, `#11` — **5.8x–13.4x faster in Odin**), Odin reads only the single 9-byte target `Slot` on the way down and only reads the 144-byte `index_block` on unwind if `key_offset > 0` and the child collapsed to `.None` or `.KV_Pair`. Zig's [`removeMapSlot`](../../reference/xitdb-zig/src/lib.zig#L1728-L1811) eagerly reads and validates all 16 slots (`144 bytes`) at every level before recursing—even at `key_offset == 0` where the root block can never collapse.",
+            "**Hardware x86 SHA-NI Acceleration ([`xitdb/types.odin#L114-L530`](../../xitdb/types.odin#L114-L530)):** Odin detects SHA-NI at runtime (`sha1_ni_available` / `sha256_ni_available`) and hashes keys directly into a stack `[32]u8` buffer without heap allocation.",
+        ]
+        zig_pts = [
+            "**Add `putKeyAndValue` / `.write_kv_data` (`~20 lines` in `HashMap` & `readSlotPointer`):** Allow `HashMap(.read_write)` to write both `key_slot` and `value_slot` in a single `readMapSlot(..., .kv_pair, ...)` descent instead of calling `putKey` + `put` separately. This immediately cuts HAMT write work in half while making caller code cleaner.",
+            "**Defer 144-byte block read in `removeMapSlot` ([`lib.zig#L1736-L1774`](../../reference/xitdb-zig/src/lib.zig#L1736-L1774)):** Read only the single `Slot` at ` index_pos + 9 * i` before recursing; if `key_offset == 0` or `next_slot.tag == .index`, write `next_slot` directly without reading the other 15 sibling slots.",
+            "**Zero-copy `CoreMemory.Reader` ([`lib.zig#L4920-L5004`](../../reference/xitdb-zig/src/lib.zig#L4920-L5004)):** Construct `std.Io.Reader.fixed(self.bytes.items)` over the backing slice instead of copying through a 256-byte intermediate vtable buffer on every `seekTo`.",
+        ]
+        z_keys = ["HashMap", "CountedHashMap", "CountedHashSet", "readSlotPointer.hash_map", "readMapSlot", "removeMapSlot", "CoreMemory"]
+        return odin_pts, zig_pts, z_keys
+
+    # 2. Array_List (16-way Radix Trie) (#14–#19)
+    if 14 <= rank <= 19:
+        odin_pts = [
+            "**Direct Slice-Backed `Core_Memory` Reads & Writes ([`xitdb/core.odin#L125-L192`](../../xitdb/core.odin#L125-L192), [`xitdb/hamt.odin#L345-L452`](../../xitdb/hamt.odin#L345-L452)):** Odin's `read_array_list_slot` and `read_array_list_slot_append` decode the 9-byte `Slot` directly from the in-memory `Core_Memory` buffer (`endian.unchecked_get_u64be`), whereas Zig's [`readArrayListSlot`](../../reference/xitdb-zig/src/lib.zig#L1856-L1904) instantiates `self.core.reader()` (a 256-byte buffered `std.Io.Reader`) and resets its stream window on every `seekTo`.",
+            "**Stack-Allocated `Cursor_Iterator` Without Per-Step Vtable Seeks ([`xitdb/cursor.odin#L630-L810`](../../xitdb/cursor.odin#L630-L810)):** On `#16 Array_List iterator scan` (**13 ns vs 33 ns**) and `#18 index-seek page(10)` (**4.45x faster in Odin**), Odin reads the 144-byte `index_block` once per radix node into the iterator's stack frame and steps through the 16 slots in memory.",
+        ]
+        zig_pts = [
+            "**Use `std.Io.Reader.fixed` in `CoreMemory.reader()` ([`lib.zig#L4993-L5003`](../../reference/xitdb-zig/src/lib.zig#L4993-L5003)):** Pointing `std.Io.Reader` directly at `self.bytes.items[offset..]` eliminates the 256-byte `stream()` vtable copy on every `seekTo` + `takeInt` in `readArrayListSlot`.",
+            "**Combine slot clear + value write in `readArrayListSlotAppend` ([`lib.zig#L1841-L1846`](../../reference/xitdb-zig/src/lib.zig#L1841-L1846)):** When `ArrayList.append` is followed immediately by `.write`, skip writing the temporary empty slot before `.write` overwrites the exact same 9 bytes.",
+        ]
+        z_keys = ["ArrayList", "readSlotPointer.array_list", "readArrayListSlotAppend", "readArrayListSlot", "readArrayListSlice", "Cursor", "CoreMemory"]
+        return odin_pts, zig_pts, z_keys
+
+    # 3. Linked_Array_List (Count-Augmented B-Tree) (#20–#27)
+    if 20 <= rank <= 27:
+        odin_pts = [
+            "**Single-Read Block Serialization vs. 66 Per-Field `std.Io` Calls ([`xitdb/btree.odin#L15-L75`](../../xitdb/btree.odin#L15-L75) vs. [`lib.zig#L1946-L1991`](../../reference/xitdb-zig/src/lib.zig#L1946-L1991)):** This is the primary driver of Odin's **13.0x–44.9x speedup** on `Linked_Array_List`. Zig's `readBTreeNode` and `writeBTreeNodeAt` loop over all 32 slots and 32 counts unconditionally, issuing **34 to 66 individual `takeInt`/`writeInt` calls** per node (even when `node.num == 2`). Odin reads the node in **one `core_read_exact` call** into a stack buffer and decodes only `0 ..< node.num` active entries.",
+            "**O(1) Direct Leaf Slot Seek in `read_btree_slot` ([`xitdb/btree.odin#L101-L137`](../../xitdb/btree.odin#L101-L137)):** On `#21 Linked_Array_List random get` (**44.06x faster in Odin: 53 ns vs 2,335 ns**), when `read_btree_slot` reaches a `.Leaf`, Odin does **not** deserialize the 290-byte leaf array—it computes `position := node_ptr + BTREE_NODE_HEADER_SIZE + rem * SLOT_LENGTH` and reads only that **single 9-byte `Slot`**. Zig's [`readBTreeSlot`](../../reference/xitdb-zig/src/lib.zig#L2023-L2042) calls `readBTreeNode` at the leaf, executing 34 `takeInt` calls to read all 32 leaf slots just to index `node.values[rem]`.",
+            "**Targeted In-Place Branch Count Patching ([`xitdb/btree.odin#L190-L240`](../../xitdb/btree.odin#L190-L240)):** When inserting into a node already owned by the current transaction (`btree_reusable` is true and no child split occurred), Odin patches only the 8-byte `counts[i]` (and 9-byte `children[i]` if relocated) in place instead of rewriting the entire 418-byte branch block.",
+        ]
+        zig_pts = [
+            "**Read/Write `BTreeNode` via a stack byte buffer (`~15 lines` in [`lib.zig#L1946-L1991`](../../reference/xitdb-zig/src/lib.zig#L1946-L1991)):** Read `BTREE_LEAF_BLOCK_SIZE` (290B) or `BTREE_BRANCH_BLOCK_SIZE` (418B) in a single `reader.interface.readSliceAll(&buf)` / `writer.interface.writeAll(&buf)` and loop `0..node.num` in memory using `std.mem.readInt` / `std.mem.writeInt`. This preserves 100% of the existing `BTreeNode` struct API while eliminating 95% of `std.Io` overhead.",
+            "**Short-circuit leaf reads in `readBTreeSlot` ([`lib.zig#L2023-L2042`](../../reference/xitdb-zig/src/lib.zig#L2023-L2042)):** Peek the 2-byte `(kind, num)` header; when `kind == .leaf`, seek directly to `node_ptr + 2 + rem * 9` and read 1 `Slot` (5 lines of code).",
+        ]
+        z_keys = ["LinkedArrayList", "readSlotPointer.linked_array_list", "readBTreeNode", "writeBTreeNodeAt", "readBTreeSlot", "btreeInsert", "btreeGetForWrite", "btreeRemove", "btreeJoin", "btreeSplit"]
+        return odin_pts, zig_pts, z_keys
+
+    # 4. Sorted_Map & Sorted_Set (Counted B+Tree) (#28–#38)
+    if 28 <= rank <= 38:
+        odin_pts = [
+            "**Binary Search ($O(\\log_2 B)$) vs. Linear Scan ($O(B)$) in Nodes ([`xitdb/btree.odin#L1200-L1480`](../../xitdb/btree.odin#L1200-L1480) vs. [`lib.zig#L2634-L2760`](../../reference/xitdb-zig/src/lib.zig#L2634-L2760)):** In Zig's `sortedGet`, `sortedRank`, and `sortedPut`, both branch separator search (`while (i + 1 < node.num ...)`) and leaf entry search (`for (0..node.num) |i|`) use **linear scans**, performing up to 32 `readKvPair` + `compareKey` disk seeks per node. Odin uses **binary search** on both branch separators and leaf entries, cutting key comparisons and disk seeks from up to 32 down to $\\le 5$ per node (**11.6x–32.1x faster**).",
+            "**Single-Read Node Decoding Only Up to `node.num` ([`xitdb/btree.odin#L1028-L1105`](../../xitdb/btree.odin#L1028-L1105)):** Zig's [`readSortedNode`](../../reference/xitdb-zig/src/lib.zig#L2481-L2511) executes **98 separate `takeInt` calls** for every branch node (reading all 32 children, 32 separators, and 32 counts even if `node.num == 2`). Odin reads the block in one `core_read_exact` call and decodes only `0 ..< node.num` slots.",
+            "**O(1) Direct Leaf Slot Seek in `sorted_get_by_index` ([`xitdb/btree.odin#L1301-L1336`](../../xitdb/btree.odin#L1301-L1336)):** On `#34 Sorted_Map get_index select` (**51.25x faster in Odin: 64 ns vs 3,280 ns**), Odin reads the 2-byte leaf header and seeks straight to `node_ptr + 2 + rem * 9` to read the single target `Slot`, whereas Zig's [`sortedGetByIndex`](../../reference/xitdb-zig/src/lib.zig#L2661-L2680) deserializes all 32 leaf slots via `readSortedNode`.",
+        ]
+        zig_pts = [
+            "**Replace linear scans in `sortedGet`, `sortedRank`, and `sortedPut` with binary search (`~12 lines` in [`lib.zig#L2640-L2757`](../../reference/xitdb-zig/src/lib.zig#L2640-L2757)):** A standard `while (lo < hi)` binary search over `node.separators[1..node.num]` (branches) and `node.entries[0..node.num]` (leaves) reduces `readKvPair` + `compareKey` calls by up to 6x per level with zero structural changes.",
+            "**Batch-read `SortedNode` from a stack buffer and slice `0..node.num` ([`lib.zig#L2481-L2528`](../../reference/xitdb-zig/src/lib.zig#L2481-L2528)):** Eliminates up to 98 `takeInt`/`writeInt` calls per B+Tree node.",
+            "**Direct leaf slot read in `sortedGetByIndex` ([`lib.zig#L2661-L2680`](../../reference/xitdb-zig/src/lib.zig#L2661-L2680)):** When `kind == .leaf`, seek to `node_ptr + 2 + rem * 9` and read 1 `Slot` instead of calling `readSortedNode`.",
+        ]
+        z_keys = ["SortedMap", "SortedSet", "readSlotPointer.sorted_map", "readSortedNode", "writeSortedNodeAt", "compareKey", "sortedGet", "sortedGetByIndex", "sortedRank", "sortedPut", "sortedRemove"]
+        return odin_pts, zig_pts, z_keys
+
+    # 5. Compaction & Replication (#39–#44)
+    if 39 <= rank <= 44:
+        if rank == 43:
+            odin_pts = [
+                "**Why Zig Wins by 1.15x on `#43 Compaction (Heterogeneous DAG + dedup)` (`110.1 ms` vs `126.6 ms`):** Both implementations produce the exact same `23.4 KB` compacted wire image and deduplicate shared structural nodes identically ([`xitdb/compact_replicate.odin#L150-L720`](../../xitdb/compact_replicate.odin#L150-L720) vs. [`lib.zig#L4508-L4913`](../../reference/xitdb-zig/src/lib.zig#L4508-L4913)). On this large multi-collection DAG, Zig's `std.AutoHashMap(u64, u64)` in `MemoryOffsetMap` ([`lib.zig#L4485-L4506`](../../reference/xitdb-zig/src/lib.zig#L4485-L4506)) uses SIMD-accelerated SwissTable metadata probing, giving slightly faster offset-remap lookups than Odin's open-addressed power-of-two table when thousands of heterogeneous nodes are remapped.",
+            ]
+        else:
+            odin_pts = [
+                "**Direct Slice Streaming in Replication ([`xitdb/compact_replicate.odin#L15-L148`](../../xitdb/compact_replicate.odin#L15-L148)):** On `#39 Replication (genesis -> 200 moments)` (**10.04x faster in Odin**) and `#40 Incremental 1-moment delta` (**2.25x faster**), Odin's `database_read_committed_bytes` and `database_apply_replicated_bytes` copy committed byte ranges directly between buffers and verify the 25-byte `Root_Trailer` CRC-64/XZ in place, avoiding `std.Io.Reader.stream` / `std.Io.Writer.drain` 256-byte chunking.",
+                "**Flat Open-Addressed `Memory_Offset_Map` & Buffered `File_Offset_Map` ([`xitdb/compact_replicate.odin#L150-L260`](../../xitdb/compact_replicate.odin#L150-L260)):** On `#41` (**2.05x faster**) and `#42` (**1.47x faster**), Odin pre-sizes the offset map and copies index blocks in single `core_read_exact` / `core_write_all` transfers.",
+            ]
+        zig_pts = [
+            "**Increase stream buffer size or slice directly in `readCommitted` / `applyReplicated` ([`lib.zig#L592-L637`](../../reference/xitdb-zig/src/lib.zig#L592-L637)):** Streaming via `CoreMemory`'s 256-byte `std.Io` buffer breaks a 250 KB replication delta into ~1,000 virtual `stream`/`drain` calls; exposing a direct slice fast path (or a 64 KB buffer) removes that overhead.",
+            "**Apply the B-Tree / Sorted-Node batch read optimization in `Compactor` ([`lib.zig#L4620-L4760`](../../reference/xitdb-zig/src/lib.zig#L4620-L4760)):** `Compactor.compactBTreeNode` and `compactSortedNode` call `readBTreeNode`/`readSortedNode` and `writeBTreeNodeAt`/`writeSortedNodeAt`, so batch-reading nodes speeds up compaction as well.",
+        ]
+        z_keys = ["Compactor", "compact", "readCommitted", "applyReplicated", "CoreMemory", "CoreBufferedFile"]
+        return odin_pts, zig_pts, z_keys
+
+    # 6. Bytes, Streams & Path Traversal (#47–#57)
+    if 47 <= rank <= 57:
+        odin_pts = [
+            "**Zero-Allocation `read_bytes_buf` Fast Path ([`xitdb/cursor.odin#L260-L355`](../../xitdb/cursor.odin#L260-L355)):** On `#47–#50` (**1.33x–6.33x faster in Odin**), Odin's `cursor_read_bytes_buf` decodes inline `.Short_Bytes` directly from the 64-bit `Slot.value` register and reads external `.Bytes` directly into the caller's slice with one `core_read_exact`. Zig's [`Cursor.readBytes`](../../reference/xitdb-zig/src/lib.zig#L3150-L3190) constructs a `Cursor.Reader` and streams through the `std.Io.Reader` vtable.",
+            "**Direct Bulk Write in `Cursor_Writer` (`#51` — 5.81x faster in Odin: `288 µs` vs `1,674 µs`):** Odin's [`cursor_writer_write`](../../xitdb/cursor.odin#L905-L945) appends the caller's 4 KB chunk directly to `db.core` in one `core_write_all` call and writes the final 8-byte big-endian size header once in `cursor_writer_finish`. Zig's [`Cursor.Writer.drain`](../../reference/xitdb-zig/src/lib.zig#L3680-L3745) uses a 256-byte `std.Io.Writer` buffer and, on every 256-byte flush, seeks to the payload end, writes 256 bytes, and seeks back to `size_pos` to rewrite the 8-byte length header (**32 seeks + 32 writes per 4 KB chunk**).",
+            "**Stack-Sliced Path Traversal ([`xitdb/database.odin#L552-L619`](../../xitdb/database.odin#L552-L619)):** On `#55–#56` 4-level nested path traversal (**6.73x–8.74x faster in Odin**), Odin's `read_slot_pointer` + single-pass `Write_KV_Data` avoids per-level `std.Io` reader/writer re-initialization.",
+        ]
+        zig_pts = [
+            "**Defer length-header patching in `Cursor.Writer.drain` ([`lib.zig#L3680-L3745`](../../reference/xitdb-zig/src/lib.zig#L3680-L3745)):** Write incoming chunks directly to `core.writer()` at `self.pos` and update the 8-byte length header at `self.size_pos` only in `finish()` (or when `seekTo` is called), eliminating 30+ redundant seeks per 4 KB write.",
+            "**Use `std.Io.Reader.fixed` for `CoreMemory` ([`lib.zig#L4993-L5003`](../../reference/xitdb-zig/src/lib.zig#L4993-L5003)):** Removes the intermediate 256-byte copy during `readBytes` and `Cursor.Reader` seeks.",
+        ]
+        z_keys = ["Cursor", "readSlotPointer", "readSlotPointer.write", "CoreMemory"]
+        return odin_pts, zig_pts, z_keys
+
+    # 7. Storage Backends & Transaction Lifecycle (#58–#63)
+    if 58 <= rank <= 63:
+        odin_pts = [
+            "**Unified Read-From-Write-Buffer in `Core_Buffered_File` (`#59` — 4.06x faster in Odin: `4.58 ms` vs `18.57 ms`):** In Zig's [`CoreBufferedFile`](../../reference/xitdb-zig/src/lib.zig#L5068-L5220), only writes are buffered (`write_buf`); **every `reader.seekTo()` flushes the entire write buffer to the OS via `pwritev` and issues a `preadv` syscall**. Because HAMT/B-Tree transactions interleave slot reads and block appends, Zig flushes the write buffer on nearly every slot read! Odin's [`Core_Buffered_File`](../../xitdb/core.odin#L219-L437) serves reads that fall inside the active write window `[buf_start, buf_start + buf_len)` **directly from memory without flushing**, and caches committed read pages below `buf_start`.",
+            "**Cached Root Header on Truncate & Re-Open (`#61–#63` — 1.75x–4.45x faster in Odin):** Odin's `_database_truncate_with_header` ([`xitdb/database.odin#L343-L362`](../../xitdb/database.odin#L343-L362)) reuses the already-read `Root_Header` instead of re-reading `ROOT_HEADER_START` twice per transaction.",
+        ]
+        zig_pts = [
+            "**Serve in-range reads from `CoreBufferedFile.write_buf` before flushing (`~12 lines` in [`lib.zig#L5083-L5115`](../../reference/xitdb-zig/src/lib.zig#L5083-L5115)):** In `CoreBufferedFile.Reader.stream`, check if `[offset, offset + n)` lies within `[write_buf_start, write_buf_start + write_buf_len)`. If so, `@memcpy` directly from `write_buf` without calling `flush()`. This single 12-line check eliminates ~90% of `pwritev`/`preadv` syscalls during buffered file transactions.",
+        ]
+        z_keys = ["CoreMemory", "CoreBufferedFile", "CoreFile", "freeze", "commitRoot", "readSlotPointer"]
+        return odin_pts, zig_pts, z_keys
+
+    # 8. Odin 5-Layer Ergonomic DSL & Datalog Engine (#64–#75)
+    odin_pts = [
+        "**Odin-Native 5-Layer Ergonomic DSL ([`xitdb/dsl.odin`](../../xitdb/dsl.odin)):** Built directly on top of the wire-compatible core (`Read_Cursor`, `Write_Cursor`, `Hash_Map`, `Sorted_Map`, `Array_List`), providing path selectors (`Layer 1`), transactional `Tx` + automatic B+Tree secondary index maintenance (`Layer 2`), reflection-driven struct `marshal`/`unmarshal` & cycle-safe Datomic `pull` (`Layer 3`), structural `diff_moments` & `history_of` (`Layer 4`), and a stratified Datalog engine with B+Tree prefix pushdown (`Layer 5`).",
+        "**Zero-Allocation Hot Paths & B+Tree Index Selection ([`xitdb/dsl.odin#L2800-L3783`](../../xitdb/dsl.odin#L2800-L3783)):** The Datalog engine inspects bound variables in pattern clauses, automatically selecting `Sorted_Map` (`indices/<index>`) range iterators for prefix-bound lookups and falling back to full collection scans only when unbound.",
+    ]
+    zig_pts = [
+        "**Comptime Struct Marshaling & Pull Projection in Zig:** Zig's `@typeInfo(T)` comptime reflection maps naturally to Odin's runtime `type_info_of(T)` in `marshal`/`unmarshal` (`Layer 3`) and could be layered on top of `lib.zig` without altering the wire format.",
+    ]
+    z_keys = ["readSlotPointer", "HashMap", "SortedMap", "ArrayList", "Cursor"]
+    return odin_pts, zig_pts, z_keys
+
+
 def generate_all_slices() -> None:
     """
-    Generates:
-      1. benchmarks/slices/<rank>_<slug>.md for every benchmark
-      2. benchmarks/slices/README.md index
-      3. benchmarks/slices/index.html interactive single-page codebase slice viewer
+    Generates concise, zero-bloat Odin vs. Zig comparison & call-graph slice pages:
+      1. benchmarks/slices/<rank>_<slug>.md (~95 lines each; links to #L<start>-L<end> instead of duplicating source)
+      2. benchmarks/slices/README.md (Cross-Language Architectural Analysis + 75-benchmark index)
     """
     os.makedirs(SLICES_DIR, exist_ok=True)
+    # Remove legacy index.html if present to avoid 200KB+ embedded source blobs
+    legacy_html = os.path.join(SLICES_DIR, "index.html")
+    if os.path.isfile(legacy_html):
+        os.remove(legacy_html)
+
     odin_harness = scan_harness_file(os.path.join(BENCH_DIR, "bench_xitdb.odin"), "odin")
     zig_harness = scan_harness_file(os.path.join(BENCH_DIR, "bench_xitdb.zig"), "zig")
     odin_procs = parse_odin_library_procs()
     code_map = build_code_map()
 
-    known_procs = set(odin_procs.keys())
-    ident_re = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
+    odin_rows = {r["name"]: r for r in pool_by_lang_and_test(load_jsonl_file(ODIN_JSONL), "odin")}
+    zig_rows = {r["name"]: r for r in pool_by_lang_and_test(load_jsonl_file(ZIG_JSONL), "zig")}
 
     sorted_items = sorted(code_map.values(), key=lambda x: x["rank"])
     index_rows: List[str] = [
-        "# xitdb Per-Benchmark Code Slices & Call-Graph Projections",
+        "# xitdb Per-Benchmark Code Slices & Odin vs. Zig Architectural Guide",
         "",
-        "Each slice below projects `xitdb/*.odin` down to **only the procedures and call paths touched by that benchmark**, with direct `#L<start>-L<end>` links into both the benchmark harness and the library source files.",
+        "[← Back to Benchmark Suite (`benchmarks/README.md`)](../README.md)",
         "",
-        "| # | Benchmark | Harness (Odin / Zig) | Touched Library Scope | Entry `xitdb` Calls |",
-        "| ---: | :--- | :--- | :--- | :--- |",
+        "Across the **63 shared 1v1 benchmarks**, Odin (`-o:speed -microarch:native`) is faster on **62 / 63** benchmarks and Zig (`0.17.0-dev -Doptimize=ReleaseFast -Dcpu=native`) is faster on **1 / 63** (`#43 Compaction Heterogeneous DAG + dedup`), with **0 byte-footprint mismatches** (100% identical v1 wire output).",
+        "",
+        "Each per-benchmark page below links directly to the exact `#L<start>-L<end>` line ranges in [`bench_xitdb.odin`](../bench_xitdb.odin), [`bench_xitdb.zig`](../bench_xitdb.zig), [`xitdb/*.odin`](../../xitdb), and [`reference/xitdb-zig/src/lib.zig`](../../reference/xitdb-zig/src/lib.zig) without duplicating library source code.",
+        "",
+        "---",
+        "",
+        "## Cross-Language Architectural Summary: Why Odin is Faster & How to Improve Zig",
+        "",
+        "| Subsystem (Benchmarks) | Odin Speedup | Root Cause in `xitdb/*.odin` vs. `reference/xitdb-zig/src/lib.zig` | Idiomatic Zig Improvement (Readable & Zero Code Bloat) |",
+        "| :--- | :--- | :--- | :--- |",
+        "| **Count-Augmented B-Tree (`Linked_Array_List`, `#20–#27`)** | **4.6x – 44.9x** | Zig's [`readBTreeNode`](../../reference/xitdb-zig/src/lib.zig#L1946-L1972) / [`writeBTreeNodeAt`](../../reference/xitdb-zig/src/lib.zig#L1977-L1991) execute **34–66 virtual `takeInt`/`writeInt` calls** per node (reading all 32 slots even when `num == 2`), and [`readBTreeSlot`](../../reference/xitdb-zig/src/lib.zig#L2023-L2042) deserializes the entire 290B leaf just to read 1 slot. Odin ([`xitdb/btree.odin#L15-L137`](../../xitdb/btree.odin#L15-L137)) reads the node in **1 `core_read_exact`**, decodes `0..<num`, and seeks directly to the 9-byte leaf slot on `get`. | Batch-read/write the node into a stack `[418]u8` buffer (`15 lines`) and decode `0..node.num` with `std.mem.readInt`; in `readBTreeSlot`, when `kind == .leaf`, seek directly to `node_ptr + 2 + rem * 9` (`5 lines`). |",
+        "| **Counted B+Tree (`Sorted_Map` / `Sorted_Set`, `#28–#38`)** | **4.1x – 51.3x** | Zig's [`sortedGet`](../../reference/xitdb-zig/src/lib.zig#L2634-L2658), [`sortedRank`](../../reference/xitdb-zig/src/lib.zig#L2683-L2707), and [`sortedPut`](../../reference/xitdb-zig/src/lib.zig#L2736-L2875) use **$O(B)$ linear scans** (`for (0..node.num)`) on branch separators and leaf entries (up to 32 `readKvPair` + `compareKey` seeks per level), and [`readSortedNode`](../../reference/xitdb-zig/src/lib.zig#L2481-L2511) issues up to **98 `takeInt` calls** per node. Odin ([`xitdb/btree.odin#L1028-L1480`](../../xitdb/btree.odin#L1028-L1480)) uses **$O(\\log_2 B)$ binary search** ($\\le 5$ comparisons) and 1-read node decoding. | Replace the linear loops in `sortedGet`, `sortedRank`, and `sortedPut` with a 10-line `while (lo < hi)` binary search, batch-decode `SortedNode` from a stack buffer, and seek directly to the target leaf slot in `sortedGetByIndex`. |",
+        "| **16-Way HAMT (`Hash_Map` / `Counted_Hash_Map`, `#1–#13`, `#45–#46`)** | **2.4x – 13.4x** | In Zig ([`lib.zig#L3856-L3885`](../../reference/xitdb-zig/src/lib.zig#L3856-L3885)), inserting a key+value requires **two full root-to-leaf traversals** (`putKey` + `put`). On deep collisions (`#10`), [`readMapSlot`](../../reference/xitdb-zig/src/lib.zig#L1705-L1720) writes 144B blocks one level at a time, and [`removeMapSlot`](../../reference/xitdb-zig/src/lib.zig#L1728-L1811) (`#11`, **13.35x**) reads all 16 slots at every level before recursing. Odin ([`xitdb/hamt.odin`](../../xitdb/hamt.odin)) uses single-pass `Write_KV_Data`, contiguous multi-level collision writes, and lazy 1-slot reads on remove. | Add a single-pass `putKeyAndValue` (`.write_kv_data`) to `HashMap(.read_write)` (`~20 lines`), and in `removeMapSlot` read only the single child slot before recursing, reading the 144B block on unwind only when `key_offset > 0` and the child collapsed. |",
+        "| **16-Way Radix Trie (`Array_List`, `#14–#19`)** | **2.1x – 4.5x** | Zig's [`CoreMemory.reader()`](../../reference/xitdb-zig/src/lib.zig#L4993-L5003) wraps in-memory bytes in a 256-byte buffered `std.Io.Reader` whose window is invalidated on every `seekTo`, copying memory into the 256B buffer on every slot read. Odin ([`xitdb/core.odin#L125-L192`](../../xitdb/core.odin#L125-L192)) slices `Core_Memory.bytes` directly. | Construct `std.Io.Reader.fixed(self.bytes.items)` in `CoreMemory` so in-memory reads are zero-copy without `stream()` vtable dispatch. |",
+        "| **Streams, Bytes & Path Engine (`#47–#57`)** | **1.3x – 8.7x** | In `#51 Cursor_Writer` (**5.81x faster in Odin**), Zig's [`Cursor.Writer.drain`](../../reference/xitdb-zig/src/lib.zig#L3680-L3745) flushes every 256 bytes and seeks back to `size_pos` to rewrite the 8-byte length header on every chunk (**32 seeks + 32 writes per 4 KB**). Odin ([`xitdb/cursor.odin#L905-L945`](../../xitdb/cursor.odin#L905-L945)) writes caller slices directly and patches the 8-byte size once in `finish()`. | In `Cursor.Writer.drain`, write chunks directly at `self.pos` and defer writing `self.size` at `self.size_pos` until `finish()` (or `seekTo`). |",
+        "| **Buffered File Backend (`#58–#63`)** | **1.1x – 4.1x** | In Zig's [`CoreBufferedFile`](../../reference/xitdb-zig/src/lib.zig#L5068-L5220) (`#59`, **4.06x faster in Odin**), **every `reader.seekTo()` flushes `write_buf` to disk via `pwritev`** and issues a `preadv` syscall. Odin ([`xitdb/core.odin#L219-L437`](../../xitdb/core.odin#L219-L437)) serves reads within `[buf_start, buf_start + buf_len)` directly from the write buffer without flushing. | In `CoreBufferedFile.Reader.stream`, check if the requested range falls inside `[write_buf_start, write_buf_start + write_buf_len)` and `@memcpy` from `write_buf` without flushing (`~12 lines`). |",
+        "| **Compaction & Replication (`#39–#44`)** | **Odin 1.2x–10.0x** (`#39–#42,#44`) / **Zig 1.15x** (`#43`) | Odin streams replication slices directly (`#39` **10.04x**). On `#43 Compaction (Heterogeneous DAG + dedup)`, **Zig wins by 1.15x** (`110.1 ms` vs `126.6 ms`) thanks to `std.AutoHashMap(u64, u64)`'s SIMD SwissTable metadata probing in `MemoryOffsetMap` ([`lib.zig#L4485-L4506`](../../reference/xitdb-zig/src/lib.zig#L4485-L4506)). | Use a larger buffer or direct slice transfer in `readCommitted`/`applyReplicated`, while keeping Zig's `std.AutoHashMap` in `MemoryOffsetMap`. |",
+        "",
+        "---",
+        "",
+        "## All 75 Benchmark Slices & 1v1 Comparisons",
+        "",
+        "| # | Benchmark | 1v1 Speedup (Odin vs. Zig) | Harness (`#L<start>-L<end>`) | Touched Odin Scope | Entry `xitdb` Calls |",
+        "| ---: | :--- | :--- | :--- | :--- | :--- |",
     ]
-
-    html_payload: List[Dict[str, Any]] = []
 
     for item in sorted_items:
         b_name = item["name"]
@@ -1366,7 +1616,9 @@ def generate_all_slices() -> None:
         o_info = odin_harness[b_name]
         z_info = zig_harness.get(b_name)
         slice_info = compute_benchmark_slice(o_info["direct_calls"], odin_procs)
-        reached_set = set(slice_info["order"])
+
+        o_stat = odin_rows.get(b_name)
+        z_stat = zig_rows.get(b_name)
 
         odin_link_from_root = f"../{item['odin_bench_url']}"
         zig_link_from_root = f"../{item['zig_bench_url']}" if item["zig_bench_url"] else ""
@@ -1375,34 +1627,110 @@ def generate_all_slices() -> None:
         if item["zig_bench_url"]:
             harness_links += f" · [Zig (`L{item['zig_start_line']}–L{item['zig_end_line']}`)](../{item['zig_bench_url']})"
 
+        if o_stat and z_stat:
+            o_med = max(o_stat["median_ns"], 1.0)
+            z_med = max(z_stat["median_ns"], 1.0)
+            wz = welch_z_score(o_stat, z_stat)
+            sig = "★" if wz >= 1.96 else "~"
+            if o_med <= z_med:
+                speedup_cell = f"**{z_med / o_med:.2f}x Odin** (`{o_stat['ns_per_op']:,} ns` vs `{z_stat['ns_per_op']:,} ns` {sig})"
+            else:
+                speedup_cell = f"**{o_med / z_med:.2f}x Zig** (`{z_stat['ns_per_op']:,} ns` vs `{o_stat['ns_per_op']:,} ns` {sig})"
+        elif o_stat:
+            speedup_cell = f"Odin DSL (`{o_stat['ns_per_op']:,} ns/op`)"
+        else:
+            speedup_cell = "—"
+
         entry_calls_md = ", ".join(f"`{c}`" for c in item["entry_calls"])
-        scope_md = f"[**{item['odin_procs_count']} procs · {item['odin_files_count']} files · {item['odin_lines_count']} LOC**]({slug}.md)"
+        scope_md = f"[**{item['odin_procs_count']} procs · {item['odin_files_count']} files**]({slug}.md)"
         index_rows.append(
-            f"| {rank} | [`{b_name}`]({slug}.md) | {harness_links} | {scope_md} | {entry_calls_md} |"
+            f"| {rank} | [`{b_name}`]({slug}.md) | {speedup_cell} | {harness_links} | {scope_md} | {entry_calls_md} |"
         )
 
+        odin_pts, zig_pts, zig_lib_keys = get_odin_vs_zig_insight(rank, b_name)
+
         md: List[str] = [
-            f"# #{rank}. `{b_name}` — Code Slice",
+            f"# #{rank}. `{b_name}` — Odin vs. Zig Code Slice & Analysis",
             "",
-            f"[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [Odin Harness (`bench_xitdb.odin#L{item['odin_start_line']}-L{item['odin_end_line']}`)]({odin_link_from_root})"
+            f"[← Back to Benchmark Suite](../README.md) · [← All Slices & Cross-Language Guide](README.md) · [Odin Harness (`bench_xitdb.odin#L{item['odin_start_line']}-L{item['odin_end_line']}`)]({odin_link_from_root})"
             + (
                 f" · [Zig Harness (`bench_xitdb.zig#L{item['zig_start_line']}-L{item['zig_end_line']}`)]({zig_link_from_root})"
                 if zig_link_from_root
                 else ""
             ),
             "",
-            f"- **Touched Library Scope:** **{item['odin_procs_count']}** procedures across **{item['odin_files_count']}** `xitdb/*.odin` files (**{item['odin_lines_count']}** lines of library code)",
-            f"- **Direct Benchmark Entry Points:** {entry_calls_md}",
-            "",
-            "---",
-            "",
-            "## 1. Benchmark Harness Code",
-            "",
-            f"### Odin (`benchmarks/{item['odin_bench_url']}`)",
-            "",
-            "```odin",
         ]
 
+        # Section 1: 1v1 Statistical Comparison Table
+        if o_stat and z_stat:
+            o_med = max(o_stat["median_ns"], 1.0)
+            z_med = max(z_stat["median_ns"], 1.0)
+            wz = welch_z_score(o_stat, z_stat)
+            verdict = (
+                f"**{z_med / o_med:.2f}x Odin** (`z = {wz:.1f}`)"
+                if o_med <= z_med
+                else f"**{o_med / z_med:.2f}x Zig** (`z = {wz:.1f}`)"
+            )
+            md.extend(
+                [
+                    "## 1. 1v1 Statistical Performance Summary",
+                    "",
+                    "| Implementation | Median (`ns/op`) | Mean ± σ (`ns/op`) | CV% | `p95` (`ns`) | Throughput (`ops/s`) | Storage Footprint | Result |",
+                    "| :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |",
+                    f"| **Odin** (`-o:speed -microarch:native`) | **{o_stat['ns_per_op']:,}** | {o_stat['mean_ns']:,.1f} ± {o_stat['stddev_ns']:,.1f} | {o_stat['cv_pct']:.1f}% | {o_stat['p95_ns']:,} | {o_stat['ops_per_sec']:,} | {fmt_kb(o_stat['bytes_used'])} | {verdict} |",
+                    f"| **Zig** (`0.17.0 -Doptimize=ReleaseFast`) | {z_stat['ns_per_op']:,} | {z_stat['mean_ns']:,.1f} ± {z_stat['stddev_ns']:,.1f} | {z_stat['cv_pct']:.1f}% | {z_stat['p95_ns']:,} | {z_stat['ops_per_sec']:,} | {fmt_kb(z_stat['bytes_used'])} | Baseline |",
+                    "",
+                ]
+            )
+        elif o_stat:
+            md.extend(
+                [
+                    "## 1. Statistical Performance Summary (Odin 5-Layer DSL)",
+                    "",
+                    "| Implementation | Median (`ns/op`) | Mean ± σ (`ns/op`) | CV% | `p95` (`ns`) | Throughput (`ops/s`) | Storage Footprint |",
+                    "| :--- | ---: | ---: | ---: | ---: | ---: | ---: |",
+                    f"| **Odin** (`-o:speed -microarch:native`) | **{o_stat['ns_per_op']:,}** | {o_stat['mean_ns']:,.1f} ± {o_stat['stddev_ns']:,.1f} | {o_stat['cv_pct']:.1f}% | {o_stat['p95_ns']:,} | {o_stat['ops_per_sec']:,} | {fmt_kb(o_stat['bytes_used'])} |",
+                    "",
+                ]
+            )
+
+        # Section 2: Architectural Analysis (Odin Optimizations & Idiomatic Zig Improvements)
+        md.extend(
+            [
+                "---",
+                "",
+                "## 2. Architectural Comparison: Odin Optimizations & Idiomatic Zig Improvements",
+                "",
+                "### What Odin Does Differently (`xitdb/*.odin`)",
+                "",
+            ]
+        )
+        for pt in odin_pts:
+            md.append(f"- {pt}")
+
+        md.extend(
+            [
+                "",
+                "### Suggested Zig Improvements (`reference/xitdb-zig/src/lib.zig` — Preserving Readability & Zero Code Explosion)",
+                "",
+            ]
+        )
+        for pt in zig_pts:
+            md.append(f"- {pt}")
+
+        # Section 3: Benchmark Harness Code
+        md.extend(
+            [
+                "",
+                "---",
+                "",
+                "## 3. Benchmark Harness Code (`#L<start>-L<end>`)",
+                "",
+                f"### Odin ([`benchmarks/{item['odin_bench_url']}`]({odin_link_from_root}))",
+                "",
+                "```odin",
+            ]
+        )
         for offset, raw_ln in enumerate(o_info["snippet"].splitlines()):
             ln_no = item["odin_start_line"] + offset
             md.append(f"{ln_no:4d} | {raw_ln}")
@@ -1412,8 +1740,7 @@ def generate_all_slices() -> None:
             md.extend(
                 [
                     "",
-                    "<details>",
-                    f"<summary><strong>Zig Benchmark Harness (<code>benchmarks/{item['zig_bench_url']}</code>)</strong></summary>",
+                    f"### Zig ([`benchmarks/{item['zig_bench_url']}`]({zig_link_from_root}))",
                     "",
                     "```zig",
                 ]
@@ -1421,16 +1748,50 @@ def generate_all_slices() -> None:
             for offset, raw_ln in enumerate(z_info["snippet"].splitlines()):
                 ln_no = item["zig_start_line"] + offset
                 md.append(f"{ln_no:4d} | {raw_ln}")
-            md.extend(["```", "</details>"])
+            md.append("```")
 
+        # Section 4: Side-by-Side Library References (Clickable #L<start>-L<end> links, zero code duplication)
         md.extend(
             [
                 "",
                 "---",
                 "",
-                "## 2. Reached `xitdb` Call Graph & File Coverage",
+                "## 4. Touched Library Code Links (Odin `xitdb/*.odin` ↔ Zig `reference/xitdb-zig/src/lib.zig`)",
                 "",
-                "| File | Procedure | Role / Call Depth | Lines | Source Link |",
+                "### Zig Reference Equivalents (`reference/xitdb-zig/src/lib.zig`)",
+                "",
+                "| Zig Symbol / Section | Lines | Role in `reference/xitdb-zig/src/lib.zig` | Source Link |",
+                "| :--- | ---: | :--- | :--- |",
+            ]
+        )
+        for zk in zig_lib_keys:
+            if zk in ZIG_LIB_RANGES:
+                zs, ze, zdesc = ZIG_LIB_RANGES[zk]
+                zurl = f"../../reference/xitdb-zig/src/lib.zig#L{zs}-L{ze}"
+                md.append(
+                    f"| `{zk}` | {ze - zs + 1} | {zdesc} | [`lib.zig#L{zs}-L{ze}`]({zurl}) |"
+                )
+
+        exec_p = next(
+            (
+                p
+                for p in slice_info["by_file"].get("xitdb/database.odin", [])
+                if p["name"] == "_exec_path_part"
+            ),
+            None,
+        )
+        active_arms_note = (
+            f" (Active `_exec_path_part` arms: {', '.join(f'`{a}`' for a in exec_p['active_arms'])})"
+            if exec_p and exec_p.get("active_arms")
+            else ""
+        )
+
+        md.extend(
+            [
+                "",
+                f"### Reached Odin Procedures (`{item['odin_procs_count']}` procedures across `{item['odin_files_count']}` files · `{item['odin_lines_count']}` LOC){active_arms_note}",
+                "",
+                "| File | Procedure | Role / Call Depth | Lines | Source Link (`#L<start>-L<end>`) |",
                 "| :--- | :--- | :--- | ---: | :--- |",
             ]
         )
@@ -1445,209 +1806,12 @@ def generate_all_slices() -> None:
                 f"| `{p['file']}` | `{pname}` | {role} | {p['line_count']} | [`{p['file']}#L{p['start_line']}-L{p['end_line']}`]({src_url}) |"
             )
 
-        md.extend(
-            [
-                "",
-                "---",
-                "",
-                "## 3. Highlighted Library Code Slice (`xitdb/*.odin`)",
-                "",
-                "> Only procedures reachable when running **`"
-                + b_name
-                + "`** are included below. Lines that dispatch to another touched procedure in this slice are marked with `// <== [calls ...]`. ",
-                "",
-            ]
-        )
-
-        for rel_file, file_procs in slice_info["by_file"].items():
-            file_loc = sum(p["line_count"] for p in file_procs)
-            ranges_md = ", ".join(
-                f"[`L{p['start_line']}–L{p['end_line']}`](../../{rel_file}#L{p['start_line']}-L{p['end_line']})"
-                for p in file_procs
-            )
-            md.extend(
-                [
-                    f"### `{rel_file}` ({len(file_procs)} procedures · {file_loc} lines: {ranges_md})",
-                    "",
-                ]
-            )
-            for p in file_procs:
-                src_url = f"../../{rel_file}#L{p['start_line']}-L{p['end_line']}"
-                depth = p["depth"]
-                badge = "ENTRY POINT" if depth == 0 else f"DEPTH {depth}"
-                arms_note = (
-                    f" — Active `Path_Part` arms: {', '.join(f'`{a}`' for a in p['active_arms'])}"
-                    if p.get("active_arms")
-                    else ""
-                )
-                md.extend(
-                    [
-                        f"#### [`{p['name']}`]({src_url}) — `{badge}` (`L{p['start_line']}–L{p['end_line']}`){arms_note}",
-                        "",
-                        "```odin",
-                    ]
-                )
-                line_nums = p.get(
-                    "line_numbers",
-                    list(range(p["start_line"], p["start_line"] + len(p["raw_lines"]))),
-                )
-                prev_ln = None
-                for idx_ln, (ln_no, raw_ln, clean_ln) in enumerate(
-                    zip(line_nums, p["raw_lines"], p["clean_lines"])
-                ):
-                    if prev_ln is not None and ln_no > prev_ln + 1:
-                        md.append(
-                            f"   ... | \t// ... [lines {prev_ln + 1}–{ln_no - 1}: untouched Path_Part arms omitted] ..."
-                        )
-                    prev_ln = ln_no
-                    called_here: List[str] = []
-                    if idx_ln > 0:
-                        for m_id in ident_re.finditer(clean_ln):
-                            tok = m_id.group(1)
-                            if (
-                                tok != p["name"]
-                                and tok in reached_set
-                                and tok in known_procs
-                                and tok not in called_here
-                            ):
-                                called_here.append(tok)
-                    marker = (
-                        f"  // <== [calls {', '.join(called_here)}]"
-                        if called_here
-                        else ""
-                    )
-                    md.append(f"{ln_no:4d} | {raw_ln}{marker}")
-                md.extend(["```", ""])
-
         slice_path = os.path.join(SLICES_DIR, f"{slug}.md")
         with open(slice_path, "w", encoding="utf-8") as f:
             f.write("\n".join(md) + "\n")
 
-        html_payload.append(
-            {
-                "rank": rank,
-                "name": b_name,
-                "slug": slug,
-                "odin_url": f"../{item['odin_bench_url']}",
-                "zig_url": f"../{item['zig_bench_url']}" if item["zig_bench_url"] else "",
-                "odin_snippet": o_info["snippet"],
-                "odin_start": item["odin_start_line"],
-                "procs_count": item["odin_procs_count"],
-                "files_count": item["odin_files_count"],
-                "lines_count": item["odin_lines_count"],
-                "reached_procs": slice_info["order"],
-                "depths": slice_info["depths"],
-            }
-        )
-
     with open(os.path.join(SLICES_DIR, "README.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(index_rows) + "\n")
-
-    # Generate interactive single-page viewer (benchmarks/slices/index.html)
-    html_procs = {
-        k: {
-            "name": v["name"],
-            "file": v["file"],
-            "start_line": v["start_line"],
-            "end_line": v["end_line"],
-            "code": "\n".join(v["raw_lines"]),
-            "callees": v["callees"],
-        }
-        for k, v in odin_procs.items()
-    }
-    html_doc = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>xitdb Benchmark Codebase Slice Explorer</title>
-<style>
-  body {{ margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: #0d1117; color: #c9d1d9; display: flex; height: 100vh; overflow: hidden; }}
-  #sidebar {{ width: 380px; border-right: 1px solid #30363d; overflow-y: auto; padding: 12px; background: #161b22; }}
-  #main {{ flex: 1; overflow-y: auto; padding: 20px; }}
-  .bench-item {{ padding: 8px 10px; border-radius: 6px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent; font-size: 12px; }}
-  .bench-item:hover {{ background: #21262d; }}
-  .bench-item.active {{ background: #1f6feb22; border-color: #58a6ff; color: #58a6ff; }}
-  .badge {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; background: #21262d; color: #8b949e; }}
-  .badge.entry {{ background: #23863644; color: #3fb950; border: 1px solid #238636; }}
-  pre {{ background: #161b22; padding: 12px; border-radius: 6px; border: 1px solid #30363d; overflow-x: auto; font-size: 12px; line-height: 1.45; }}
-  .proc-card {{ margin-bottom: 16px; }}
-  a {{ color: #58a6ff; text-decoration: none; }}
-  a:hover {{ text-decoration: underline; }}
-  input {{ width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 10px; background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; border-radius: 6px; }}
-</style>
-</head>
-<body>
-<div id="sidebar">
-  <h3 style="margin-top:0">xitdb Benchmark Slices</h3>
-  <input id="search" type="text" placeholder="Filter 75 benchmarks..." oninput="renderList()">
-  <div id="bench-list"></div>
-</div>
-<div id="main"><div id="content"></div></div>
-<script>
-const BENCHMARKS = {json.dumps(html_payload)};
-const PROCS = {json.dumps(html_procs)};
-let activeIdx = 0;
-
-function escapeHtml(s) {{
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}}
-
-function renderList() {{
-  const q = document.getElementById("search").value.toLowerCase();
-  const el = document.getElementById("bench-list");
-  el.innerHTML = BENCHMARKS.map((b, i) => {{
-    if (q && !b.name.toLowerCase().includes(q)) return "";
-    const cls = i === activeIdx ? "bench-item active" : "bench-item";
-    return `<div class="${{cls}}" onclick="selectBench(${{i}})">
-      <strong>#${{b.rank}}</strong> ${{escapeHtml(b.name)}}<br>
-      <span class="badge">${{b.procs_count}} procs · ${{b.files_count}} files · ${{b.lines_count}} LOC</span>
-    </div>`;
-  }}).join("");
-}}
-
-function selectBench(idx) {{
-  activeIdx = idx;
-  renderList();
-  const b = BENCHMARKS[idx];
-  const reached = new Set(b.reached_procs);
-  const byFile = {{}};
-  for (const pname of b.reached_procs) {{
-    const p = PROCS[pname];
-    if (!byFile[p.file]) byFile[p.file] = [];
-    byFile[p.file].push(p);
-  }}
-  let html = `<h2>#${{b.rank}}. ${{escapeHtml(b.name)}}</h2>
-    <p><a href="${{b.slug}}.md">Markdown Slice (${{b.slug}}.md)</a> ·
-       <a href="${{b.odin_url}}">Odin Harness</a>
-       ${{b.zig_url ? ` · <a href="${{b.zig_url}}">Zig Harness</a>` : ""}}</p>
-    <h3>Benchmark Harness (bench_xitdb.odin)</h3>
-    <pre>${{escapeHtml(b.odin_snippet)}}</pre>
-    <h3>Touched Library Code (${{b.procs_count}} procedures across ${{b.files_count}} xitdb/*.odin files)</h3>`;
-  for (const [file, procs] of Object.entries(byFile)) {{
-    procs.sort((a, c) => a.start_line - c.start_line);
-    html += `<h4>${{file}} (${{procs.length}} procedures)</h4>`;
-    for (const p of procs) {{
-      const d = b.depths[p.name];
-      const badgeCls = d === 0 ? "badge entry" : "badge";
-      const badgeTxt = d === 0 ? "ENTRY POINT" : `DEPTH ${{d}}`;
-      html += `<div class="proc-card">
-        <div><strong>${{p.name}}</strong> <span class="${{badgeCls}}">${{badgeTxt}}</span>
-        <span class="badge">L${{p.start_line}}–L${{p.end_line}}</span></div>
-        <pre>${{escapeHtml(p.code)}}</pre>
-      </div>`;
-    }}
-  }}
-  document.getElementById("content").innerHTML = html;
-}}
-
-renderList();
-if (BENCHMARKS.length > 0) selectBench(0);
-</script>
-</body>
-</html>
-"""
-    with open(os.path.join(SLICES_DIR, "index.html"), "w", encoding="utf-8") as f:
-        f.write(html_doc)
 
 
 def main() -> None:

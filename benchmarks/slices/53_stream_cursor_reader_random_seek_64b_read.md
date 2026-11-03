@@ -1,15 +1,34 @@
-# #53. `Stream: Cursor_Reader random seek + 64B read` — Code Slice
+# #53. `Stream: Cursor_Reader random seek + 64B read` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [Odin Harness (`bench_xitdb.odin#L1727-L1742`)](../bench_xitdb.odin#L1727-L1742) · [Zig Harness (`bench_xitdb.zig#L1856-L1871`)](../bench_xitdb.zig#L1856-L1871)
+[← Back to Benchmark Suite](../README.md) · [← All Slices & Cross-Language Guide](README.md) · [Odin Harness (`bench_xitdb.odin#L1727-L1742`)](../bench_xitdb.odin#L1727-L1742) · [Zig Harness (`bench_xitdb.zig#L1856-L1871`)](../bench_xitdb.zig#L1856-L1871)
 
-- **Touched Library Scope:** **5** procedures across **2** `xitdb/*.odin` files (**103** lines of library code)
-- **Direct Benchmark Entry Points:** `cursor_reader_seek_to`, `cursor_reader_read_fully`
+## 1. 1v1 Statistical Performance Summary
+
+| Implementation | Median (`ns/op`) | Mean ± σ (`ns/op`) | CV% | `p95` (`ns`) | Throughput (`ops/s`) | Storage Footprint | Result |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| **Odin** (`-o:speed -microarch:native`) | **6** | 6.4 ± 0.9 | 14.0% | 7.6 | 166,666,667 | - | **4.67x Odin** (`z = 48.7`) |
+| **Zig** (`0.17.0 -Doptimize=ReleaseFast`) | 28 | 28.2 ± 0.4 | 1.6% | 28.8 | 35,714,286 | - | Baseline |
 
 ---
 
-## 1. Benchmark Harness Code
+## 2. Architectural Comparison: Odin Optimizations & Idiomatic Zig Improvements
 
-### Odin (`benchmarks/bench_xitdb.odin#L1727-L1742`)
+### What Odin Does Differently (`xitdb/*.odin`)
+
+- **Zero-Allocation `read_bytes_buf` Fast Path ([`xitdb/cursor.odin#L260-L355`](../../xitdb/cursor.odin#L260-L355)):** On `#47–#50` (**1.33x–6.33x faster in Odin**), Odin's `cursor_read_bytes_buf` decodes inline `.Short_Bytes` directly from the 64-bit `Slot.value` register and reads external `.Bytes` directly into the caller's slice with one `core_read_exact`. Zig's [`Cursor.readBytes`](../../reference/xitdb-zig/src/lib.zig#L3150-L3190) constructs a `Cursor.Reader` and streams through the `std.Io.Reader` vtable.
+- **Direct Bulk Write in `Cursor_Writer` (`#51` — 5.81x faster in Odin: `288 µs` vs `1,674 µs`):** Odin's [`cursor_writer_write`](../../xitdb/cursor.odin#L905-L945) appends the caller's 4 KB chunk directly to `db.core` in one `core_write_all` call and writes the final 8-byte big-endian size header once in `cursor_writer_finish`. Zig's [`Cursor.Writer.drain`](../../reference/xitdb-zig/src/lib.zig#L3680-L3745) uses a 256-byte `std.Io.Writer` buffer and, on every 256-byte flush, seeks to the payload end, writes 256 bytes, and seeks back to `size_pos` to rewrite the 8-byte length header (**32 seeks + 32 writes per 4 KB chunk**).
+- **Stack-Sliced Path Traversal ([`xitdb/database.odin#L552-L619`](../../xitdb/database.odin#L552-L619)):** On `#55–#56` 4-level nested path traversal (**6.73x–8.74x faster in Odin**), Odin's `read_slot_pointer` + single-pass `Write_KV_Data` avoids per-level `std.Io` reader/writer re-initialization.
+
+### Suggested Zig Improvements (`reference/xitdb-zig/src/lib.zig` — Preserving Readability & Zero Code Explosion)
+
+- **Defer length-header patching in `Cursor.Writer.drain` ([`lib.zig#L3680-L3745`](../../reference/xitdb-zig/src/lib.zig#L3680-L3745)):** Write incoming chunks directly to `core.writer()` at `self.pos` and update the 8-byte length header at `self.size_pos` only in `finish()` (or when `seekTo` is called), eliminating 30+ redundant seeks per 4 KB write.
+- **Use `std.Io.Reader.fixed` for `CoreMemory` ([`lib.zig#L4993-L5003`](../../reference/xitdb-zig/src/lib.zig#L4993-L5003)):** Removes the intermediate 256-byte copy during `readBytes` and `Cursor.Reader` seeks.
+
+---
+
+## 3. Benchmark Harness Code (`#L<start>-L<end>`)
+
+### Odin ([`benchmarks/bench_xitdb.odin#L1727-L1742`](../bench_xitdb.odin#L1727-L1742))
 
 ```odin
 1727 | 		// Random-access seek + 64B read across the 1 MB blob (`cursor_reader_seek_to`)
@@ -30,8 +49,7 @@
 1742 | 		})
 ```
 
-<details>
-<summary><strong>Zig Benchmark Harness (<code>benchmarks/bench_xitdb.zig#L1856-L1871</code>)</strong></summary>
+### Zig ([`benchmarks/bench_xitdb.zig#L1856-L1871`](../bench_xitdb.zig#L1856-L1871))
 
 ```zig
 1856 |         // Random-access seek + 64B read across the 1 MB blob (`cursor_reader_seek_to`)
@@ -51,155 +69,26 @@
 1870 |             .elapsed_ns = elapsed_rseek,
 1871 |         });
 ```
-</details>
 
 ---
 
-## 2. Reached `xitdb` Call Graph & File Coverage
+## 4. Touched Library Code Links (Odin `xitdb/*.odin` ↔ Zig `reference/xitdb-zig/src/lib.zig`)
 
-| File | Procedure | Role / Call Depth | Lines | Source Link |
+### Zig Reference Equivalents (`reference/xitdb-zig/src/lib.zig`)
+
+| Zig Symbol / Section | Lines | Role in `reference/xitdb-zig/src/lib.zig` | Source Link |
+| :--- | ---: | :--- | :--- |
+| `Cursor` | 864 | Read/Write `Cursor`, `Cursor.Reader`, `Cursor.Writer`, and `Cursor.Iterator` | [`lib.zig#L2956-L3819`](../../reference/xitdb-zig/src/lib.zig#L2956-L3819) |
+| `readSlotPointer` | 733 | Central path-traversal engine & root transaction dispatcher | [`lib.zig#L859-L1591`](../../reference/xitdb-zig/src/lib.zig#L859-L1591) |
+| `readSlotPointer.write` | 66 | `PathPart` switch arms: `.write` and `.ctx` | [`lib.zig#L1525-L1590`](../../reference/xitdb-zig/src/lib.zig#L1525-L1590) |
+| `CoreMemory` | 110 | In-memory `ArrayList(u8)` storage backend with `std.Io.Reader`/`Writer` vtable | [`lib.zig#L4918-L5027`](../../reference/xitdb-zig/src/lib.zig#L4918-L5027) |
+
+### Reached Odin Procedures (`5` procedures across `2` files · `103` LOC)
+
+| File | Procedure | Role / Call Depth | Lines | Source Link (`#L<start>-L<end>`) |
 | :--- | :--- | :--- | ---: | :--- |
 | `xitdb/cursor.odin` | `cursor_reader_seek_to` | **Entry Point** (`depth 0`) | 7 | [`xitdb/cursor.odin#L506-L512`](../../xitdb/cursor.odin#L506-L512) |
 | `xitdb/cursor.odin` | `cursor_reader_read_fully` | **Entry Point** (`depth 0`) | 9 | [`xitdb/cursor.odin#L496-L504`](../../xitdb/cursor.odin#L496-L504) |
 | `xitdb/core.odin` | `core_seek_to` | `depth 1` (from `cursor_reader_read_fully`) | 17 | [`xitdb/core.odin#L176-L192`](../../xitdb/core.odin#L176-L192) |
 | `xitdb/core.odin` | `core_read_exact` | `depth 1` (from `cursor_reader_read_fully`) | 34 | [`xitdb/core.odin#L326-L359`](../../xitdb/core.odin#L326-L359) |
 | `xitdb/core.odin` | `core_read` | `depth 2` (from `core_read_exact`) | 36 | [`xitdb/core.odin#L288-L323`](../../xitdb/core.odin#L288-L323) |
-
----
-
-## 3. Highlighted Library Code Slice (`xitdb/*.odin`)
-
-> Only procedures reachable when running **`Stream: Cursor_Reader random seek + 64B read`** are included below. Lines that dispatch to another touched procedure in this slice are marked with `// <== [calls ...]`. 
-
-### `xitdb/core.odin` (3 procedures · 87 lines: [`L176–L192`](../../xitdb/core.odin#L176-L192), [`L288–L323`](../../xitdb/core.odin#L288-L323), [`L326–L359`](../../xitdb/core.odin#L326-L359))
-
-#### [`core_seek_to`](../../xitdb/core.odin#L176-L192) — `DEPTH 1` (`L176–L192`)
-
-```odin
- 176 | core_seek_to :: proc(c: ^Core, pos: i64) -> Error {
- 177 | 	if pos < 0 {
- 178 | 		return .Expected_Unsigned_Long
- 179 | 	}
- 180 | 	switch &v in c {
- 181 | 	case Core_Memory:
- 182 | 		v.pos = pos
- 183 | 		return nil
- 184 | 	case Core_File:
- 185 | 		os.seek(v.file, pos, .Start) or_return
- 186 | 		return nil
- 187 | 	case Core_Buffered_File:
- 188 | 		v.pos = pos
- 189 | 		return nil
- 190 | 	}
- 191 | 	return .Invalid_Database
- 192 | }
-```
-
-#### [`core_read`](../../xitdb/core.odin#L288-L323) — `DEPTH 2` (`L288–L323`)
-
-```odin
- 288 | core_read :: proc(c: ^Core, p: []u8) -> (read_n: int, err: Error) {
- 289 | 	if len(p) == 0 {
- 290 | 		return 0, nil
- 291 | 	}
- 292 | 	switch &v in c {
- 293 | 	case Core_Memory:
- 294 | 		if v.pos >= i64(len(v.buf)) {
- 295 | 			return 0, io.Error.EOF
- 296 | 		}
- 297 | 		avail := int(i64(len(v.buf)) - v.pos)
- 298 | 		to_read := min(len(p), avail)
- 299 | 		copy(p[:to_read], v.buf[int(v.pos):int(v.pos) + to_read])
- 300 | 		v.pos += i64(to_read)
- 301 | 		return to_read, nil
- 302 | 	case Core_File:
- 303 | 		return os.read(v.file, p)
- 304 | 	case Core_Buffered_File:
- 305 | 		buf_len := i64(len(v.memory.buf))
- 306 | 		if buf_len > 0 && v.pos >= v.memory_pos && v.pos < v.memory_pos + buf_len {
- 307 | 			mem_off := int(v.pos - v.memory_pos)
- 308 | 			size := min(len(p), int(buf_len) - mem_off)
- 309 | 			copy(p[:size], v.memory.buf[mem_off:mem_off + size])
- 310 | 			v.pos += i64(size)
- 311 | 			return size, nil
- 312 | 		}
- 313 | 		os.seek(v.file.file, v.pos, .Start) or_return
- 314 | 		max_size := len(p)
- 315 | 		if buf_len > 0 && v.pos < v.memory_pos {
- 316 | 			max_size = min(len(p), int(v.memory_pos - v.pos))
- 317 | 		}
- 318 | 		n, err := os.read(v.file.file, p[:max_size])
- 319 | 		v.pos += i64(n)
- 320 | 		return n, err
- 321 | 	}
- 322 | 	return 0, .Invalid_Database
- 323 | }
-```
-
-#### [`core_read_exact`](../../xitdb/core.odin#L326-L359) — `DEPTH 1` (`L326–L359`)
-
-```odin
- 326 | core_read_exact :: proc(c: ^Core, p: []u8) -> Error {
- 327 | 	if len(p) == 0 {
- 328 | 		return nil
- 329 | 	}
- 330 | 	#partial switch &v in c {
- 331 | 	case Core_Memory:
- 332 | 		end_pos := v.pos + i64(len(p))
- 333 | 		if v.pos < 0 || end_pos > i64(len(v.buf)) {
- 334 | 			v.pos = i64(len(v.buf))
- 335 | 			return Xitdb_Error.Unexpected_EOF
- 336 | 		}
- 337 | 		copy(p, v.buf[int(v.pos):int(end_pos)])
- 338 | 		v.pos = end_pos
- 339 | 		return nil
- 340 | 	}
- 341 | 	total := 0
- 342 | 	for total < len(p) {
- 343 | 		n, err := core_read(c, p[total:])  // <== [calls core_read]
- 344 | 		total += n
- 345 | 		if err != nil {
- 346 | 			if err == io.Error.EOF {
- 347 | 				if total == len(p) {
- 348 | 					return nil
- 349 | 				}
- 350 | 				return Xitdb_Error.Unexpected_EOF
- 351 | 			}
- 352 | 			return err
- 353 | 		}
- 354 | 		if n == 0 {
- 355 | 			return Xitdb_Error.Unexpected_EOF
- 356 | 		}
- 357 | 	}
- 358 | 	return nil
- 359 | }
-```
-
-### `xitdb/cursor.odin` (2 procedures · 16 lines: [`L496–L504`](../../xitdb/cursor.odin#L496-L504), [`L506–L512`](../../xitdb/cursor.odin#L506-L512))
-
-#### [`cursor_reader_read_fully`](../../xitdb/cursor.odin#L496-L504) — `ENTRY POINT` (`L496–L504`)
-
-```odin
- 496 | cursor_reader_read_fully :: proc(r: ^Cursor_Reader, buf: []u8) -> Error {
- 497 | 	if r.size < r.relative_position || r.size - r.relative_position < i64(len(buf)) {
- 498 | 		return .End_Of_Stream
- 499 | 	}
- 500 | 	core_seek_to(r.parent.db.core, r.start_position + r.relative_position) or_return  // <== [calls core_seek_to]
- 501 | 	core_read_exact(r.parent.db.core, buf) or_return  // <== [calls core_read_exact]
- 502 | 	r.relative_position += i64(len(buf))
- 503 | 	return nil
- 504 | }
-```
-
-#### [`cursor_reader_seek_to`](../../xitdb/cursor.odin#L506-L512) — `ENTRY POINT` (`L506–L512`)
-
-```odin
- 506 | cursor_reader_seek_to :: proc(r: ^Cursor_Reader, position: i64) -> Error {
- 507 | 	if position < 0 || position > r.size {
- 508 | 		return Xitdb_Error.Invalid_Offset
- 509 | 	}
- 510 | 	r.relative_position = position
- 511 | 	return nil
- 512 | }
-```
-
