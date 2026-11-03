@@ -92,9 +92,9 @@
 | File | Procedure | Role / Call Depth | Lines | Source Link (`#L<start>-L<end>`) |
 | :--- | :--- | :--- | ---: | :--- |
 | `xitdb/collections.odin` | `sorted_map_get_index_kv_pair` | **Entry Point** (`depth 0`) | 9 | [`xitdb/collections.odin#L728-L736`](../../xitdb/collections.odin#L728-L736) |
-| `xitdb/cursor.odin` | `cursor_read_path` | `depth 1` (from `sorted_map_get_index_kv_pair`) | 12 | [`xitdb/cursor.odin#L68-L79`](../../xitdb/cursor.odin#L68-L79) |
-| `xitdb/cursor.odin` | `cursor_read_kv_pair` | `depth 1` (from `sorted_map_get_index_kv_pair`) | 19 | [`xitdb/cursor.odin#L365-L383`](../../xitdb/cursor.odin#L365-L383) |
-| `xitdb/cursor.odin` | `cursor_resolved` | `depth 2` (from `cursor_read_path`, `cursor_read_kv_pair`) | 11 | [`xitdb/cursor.odin#L46-L56`](../../xitdb/cursor.odin#L46-L56) |
+| `xitdb/cursor.odin` | `cursor_read_path` | `depth 1` (from `sorted_map_get_index_kv_pair`) | 12 | [`xitdb/cursor.odin#L69-L80`](../../xitdb/cursor.odin#L69-L80) |
+| `xitdb/cursor.odin` | `cursor_read_kv_pair` | `depth 1` (from `sorted_map_get_index_kv_pair`) | 19 | [`xitdb/cursor.odin#L366-L384`](../../xitdb/cursor.odin#L366-L384) |
+| `xitdb/cursor.odin` | `cursor_resolved` | `depth 2` (from `cursor_read_path`, `cursor_read_kv_pair`) | 11 | [`xitdb/cursor.odin#L47-L57`](../../xitdb/cursor.odin#L47-L57) |
 | `xitdb/database.odin` | `read_slot_pointer` | `depth 2` (from `cursor_read_path`, `_exec_path_part`) | 68 | [`xitdb/database.odin#L552-L619`](../../xitdb/database.odin#L552-L619) |
 | `xitdb/types.odin` | `is_key_only_entry` | `depth 2` (from `cursor_read_kv_pair`, `database_kv_key_position`) | 3 | [`xitdb/types.odin#L1329-L1331`](../../xitdb/types.odin#L1329-L1331) |
 | `xitdb/core.odin` | `core_seek_to` | `depth 2` (from `cursor_read_kv_pair`, `read_slot_pointer`, `_exec_path_part`) | 17 | [`xitdb/core.odin#L176-L192`](../../xitdb/core.odin#L176-L192) |

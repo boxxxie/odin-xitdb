@@ -1,5 +1,6 @@
 package xitdb
 
+import "base:intrinsics"
 import "core:encoding/endian"
 
 Read_Cursor :: struct {
@@ -438,6 +439,7 @@ Cursor_Reader :: struct {
 	size:              i64,
 	start_position:    i64,
 	relative_position: i64,
+	direct_slice:      []u8,
 }
 
 cursor_reader :: proc(c: Read_Cursor) -> (res: Cursor_Reader, err: Error) {
@@ -447,14 +449,22 @@ cursor_reader :: proc(c: Read_Cursor) -> (res: Cursor_Reader, err: Error) {
 		core_seek_to(c.db.core, slot_ptr.slot.value) or_return
 		size := core_read_long(c.db.core) or_return
 		start_position := core_position(c.db.core) or_return
+		direct_slice: []u8
+		#partial switch &mem in c.db.core {
+		case Core_Memory:
+			if start_position >= 0 && size >= 0 && start_position + size <= i64(len(mem.buf)) {
+				direct_slice = mem.buf[int(start_position):int(start_position + size)]
+			}
+		}
 		return Cursor_Reader{
 			parent            = c,
 			size              = size,
 			start_position    = start_position,
 			relative_position = 0,
+			direct_slice      = direct_slice,
 		}, nil
 	case .Short_Bytes:
-		buf: [8]u8
+		buf: [8]u8 = ---
 		endian.unchecked_put_u64be(buf[:], u64(slot_ptr.slot.value))
 		total_size := 6 if slot_ptr.slot.full else 8
 		value_size := 0
@@ -468,42 +478,64 @@ cursor_reader :: proc(c: Read_Cursor) -> (res: Cursor_Reader, err: Error) {
 		if !ok {
 			return {}, .Expected_Slot_Position
 		}
+		start_position := pos + 1
+		direct_slice: []u8
+		#partial switch &mem in c.db.core {
+		case Core_Memory:
+			if start_position >= 0 && start_position + i64(value_size) <= i64(len(mem.buf)) {
+				direct_slice = mem.buf[int(start_position):int(start_position) + value_size]
+			}
+		}
 		return Cursor_Reader{
 			parent            = c,
 			size              = i64(value_size),
-			start_position    = pos + 1,
+			start_position    = start_position,
 			relative_position = 0,
+			direct_slice      = direct_slice,
 		}, nil
 	case:
 		return {}, .Unexpected_Tag
 	}
 }
 
-cursor_reader_read :: proc(r: ^Cursor_Reader, p: []u8) -> (res: int, err: Error) {
+cursor_reader_read :: #force_inline proc(r: ^Cursor_Reader, p: []u8) -> (res: int, err: Error) {
 	if r.size < r.relative_position {
 		return 0, .End_Of_Stream
 	}
-	core_seek_to(r.parent.db.core, r.start_position + r.relative_position) or_return
 	read_size := min(i64(len(p)), r.size - r.relative_position)
 	if read_size == 0 {
 		return 0, nil
 	}
+	if r.direct_slice != nil {
+		intrinsics.mem_copy_non_overlapping(raw_data(p), &r.direct_slice[int(r.relative_position)], int(read_size))
+		r.relative_position += read_size
+		return int(read_size), nil
+	}
+	core_seek_to(r.parent.db.core, r.start_position + r.relative_position) or_return
 	core_read_exact(r.parent.db.core, p[:read_size]) or_return
 	r.relative_position += read_size
 	return int(read_size), nil
 }
 
-cursor_reader_read_fully :: proc(r: ^Cursor_Reader, buf: []u8) -> Error {
-	if r.size < r.relative_position || r.size - r.relative_position < i64(len(buf)) {
+cursor_reader_read_fully :: #force_inline proc(r: ^Cursor_Reader, buf: []u8) -> Error {
+	n := i64(len(buf))
+	if r.size < r.relative_position || r.size - r.relative_position < n {
 		return .End_Of_Stream
+	}
+	if r.direct_slice != nil {
+		if n > 0 {
+			intrinsics.mem_copy_non_overlapping(raw_data(buf), &r.direct_slice[int(r.relative_position)], int(n))
+			r.relative_position += n
+		}
+		return nil
 	}
 	core_seek_to(r.parent.db.core, r.start_position + r.relative_position) or_return
 	core_read_exact(r.parent.db.core, buf) or_return
-	r.relative_position += i64(len(buf))
+	r.relative_position += n
 	return nil
 }
 
-cursor_reader_seek_to :: proc(r: ^Cursor_Reader, position: i64) -> Error {
+cursor_reader_seek_to :: #force_inline proc(r: ^Cursor_Reader, position: i64) -> Error {
 	if position < 0 || position > r.size {
 		return Xitdb_Error.Invalid_Offset
 	}

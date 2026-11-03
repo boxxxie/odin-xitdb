@@ -6,7 +6,7 @@
 
 | Implementation | Median (`ns/op`) | Mean ± σ (`ns/op`) | CV% | `p95` (`ns`) | Throughput (`ops/s`) | Storage Footprint | Result |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
-| **Odin** (`-o:speed -microarch:native`) | **1,462** | 1,462.8 ± 36.7 | 2.5% | 1,507.0 | 683,995 | 23.4 KB | **1.19x Odin** (`z = 11.0`) |
+| **Odin** (`-o:speed -microarch:native`) | **1,462** | 1,463.8 ± 28.7 | 2.0% | 1,505.0 | 683,995 | 23.4 KB | **1.19x Odin** (`z = 13.1`) |
 | **Zig** (`0.17.0 -Doptimize=ReleaseFast`) | 1,743 | 1,735.2 ± 41.2 | 2.4% | 1,777.8 | 573,723 | 23.4 KB | Baseline |
 
 ---
@@ -119,11 +119,11 @@
 | `xitdb/core.odin` | `core_destroy` | **Entry Point** (`depth 0`) | 22 | [`xitdb/core.odin#L102-L123`](../../xitdb/core.odin#L102-L123) |
 | `xitdb/database.odin` | `database_init` | **Entry Point** (`depth 0`) | 54 | [`xitdb/database.odin#L182-L235`](../../xitdb/database.odin#L182-L235) |
 | `xitdb/types.odin` | `sha1_hasher` | **Entry Point** (`depth 0`) | 10 | [`xitdb/types.odin#L825-L834`](../../xitdb/types.odin#L825-L834) |
-| `xitdb/compact_replicate.odin` | `database_read_committed_bytes` | **Entry Point** (`depth 0`) | 23 | [`xitdb/compact_replicate.odin#L783-L805`](../../xitdb/compact_replicate.odin#L783-L805) |
-| `xitdb/compact_replicate.odin` | `database_apply_replicated_bytes` | **Entry Point** (`depth 0`) | 29 | [`xitdb/compact_replicate.odin#L859-L887`](../../xitdb/compact_replicate.odin#L859-L887) |
-| `xitdb/compact_replicate.odin` | `database_replica_state` | **Entry Point** (`depth 0`) | 5 | [`xitdb/compact_replicate.odin#L683-L687`](../../xitdb/compact_replicate.odin#L683-L687) |
-| `xitdb/compact_replicate.odin` | `database_replication_start` | **Entry Point** (`depth 0`) | 18 | [`xitdb/compact_replicate.odin#L692-L709`](../../xitdb/compact_replicate.odin#L692-L709) |
-| `xitdb/compact_replicate.odin` | `database_read_committed_buf` | **Entry Point** (`depth 0`) | 24 | [`xitdb/compact_replicate.odin#L757-L780`](../../xitdb/compact_replicate.odin#L757-L780) |
+| `xitdb/compact_replicate.odin` | `database_read_committed_bytes` | **Entry Point** (`depth 0`) | 23 | [`xitdb/compact_replicate.odin#L904-L926`](../../xitdb/compact_replicate.odin#L904-L926) |
+| `xitdb/compact_replicate.odin` | `database_apply_replicated_bytes` | **Entry Point** (`depth 0`) | 29 | [`xitdb/compact_replicate.odin#L980-L1008`](../../xitdb/compact_replicate.odin#L980-L1008) |
+| `xitdb/compact_replicate.odin` | `database_replica_state` | **Entry Point** (`depth 0`) | 5 | [`xitdb/compact_replicate.odin#L804-L808`](../../xitdb/compact_replicate.odin#L804-L808) |
+| `xitdb/compact_replicate.odin` | `database_replication_start` | **Entry Point** (`depth 0`) | 18 | [`xitdb/compact_replicate.odin#L813-L830`](../../xitdb/compact_replicate.odin#L813-L830) |
+| `xitdb/compact_replicate.odin` | `database_read_committed_buf` | **Entry Point** (`depth 0`) | 24 | [`xitdb/compact_replicate.odin#L878-L901`](../../xitdb/compact_replicate.odin#L878-L901) |
 | `xitdb/core.odin` | `_buffered_flush` | `depth 1` (from `core_destroy`, `core_write_all`, `core_sync`) | 8 | [`xitdb/core.odin#L144-L151`](../../xitdb/core.odin#L144-L151) |
 | `xitdb/core.odin` | `core_seek_to` | `depth 1` (from `database_init`, `database_read_committed_bytes`, `database_apply_replicated_bytes`) | 17 | [`xitdb/core.odin#L176-L192`](../../xitdb/core.odin#L176-L192) |
 | `xitdb/core.odin` | `core_length` | `depth 1` (from `database_init`, `database_commit_root`, `_database_committed_size_with_header`) | 22 | [`xitdb/core.odin#L153-L174`](../../xitdb/core.odin#L153-L174) |

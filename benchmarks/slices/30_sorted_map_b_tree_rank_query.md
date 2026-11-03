@@ -91,7 +91,7 @@
 | :--- | :--- | :--- | ---: | :--- |
 | `xitdb/collections.odin` | `sorted_map_rank` | **Entry Point** (`depth 0`) | 3 | [`xitdb/collections.odin#L762-L764`](../../xitdb/collections.odin#L762-L764) |
 | `xitdb/collections.odin` | `sorted_map_rank_by_bytes` | `depth 1` (from `sorted_map_rank`) | 11 | [`xitdb/collections.odin#L738-L748`](../../xitdb/collections.odin#L738-L748) |
-| `xitdb/cursor.odin` | `cursor_resolved` | `depth 2` (from `sorted_map_rank_by_bytes`) | 11 | [`xitdb/cursor.odin#L46-L56`](../../xitdb/cursor.odin#L46-L56) |
+| `xitdb/cursor.odin` | `cursor_resolved` | `depth 2` (from `sorted_map_rank_by_bytes`) | 11 | [`xitdb/cursor.odin#L47-L57`](../../xitdb/cursor.odin#L47-L57) |
 | `xitdb/core.odin` | `core_seek_to` | `depth 2` (from `sorted_map_rank_by_bytes`, `sorted_rank`, `database_read_root_header`) | 17 | [`xitdb/core.odin#L176-L192`](../../xitdb/core.odin#L176-L192) |
 | `xitdb/core.odin` | `core_read_exact` | `depth 2` (from `sorted_map_rank_by_bytes`, `sorted_rank`, `database_read_root_header`) | 34 | [`xitdb/core.odin#L326-L359`](../../xitdb/core.odin#L326-L359) |
 | `xitdb/types.odin` | `btree_header_from_bytes` | `depth 2` (from `sorted_map_rank_by_bytes`) | 9 | [`xitdb/types.odin#L1099-L1107`](../../xitdb/types.odin#L1099-L1107) |

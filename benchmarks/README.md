@@ -104,29 +104,32 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 > - Read the [**Idiomatic Zig Optimization Guide (`zig-guide/README.md`)**](zig-guide/README.md) for six standalone, peer-engineering deep dives ([`01 CoreMemory`](zig-guide/01_core_memory_zero_vtable_io.md) · [`02 LinkedArrayList`](zig-guide/02_btree_node_batch_io_and_leaf_seek.md) · [`03 SortedMap`](zig-guide/03_sorted_bptree_binary_search.md) · [`04 HAMT`](zig-guide/04_hamt_single_pass_kv_and_lazy_remove.md) · [`05 Cursor & Paths`](zig-guide/05_cursor_bytes_streams_and_paths.md) · [`06 CoreBufferedFile & Compactor`](zig-guide/06_buffered_file_tail_cache_and_compaction.md)) showing how to achieve the same speedups in Zig `0.17` in ~140 net LOC without sacrificing readability or wire compatibility.
 
 <!-- BEGIN_BENCHMARK_TABLE -->
-### 1. Latest Code-Change Impact & Affected Benchmarks (`2d6f9a7120f3` → `40c719e2b02d`, Odin, 8 / 75 tests re-run)
+### 1. Latest Code-Change Impact & Affected Benchmarks (`40c719e2b02d` → `3652298ebf2c`, Odin, 6 / 75 tests re-run)
 
-- **Code Diff Inspected:** `3a62ba7~1..3a62ba7` · **Changed Files:** `xitdb/dsl.odin`
-- **Modified Procedures:** `_split_datalog_where_clauses`
-- **Mapped Benchmark Scope:** Odin groups=`dsl` · filter=`Datalog` (**8 / 75** Odin benchmarks executed; **67** unchanged benchmarks retained from `2d6f9a7`)
+- **Code Diff Inspected:** `working tree vs HEAD` · **Changed Files:** `xitdb/compact_replicate.odin`, `xitdb/cursor.odin`
+- **Modified Procedures:** `_compactor_populate_array_list`, `_compactor_populate_btree_branch`, `_compactor_populate_btree_leaf`, `_compactor_populate_btree`, `_compactor_populate_kv_pair`, `_compactor_populate_sorted_map_branch`, `_compactor_populate_sorted_map_leaf`, `_compactor_remap_array_list_index`, `_compactor_remap_btree_node`, `_compactor_reserve_block`, `_memory_offset_map_grow`, `cursor_reader_read_fully`, `cursor_reader_read`, `cursor_reader_seek_to`, `cursor_reader`, `database_compact`, `memory_offset_map_destroy`, `memory_offset_map_init`, `offset_map_get`, `offset_map_put`, `offset_map_reset`
+- **Mapped Benchmark Scope:** Odin groups=`hamt`, `lists`, `sorted_map`, `compaction`, `hashers`, `backends`, `dsl` (**6 / 75** Odin benchmarks executed; **69** unchanged benchmarks retained from `40c719e`)
 
-#### 1.3 Multi-Microsecond Transactions, Compaction & Queries (`µs`, 8 affected tests)
+#### 1.1 Sub-100ns Fast Path (`ns`, 2 affected tests)
 
-| # | Benchmark | Verdict | Delta | Speedup | Base `2d6f9a7` (`µs`) | Curr `40c719e` (`µs`) | Welch $z$ | Base Mean ± σ | Curr Mean ± σ |
+| # | Benchmark | Verdict | Delta | Speedup | Base `40c719e` (`ns`) | Curr `3652298` (`ns`) | Welch $z$ | Base Mean ± σ | Curr Mean ± σ |
 | ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 64 | [`DSL Layer 2: Tx Commit + Secondary Index (N=500)`](bench_xitdb.odin#L2128-L2163) [🔍 98p](slices/64_dsl_layer_2_tx_commit_secondary_index_n_500.md) | `~NOISE` | `-5.2%` | 1.06x | 4.56 | **4.32** | `0.9` | 4.71 ± 0.39 | 4.48 ± 0.37 |
-| 68 | [`DSL Layer 3: Datomic pull projection (N=200)`](bench_xitdb.odin#L2233-L2243) [🔍 100p](slices/68_dsl_layer_3_datomic_pull_projection_n_200.md) | `~NOISE` | `+11.5%` | 0.90x | 1.53 | **1.71** | `2.7` | 1.54 ± 0.03 | 1.84 ± 0.25 |
-| 69 | [`DSL Layer 4: diff_moments (1 of 700 mutated)`](bench_xitdb.odin#L2248-L2265) [🔍 156p](slices/69_dsl_layer_4_diff_moments_1_of_700_mutated.md) | `~NOISE` | `+9.5%` | 0.91x | 261.7 | **286.6** | `11.2` | 263.4 ± 4.24 | 287.0 ± 2.01 |
-| 71 | [`DSL Layer 5: Datalog B+Tree Prefix + Join`](bench_xitdb.odin#L2280-L2300) [🔍 121p](slices/71_dsl_layer_5_datalog_b_tree_prefix_join.md) | `~NOISE` | `-5.5%` | 1.06x | 15.4 | **14.5** | `1.3` | 15.6 ± 0.68 | 14.9 ± 0.97 |
-| 72 | [`DSL Layer 5: Datalog Grouped Aggs (N=500)`](bench_xitdb.odin#L2303-L2318) [🔍 121p](slices/72_dsl_layer_5_datalog_grouped_aggs_n_500.md) | **FASTER** | `-26.6%` | 1.36x | 855.4 | **628.2** | `16.1` | 842.9 ± 25.0 | 620.2 ± 18.3 |
-| 73 | [`DSL Layer 5: Datalog Cycle-Safe reach (32-ring)`](bench_xitdb.odin#L2321-L2336) [🔍 121p](slices/73_dsl_layer_5_datalog_cycle_safe_reach_32_ring.md) | `~NOISE` | `+3.9%` | 0.96x | 27.1 | **28.2** | `1.4` | 27.7 ± 1.17 | 28.8 ± 1.43 |
-| 74 | [`DSL Layer 2: Secondary Index Evict+Update (N=200)`](bench_xitdb.odin#L2340-L2357) [🔍 97p](slices/74_dsl_layer_2_secondary_index_evict_update_n_200.md) | **NEW** | `—` | — | — | **3.17** | `—` | — | 3.22 ± 0.13 |
-| 75 | [`DSL Layer 3/4: Cyclic Graph pull + diff (N=200)`](bench_xitdb.odin#L2360-L2402) [🔍 184p](slices/75_dsl_layer_3_4_cyclic_graph_pull_diff_n_200.md) | **NEW** | `—` | — | — | **7.46** | `—` | — | 7.48 ± 0.13 |
+| 52 | [`Stream: Cursor_Reader (256 x 4KB = 1MB)`](bench_xitdb.odin#L1709-L1725) [🔍 14p](slices/52_stream_cursor_reader_256_x_4kb_1mb.md) | **FASTER** | `-11.5%` | 1.13x | 52 | **46** | `14.2` | 53 ± 0.9 | 46 ± 0.7 |
+| 53 | [`Stream: Cursor_Reader random seek + 64B read`](bench_xitdb.odin#L1727-L1742) [🔍 5p](slices/53_stream_cursor_reader_random_seek_64b_read.md) | `~NOISE` | `-50.0%` | 2.00x | 6 | **3** | `8.5` | 6 ± 0.9 | 3 ± 0.0 |
+
+#### 1.3 Multi-Microsecond Transactions, Compaction & Queries (`µs`, 4 affected tests)
+
+| # | Benchmark | Verdict | Delta | Speedup | Base `40c719e` (`µs`) | Curr `3652298` (`µs`) | Welch $z$ | Base Mean ± σ | Curr Mean ± σ |
+| ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 41 | [`Compaction (Memory_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1419-L1437) [🔍 89p](slices/41_compaction_memory_offset_map_200_1.md) | **FASTER** | `-46.8%` | 1.88x | 3.71 | **1.97** | `13.0` | 3.89 ± 0.32 | 1.96 ± 0.10 |
+| 42 | [`Compaction (File_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1439-L1460) [🔍 88p](slices/42_compaction_file_offset_map_200_1.md) | `~NOISE` | `-0.2%` | 1.00x | 9.35 | **9.33** | `0.7` | 9.49 ± 0.48 | 9.32 ± 0.23 |
+| 43 | [`Compaction (Heterogeneous DAG + dedup)`](bench_xitdb.odin#L1462-L1521) [🔍 152p](slices/43_compaction_heterogeneous_dag_dedup.md) | **FASTER** | `-77.3%` | 4.40x | 126.6 | **28.8** | `48.2` | 126.4 ± 4.40 | 28.5 ± 1.53 |
+| 44 | [`Replication (Post-compaction resync)`](bench_xitdb.odin#L1523-L1548) [🔍 42p](slices/44_replication_post_compaction_resync.md) | `~NOISE` | `+0.0%` | 1.00x | 1.46 | **1.46** | `0.1` | 1.46 ± 0.04 | 1.46 ± 0.03 |
 
 
-### 2. Odin Full Suite Results (`-o:speed -microarch:native`, Commit `40c719e2b02d`, 5 samples across 1 run(s))
+### 2. Odin Full Suite Results (`-o:speed -microarch:native`, Commit `3652298ebf2c`, 5 samples across 1 run(s))
 
-> **Selective update (`40c719e`):** Re-ran **8 / 75** affected benchmarks (marked with `↻` in `#` below; see Section 1 above for the code-change impact & progression table). Unchanged benchmarks retain their prior baseline.
+> **Selective update (`3652298`):** Re-ran **6 / 75** affected benchmarks (marked with `↻` in `#` below; see Section 1 above for the code-change impact & progression table). Unchanged benchmarks retain their prior baseline.
 
 
 #### 2.1 Sub-100ns Fast Path (`< 100 ns` · `10M–167M ops/s`, 20 tests)
@@ -148,8 +151,8 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 48 | [`Bytes: External Bytes read_bytes_buf`](bench_xitdb.odin#L1629-L1638) [🔍 12p](slices/48_bytes_external_bytes_read_bytes_buf.md) | **9** | 9 ± 0.0 | 0.0% | 111M | 111M | 0 | 9 | 9 | 9 | 9 | 10K |
 | 49 | [`Bytes: Tagged Short_Bytes read_bytes_buf`](bench_xitdb.odin#L1640-L1656) [🔍 76p](slices/49_bytes_tagged_short_bytes_read_bytes_buf.md) | **6** | 6 ± 0.0 | 0.0% | 167M | 167M | 0 | 6 | 6 | 6 | 6 | 10K |
 | 50 | [`Bytes: Tagged External Bytes read_bytes_buf`](bench_xitdb.odin#L1658-L1667) [🔍 12p](slices/50_bytes_tagged_external_bytes_read_bytes_buf.md) | **9** | 9 ± 0.4 | 4.9% | 100M | 111M | 0 | 10 | 10 | 9 | 10 | 10K |
-| 52 | [`Stream: Cursor_Reader (256 x 4KB = 1MB)`](bench_xitdb.odin#L1709-L1725) [🔍 14p](slices/52_stream_cursor_reader_256_x_4kb_1mb.md) | **52** | 53 ± 0.9 | 1.7% | 18.5M | 19.2M | 1 | 54 | 54 | 52 | 54 | 256 |
-| 53 | [`Stream: Cursor_Reader random seek + 64B read`](bench_xitdb.odin#L1727-L1742) [🔍 5p](slices/53_stream_cursor_reader_random_seek_64b_read.md) | **6** | 6 ± 0.9 | 14.0% | 125M | 167M | 0 | 8 | 8 | 6 | 8 | 2K |
+| 52 ↻ | [`Stream: Cursor_Reader (256 x 4KB = 1MB)`](bench_xitdb.odin#L1709-L1725) [🔍 14p](slices/52_stream_cursor_reader_256_x_4kb_1mb.md) | **46** | 46 ± 0.7 | 1.5% | 21.3M | 22.2M | 0 | 47 | 47 | 45 | 47 | 256 |
+| 53 ↻ | [`Stream: Cursor_Reader random seek + 64B read`](bench_xitdb.odin#L1727-L1742) [🔍 5p](slices/53_stream_cursor_reader_random_seek_64b_read.md) | **3** | 3 ± 0.0 | 0.0% | 333M | 333M | 0 | 3 | 3 | 3 | 3 | 2K |
 | 54 | [`Stream: Cursor_Writer random seek + 16B patch`](bench_xitdb.odin#L1744-L1774) [🔍 54p](slices/54_stream_cursor_writer_random_seek_16b_patch.md) | **13** | 13 ± 0.4 | 3.4% | 71.4M | 76.9M | 0 | 14 | 14 | 13 | 14 | 2K |
 | 57 | [`Cursor: Full KV-pair scan (read_kv_pair)`](bench_xitdb.odin#L1856-L1889) [🔍 117p](slices/57_cursor_full_kv_pair_scan_read_kv_pair.md) | **97** | 97 ± 2.1 | 2.1% | 10.0M | 10.5M | 3 | 100 | 100 | 95 | 100 | 2K |
 | 63 | [`DB: Re-open & trailer checksum verify`](bench_xitdb.odin#L2087-L2102) [🔍 36p](slices/63_db_re_open_trailer_checksum_verify.md) | **56** | 56 ± 0.5 | 1.0% | 17.5M | 17.9M | 1 | 57 | 57 | 56 | 57 | 5K |
@@ -199,25 +202,25 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 
 | # | Benchmark | Med (`µs`) | Mean ± σ | CV | Min `ops/s` | Max `ops/s` | IQR | `p95` | `p99` | Min | Max | Ops |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 41 | [`Compaction (Memory_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1419-L1437) [🔍 89p](slices/41_compaction_memory_offset_map_200_1.md) | **3.71** | 3.89 ± 0.32 | 8.3% | 229K | 279K | 0.39 | 4.31 | 4.35 | 3.59 | 4.36 | 1 |
-| 42 | [`Compaction (File_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1439-L1460) [🔍 88p](slices/42_compaction_file_offset_map_200_1.md) | **9.35** | 9.49 ± 0.48 | 5.1% | 97.8K | 111K | 0.43 | 10.1 | 10.2 | 8.98 | 10.2 | 1 |
-| 43 | [`Compaction (Heterogeneous DAG + dedup)`](bench_xitdb.odin#L1462-L1521) [🔍 152p](slices/43_compaction_heterogeneous_dag_dedup.md) | **126.6** | 126.4 ± 4.40 | 3.5% | 7.5K | 8.2K | 3.22 | 131.9 | 132.8 | 121.3 | 133.1 | 1 |
-| 44 | [`Replication (Post-compaction resync)`](bench_xitdb.odin#L1523-L1548) [🔍 42p](slices/44_replication_post_compaction_resync.md) | **1.46** | 1.46 ± 0.04 | 2.5% | 661K | 703K | 0.05 | 1.51 | 1.51 | 1.42 | 1.51 | 1 |
+| 41 ↻ | [`Compaction (Memory_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1419-L1437) [🔍 89p](slices/41_compaction_memory_offset_map_200_1.md) | **1.97** | 1.96 ± 0.10 | 5.2% | 475K | 555K | 0.12 | 2.09 | 2.10 | 1.80 | 2.10 | 1 |
+| 42 ↻ | [`Compaction (File_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1439-L1460) [🔍 88p](slices/42_compaction_file_offset_map_200_1.md) | **9.33** | 9.32 ± 0.23 | 2.5% | 103K | 111K | 0.40 | 9.65 | 9.70 | 9.05 | 9.71 | 1 |
+| 43 ↻ | [`Compaction (Heterogeneous DAG + dedup)`](bench_xitdb.odin#L1462-L1521) [🔍 152p](slices/43_compaction_heterogeneous_dag_dedup.md) | **28.8** | 28.5 ± 1.53 | 5.4% | 32.8K | 38.1K | 2.25 | 30.4 | 30.5 | 26.3 | 30.5 | 1 |
+| 44 ↻ | [`Replication (Post-compaction resync)`](bench_xitdb.odin#L1523-L1548) [🔍 42p](slices/44_replication_post_compaction_resync.md) | **1.46** | 1.46 ± 0.03 | 2.0% | 661K | 703K | 0.03 | 1.51 | 1.51 | 1.42 | 1.51 | 1 |
 | 58 | [`Backend: Core_Memory commits`](bench_xitdb.odin#L1912-L1939) [🔍 100p](slices/58_backend_core_memory_commits.md) | **1.22** | 1.22 ± 0.01 | 0.9% | 810K | 829K | 0.01 | 1.23 | 1.23 | 1.21 | 1.24 | 500 |
 | 59 | [`Backend: Core_Buffered_File commits`](bench_xitdb.odin#L1942-L1981) [🔍 101p](slices/59_backend_core_buffered_file_commits.md) | **4.58** | 4.58 ± 0.02 | 0.3% | 218K | 220K | 0.01 | 4.59 | 4.59 | 4.55 | 4.59 | 500 |
 | 60 | [`Backend: Core_File (unbuffered) commits`](bench_xitdb.odin#L1984-L2018) [🔍 100p](slices/60_backend_core_file_unbuffered_commits.md) | **44.1** | 44.1 ± 0.19 | 0.4% | 22.5K | 22.8K | 0.21 | 44.4 | 44.4 | 43.9 | 44.4 | 500 |
 | 61 | [`Tx: Mid-tx database_freeze + CoW clone`](bench_xitdb.odin#L2021-L2062) [🔍 95p](slices/61_tx_mid_tx_database_freeze_cow_clone.md) | **1.12** | 1.11 ± 0.01 | 0.8% | 891K | 909K | 0.01 | 1.12 | 1.12 | 1.10 | 1.12 | 500 |
-| 64 ↻ | [`DSL Layer 2: Tx Commit + Secondary Index (N=500)`](bench_xitdb.odin#L2128-L2163) [🔍 98p](slices/64_dsl_layer_2_tx_commit_secondary_index_n_500.md) | **4.32** | 4.48 ± 0.37 | 8.3% | 198K | 242K | 0.42 | 4.97 | 5.03 | 4.13 | 5.04 | 500 |
+| 64 | [`DSL Layer 2: Tx Commit + Secondary Index (N=500)`](bench_xitdb.odin#L2128-L2163) [🔍 98p](slices/64_dsl_layer_2_tx_commit_secondary_index_n_500.md) | **4.32** | 4.48 ± 0.37 | 8.3% | 198K | 242K | 0.42 | 4.97 | 5.03 | 4.13 | 5.04 | 500 |
 | 66 | [`DSL Layer 3: Struct marshal (N=200)`](bench_xitdb.odin#L2183-L2219) [🔍 168p](slices/66_dsl_layer_3_struct_marshal_n_200.md) | **4.23** | 4.41 ± 0.28 | 6.4% | 211K | 240K | 0.48 | 4.73 | 4.73 | 4.16 | 4.74 | 200 |
 | 67 | [`DSL Layer 3: Struct unmarshal (N=200)`](bench_xitdb.odin#L2221-L2231) [🔍 136p](slices/67_dsl_layer_3_struct_unmarshal_n_200.md) | **1.98** | 1.97 ± 0.03 | 1.3% | 500K | 515K | 0.04 | 2.00 | 2.00 | 1.94 | 2.00 | 200 |
-| 68 ↻ | [`DSL Layer 3: Datomic pull projection (N=200)`](bench_xitdb.odin#L2233-L2243) [🔍 100p](slices/68_dsl_layer_3_datomic_pull_projection_n_200.md) | **1.71** | 1.84 ± 0.25 | 13.3% | 442K | 593K | 0.16 | 2.18 | 2.24 | 1.69 | 2.26 | 200 |
-| 69 ↻ | [`DSL Layer 4: diff_moments (1 of 700 mutated)`](bench_xitdb.odin#L2248-L2265) [🔍 156p](slices/69_dsl_layer_4_diff_moments_1_of_700_mutated.md) | **286.6** | 287.0 ± 2.01 | 0.7% | 3.45K | 3.51K | 2.10 | 289.4 | 289.7 | 284.5 | 289.8 | 200 |
+| 68 | [`DSL Layer 3: Datomic pull projection (N=200)`](bench_xitdb.odin#L2233-L2243) [🔍 100p](slices/68_dsl_layer_3_datomic_pull_projection_n_200.md) | **1.71** | 1.84 ± 0.25 | 13.3% | 442K | 593K | 0.16 | 2.18 | 2.24 | 1.69 | 2.26 | 200 |
+| 69 | [`DSL Layer 4: diff_moments (1 of 700 mutated)`](bench_xitdb.odin#L2248-L2265) [🔍 156p](slices/69_dsl_layer_4_diff_moments_1_of_700_mutated.md) | **286.6** | 287.0 ± 2.01 | 0.7% | 3.45K | 3.51K | 2.10 | 289.4 | 289.7 | 284.5 | 289.8 | 200 |
 | 70 | [`DSL Layer 4: history_of lineage (3 moments)`](bench_xitdb.odin#L2267-L2276) [🔍 73p](slices/70_dsl_layer_4_history_of_lineage_3_moments.md) | **1.88** | 1.83 ± 0.09 | 4.8% | 524K | 581K | 0.14 | 1.91 | 1.91 | 1.72 | 1.91 | 200 |
-| 71 ↻ | [`DSL Layer 5: Datalog B+Tree Prefix + Join`](bench_xitdb.odin#L2280-L2300) [🔍 121p](slices/71_dsl_layer_5_datalog_b_tree_prefix_join.md) | **14.5** | 14.9 ± 0.97 | 6.5% | 60.3K | 70.5K | 0.59 | 16.3 | 16.5 | 14.2 | 16.6 | 100 |
-| 72 ↻ | [`DSL Layer 5: Datalog Grouped Aggs (N=500)`](bench_xitdb.odin#L2303-L2318) [🔍 121p](slices/72_dsl_layer_5_datalog_grouped_aggs_n_500.md) | **628.2** | 620.2 ± 18.3 | 2.9% | 1.6K | 1.7K | 32.5 | 636.1 | 636.2 | 598.2 | 636.2 | 25 |
-| 73 ↻ | [`DSL Layer 5: Datalog Cycle-Safe reach (32-ring)`](bench_xitdb.odin#L2321-L2336) [🔍 121p](slices/73_dsl_layer_5_datalog_cycle_safe_reach_32_ring.md) | **28.2** | 28.8 ± 1.43 | 5.0% | 31.9K | 35.7K | 0.33 | 30.8 | 31.2 | 28.0 | 31.3 | 100 |
-| 74 ↻ | [`DSL Layer 2: Secondary Index Evict+Update (N=200)`](bench_xitdb.odin#L2340-L2357) [🔍 97p](slices/74_dsl_layer_2_secondary_index_evict_update_n_200.md) | **3.17** | 3.22 ± 0.13 | 4.1% | 292K | 324K | 0.14 | 3.39 | 3.42 | 3.08 | 3.42 | 200 |
-| 75 ↻ | [`DSL Layer 3/4: Cyclic Graph pull + diff (N=200)`](bench_xitdb.odin#L2360-L2402) [🔍 184p](slices/75_dsl_layer_3_4_cyclic_graph_pull_diff_n_200.md) | **7.46** | 7.48 ± 0.13 | 1.7% | 130K | 136K | 0.07 | 7.65 | 7.69 | 7.36 | 7.70 | 200 |
+| 71 | [`DSL Layer 5: Datalog B+Tree Prefix + Join`](bench_xitdb.odin#L2280-L2300) [🔍 121p](slices/71_dsl_layer_5_datalog_b_tree_prefix_join.md) | **14.5** | 14.9 ± 0.97 | 6.5% | 60.3K | 70.5K | 0.59 | 16.3 | 16.5 | 14.2 | 16.6 | 100 |
+| 72 | [`DSL Layer 5: Datalog Grouped Aggs (N=500)`](bench_xitdb.odin#L2303-L2318) [🔍 121p](slices/72_dsl_layer_5_datalog_grouped_aggs_n_500.md) | **628.2** | 620.2 ± 18.3 | 2.9% | 1.6K | 1.7K | 32.5 | 636.1 | 636.2 | 598.2 | 636.2 | 25 |
+| 73 | [`DSL Layer 5: Datalog Cycle-Safe reach (32-ring)`](bench_xitdb.odin#L2321-L2336) [🔍 121p](slices/73_dsl_layer_5_datalog_cycle_safe_reach_32_ring.md) | **28.2** | 28.8 ± 1.43 | 5.0% | 31.9K | 35.7K | 0.33 | 30.8 | 31.2 | 28.0 | 31.3 | 100 |
+| 74 | [`DSL Layer 2: Secondary Index Evict+Update (N=200)`](bench_xitdb.odin#L2340-L2357) [🔍 97p](slices/74_dsl_layer_2_secondary_index_evict_update_n_200.md) | **3.17** | 3.22 ± 0.13 | 4.1% | 292K | 324K | 0.14 | 3.39 | 3.42 | 3.08 | 3.42 | 200 |
+| 75 | [`DSL Layer 3/4: Cyclic Graph pull + diff (N=200)`](bench_xitdb.odin#L2360-L2402) [🔍 184p](slices/75_dsl_layer_3_4_cyclic_graph_pull_diff_n_200.md) | **7.46** | 7.48 ± 0.13 | 1.7% | 130K | 136K | 0.07 | 7.65 | 7.69 | 7.36 | 7.70 | 200 |
 
 
 ### 3. Zig Full Suite Results (`-Doptimize=ReleaseFast -Dcpu=native`, Commit `40c719e2b02d`, 5 samples across 1 run(s))
@@ -300,7 +303,7 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 61 | [`Tx: Mid-tx database_freeze + CoW clone`](bench_xitdb.zig#L2181-L2231) [🔍 95p](slices/61_tx_mid_tx_database_freeze_cow_clone.md) | **1.96** | 1.97 ± 0.09 | 4.4% | 480K | 531K | 0.14 | 2.07 | 2.08 | 1.89 | 2.09 | 500 |
 | 62 | [`Tx: Aborted transaction rollback truncate`](bench_xitdb.zig#L2233-L2263) [🔍 76p](slices/62_tx_aborted_transaction_rollback_truncate.md) | **1.93** | 1.94 ± 0.03 | 1.6% | 502K | 523K | 0.02 | 1.98 | 1.99 | 1.91 | 1.99 | 500 |
 
-### 4. 1v1 Statistical Comparison (Odin vs. Zig, Commit `40c719e2b02d`)
+### 4. 1v1 Statistical Comparison (Odin vs. Zig, Commit `3652298ebf2c`)
 
 #### 4.1 Sub-100ns Fast Path (`ns`, 20 tests)
 
@@ -321,8 +324,8 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 48 | [`Bytes: External Bytes read_bytes_buf`](bench_xitdb.odin#L1629-L1638) ([Zig](bench_xitdb.zig#L1754-L1763) · [🔍 12p](slices/48_bytes_external_bytes_read_bytes_buf.md)) | **4.33x** | **9** | 39 | `42.4` ★ | 9 ± 0.0 | 0.0% | 9 | 39 ± 1.6 | 4.1% | 41 |
 | 49 | [`Bytes: Tagged Short_Bytes read_bytes_buf`](bench_xitdb.odin#L1640-L1656) ([Zig](bench_xitdb.zig#L1765-L1787) · [🔍 76p](slices/49_bytes_tagged_short_bytes_read_bytes_buf.md)) | **1.33x** | **6** | 8 | `4.5` ★ | 6 ± 0.0 | 0.0% | 6 | 8 ± 1.1 | 13.4% | 10 |
 | 50 | [`Bytes: Tagged External Bytes read_bytes_buf`](bench_xitdb.odin#L1658-L1667) ([Zig](bench_xitdb.zig#L1789-L1798) · [🔍 12p](slices/50_bytes_tagged_external_bytes_read_bytes_buf.md)) | **6.33x** | **9** | 57 | `86.5` ★ | 9 ± 0.4 | 4.9% | 10 | 57 ± 1.1 | 2.0% | 58 |
-| 52 | [`Stream: Cursor_Reader (256 x 4KB = 1MB)`](bench_xitdb.odin#L1709-L1725) ([Zig](bench_xitdb.zig#L1838-L1854) · [🔍 14p](slices/52_stream_cursor_reader_256_x_4kb_1mb.md)) | **1.60x** | **52** | 83 | `29.7` ★ | 53 ± 0.9 | 1.7% | 54 | 83 ± 2.1 | 2.5% | 84 |
-| 53 | [`Stream: Cursor_Reader random seek + 64B read`](bench_xitdb.odin#L1727-L1742) ([Zig](bench_xitdb.zig#L1856-L1871) · [🔍 5p](slices/53_stream_cursor_reader_random_seek_64b_read.md)) | **4.67x** | **6** | 28 | `48.7` ★ | 6 ± 0.9 | 14.0% | 8 | 28 ± 0.4 | 1.6% | 29 |
+| 52 | [`Stream: Cursor_Reader (256 x 4KB = 1MB)`](bench_xitdb.odin#L1709-L1725) ([Zig](bench_xitdb.zig#L1838-L1854) · [🔍 14p](slices/52_stream_cursor_reader_256_x_4kb_1mb.md)) | **1.80x** | **46** | 83 | `38.3` ★ | 46 ± 0.7 | 1.5% | 47 | 83 ± 2.1 | 2.5% | 84 |
+| 53 | [`Stream: Cursor_Reader random seek + 64B read`](bench_xitdb.odin#L1727-L1742) ([Zig](bench_xitdb.zig#L1856-L1871) · [🔍 5p](slices/53_stream_cursor_reader_random_seek_64b_read.md)) | **9.33x** | **3** | 28 | `126.0` ★ | 3 ± 0.0 | 0.0% | 3 | 28 ± 0.4 | 1.6% | 29 |
 | 54 | [`Stream: Cursor_Writer random seek + 16B patch`](bench_xitdb.odin#L1744-L1774) ([Zig](bench_xitdb.zig#L1873-L1900) · [🔍 54p](slices/54_stream_cursor_writer_random_seek_16b_patch.md)) | **2.31x** | **13** | 30 | `6.4` ★ | 13 ± 0.4 | 3.4% | 14 | 34 ± 7.4 | 21.4% | 45 |
 | 57 | [`Cursor: Full KV-pair scan (read_kv_pair)`](bench_xitdb.odin#L1856-L1889) ([Zig](bench_xitdb.zig#L1975-L2018) · [🔍 117p](slices/57_cursor_full_kv_pair_scan_read_kv_pair.md)) | **2.67x** | **97** | 259 | `127.9` ★ | 97 ± 2.1 | 2.1% | 100 | 259 ± 1.9 | 0.7% | 262 |
 | 63 | [`DB: Re-open & trailer checksum verify`](bench_xitdb.odin#L2087-L2102) ([Zig](bench_xitdb.zig#L2265-L2279) · [🔍 36p](slices/63_db_re_open_trailer_checksum_verify.md)) | **4.45x** | **56** | 249 | `109.5` ★ | 56 ± 0.5 | 1.0% | 57 | 249 ± 3.9 | 1.6% | 253 |
@@ -371,10 +374,10 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 
 | # | Benchmark | Speedup | Odin Med (`µs`) | Zig Med (`µs`) | Welch $z$ | Odin Mean ± σ | Odin CV | Odin `p95` | Zig Mean ± σ | Zig CV | Zig `p95` |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 41 | [`Compaction (Memory_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1419-L1437) ([Zig](bench_xitdb.zig#L1440-L1458) · [🔍 89p](slices/41_compaction_memory_offset_map_200_1.md)) | **2.05x** | **3.71** | 7.59 | `3.9` ★ | 3.89 ± 0.32 | 8.3% | 4.31 | 8.77 ± 2.77 | 31.6% | 12.5 |
-| 42 | [`Compaction (File_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1439-L1460) ([Zig](bench_xitdb.zig#L1460-L1514) · [🔍 88p](slices/42_compaction_file_offset_map_200_1.md)) | **1.47x** | **9.35** | 13.7 | `5.6` ★ | 9.49 ± 0.48 | 5.1% | 10.1 | 14.5 ± 1.93 | 13.4% | 17.1 |
-| 43 | [`Compaction (Heterogeneous DAG + dedup)`](bench_xitdb.odin#L1462-L1521) ([Zig](bench_xitdb.zig#L1516-L1603) · [🔍 152p](slices/43_compaction_heterogeneous_dag_dedup.md)) | 0.87x | 126.6 | **110.1** | `3.2` ★ | 126.4 ± 4.40 | 3.5% | 131.9 | 112.5 ± 8.85 | 7.9% | 123.6 |
-| 44 | [`Replication (Post-compaction resync)`](bench_xitdb.odin#L1523-L1548) ([Zig](bench_xitdb.zig#L1605-L1635) · [🔍 42p](slices/44_replication_post_compaction_resync.md)) | **1.19x** | **1.46** | 1.74 | `11.0` ★ | 1.46 ± 0.04 | 2.5% | 1.51 | 1.74 ± 0.04 | 2.4% | 1.78 |
+| 41 | [`Compaction (Memory_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1419-L1437) ([Zig](bench_xitdb.zig#L1440-L1458) · [🔍 89p](slices/41_compaction_memory_offset_map_200_1.md)) | **3.85x** | **1.97** | 7.59 | `5.5` ★ | 1.96 ± 0.10 | 5.2% | 2.09 | 8.77 ± 2.77 | 31.6% | 12.5 |
+| 42 | [`Compaction (File_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1439-L1460) ([Zig](bench_xitdb.zig#L1460-L1514) · [🔍 88p](slices/42_compaction_file_offset_map_200_1.md)) | **1.47x** | **9.33** | 13.7 | `5.9` ★ | 9.32 ± 0.23 | 2.5% | 9.65 | 14.5 ± 1.93 | 13.4% | 17.1 |
+| 43 | [`Compaction (Heterogeneous DAG + dedup)`](bench_xitdb.odin#L1462-L1521) ([Zig](bench_xitdb.zig#L1516-L1603) · [🔍 152p](slices/43_compaction_heterogeneous_dag_dedup.md)) | **3.83x** | **28.8** | 110.1 | `21.0` ★ | 28.5 ± 1.53 | 5.4% | 30.4 | 112.5 ± 8.85 | 7.9% | 123.6 |
+| 44 | [`Replication (Post-compaction resync)`](bench_xitdb.odin#L1523-L1548) ([Zig](bench_xitdb.zig#L1605-L1635) · [🔍 42p](slices/44_replication_post_compaction_resync.md)) | **1.19x** | **1.46** | 1.74 | `13.1` ★ | 1.46 ± 0.03 | 2.0% | 1.51 | 1.74 ± 0.04 | 2.4% | 1.78 |
 | 58 | [`Backend: Core_Memory commits`](bench_xitdb.odin#L1912-L1939) ([Zig](bench_xitdb.zig#L2030-L2069) · [🔍 100p](slices/58_backend_core_memory_commits.md)) | **2.08x** | **1.22** | 2.53 | `19.8` ★ | 1.22 ± 0.01 | 0.9% | 1.23 | 2.59 ± 0.16 | 6.0% | 2.80 |
 | 59 | [`Backend: Core_Buffered_File commits`](bench_xitdb.odin#L1942-L1981) ([Zig](bench_xitdb.zig#L2072-L2126) · [🔍 101p](slices/59_backend_core_buffered_file_commits.md)) | **4.06x** | **4.58** | 18.6 | `50.1` ★ | 4.58 ± 0.02 | 0.3% | 4.59 | 18.7 ± 0.63 | 3.4% | 19.6 |
 | 60 | [`Backend: Core_File (unbuffered) commits`](bench_xitdb.odin#L1984-L2018) ([Zig](bench_xitdb.zig#L2129-L2178) · [🔍 100p](slices/60_backend_core_file_unbuffered_commits.md)) | **1.10x** | **44.1** | 48.5 | `10.8` ★ | 44.1 ± 0.19 | 0.4% | 44.4 | 48.9 ± 0.97 | 2.0% | 50.2 |

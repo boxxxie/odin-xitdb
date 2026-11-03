@@ -1,13 +1,22 @@
 package xitdb
 
+import "base:intrinsics"
+import "base:runtime"
 import "core:encoding/endian"
 
 // ============================================================================
 // Offset_Map (Memory_Offset_Map & File_Offset_Map)
 // ============================================================================
 
+Memory_Offset_Entry :: struct {
+	key_plus_one: i64,
+	val:          i64,
+}
+
 Memory_Offset_Map :: struct {
-	entries: map[i64]i64,
+	entries:   []Memory_Offset_Entry,
+	count:     int,
+	allocator: runtime.Allocator,
 }
 
 File_Offset_Map :: struct {
@@ -20,11 +29,38 @@ Offset_Map :: union {
 }
 
 memory_offset_map_init :: proc(allocator := context.allocator) -> Memory_Offset_Map {
-	return Memory_Offset_Map{entries = make(map[i64]i64, allocator = allocator)}
+	return Memory_Offset_Map{allocator = allocator}
 }
 
 memory_offset_map_destroy :: proc(m: ^Memory_Offset_Map) {
-	delete(m.entries)
+	if m.entries != nil {
+		delete(m.entries, m.allocator)
+		m.entries = nil
+	}
+	m.count = 0
+}
+
+@(private)
+_memory_offset_map_grow :: proc(m: ^Memory_Offset_Map) {
+	old_entries := m.entries
+	new_cap := 128 if len(old_entries) == 0 else len(old_entries) * 2
+	alloc := m.allocator if m.allocator.procedure != nil else context.allocator
+	new_entries := make([]Memory_Offset_Entry, new_cap, alloc)
+	mask := new_cap - 1
+	#no_bounds_check for e in old_entries {
+		if e.key_plus_one != 0 {
+			h := u64(e.key_plus_one - 1) * 0x9e3779b97f4a7c15
+			idx := int((h >> 32) ~ h) & mask
+			for new_entries[idx].key_plus_one != 0 {
+				idx = (idx + 1) & mask
+			}
+			new_entries[idx] = e
+		}
+	}
+	if old_entries != nil {
+		delete(old_entries, alloc)
+	}
+	m.entries = new_entries
 }
 
 file_offset_map_init :: proc(cursor: Write_Cursor) -> (res: File_Offset_Map, err: Error) {
@@ -49,7 +85,10 @@ _file_offset_map_key :: proc(m: ^File_Offset_Map, offset: i64, buf: []u8) -> []u
 offset_map_reset :: proc(om: ^Offset_Map) -> Error {
 	switch &m in om {
 	case Memory_Offset_Map:
-		clear(&m.entries)
+		if len(m.entries) > 0 && m.count > 0 {
+			intrinsics.mem_zero(raw_data(m.entries), len(m.entries) * size_of(Memory_Offset_Entry))
+		}
+		m.count = 0
 		return nil
 	case File_Offset_Map:
 		cursor := m.m.write_cursor
@@ -60,13 +99,28 @@ offset_map_reset :: proc(om: ^Offset_Map) -> Error {
 	return nil
 }
 
-offset_map_get :: proc(om: ^Offset_Map, source_offset: i64) -> (target_offset: i64, found: bool, err: Error) {
+offset_map_get :: #force_inline proc(om: ^Offset_Map, source_offset: i64) -> (target_offset: i64, found: bool, err: Error) {
 	switch &m in om {
 	case Memory_Offset_Map:
-		t, ok := m.entries[source_offset]
-		return t, ok, nil
+		if m.count == 0 {
+			return 0, false, nil
+		}
+		kp1 := source_offset + 1
+		mask := len(m.entries) - 1
+		h := u64(source_offset) * 0x9e3779b97f4a7c15
+		idx := int((h >> 32) ~ h) & mask
+		#no_bounds_check for {
+			e := m.entries[idx]
+			if e.key_plus_one == kp1 {
+				return e.val, true, nil
+			}
+			if e.key_plus_one == 0 {
+				return 0, false, nil
+			}
+			idx = (idx + 1) & mask
+		}
 	case File_Offset_Map:
-		key_buf: [64]u8
+		key_buf: [64]u8 = ---
 		key := _file_offset_map_key(&m, source_offset, key_buf[:])
 		mc := hash_map_get_cursor_by_hash(m.m.read_hash_map, key) or_return
 		c, ok := mc.?
@@ -79,13 +133,32 @@ offset_map_get :: proc(om: ^Offset_Map, source_offset: i64) -> (target_offset: i
 	return 0, false, nil
 }
 
-offset_map_put :: proc(om: ^Offset_Map, source_offset, target_offset: i64) -> Error {
+offset_map_put :: #force_inline proc(om: ^Offset_Map, source_offset, target_offset: i64) -> Error {
 	switch &m in om {
 	case Memory_Offset_Map:
-		m.entries[source_offset] = target_offset
-		return nil
+		if (m.count + 1) * 10 > len(m.entries) * 7 {
+			_memory_offset_map_grow(&m)
+		}
+		kp1 := source_offset + 1
+		mask := len(m.entries) - 1
+		h := u64(source_offset) * 0x9e3779b97f4a7c15
+		idx := int((h >> 32) ~ h) & mask
+		#no_bounds_check for {
+			e := &m.entries[idx]
+			if e.key_plus_one == 0 {
+				e.key_plus_one = kp1
+				e.val = target_offset
+				m.count += 1
+				return nil
+			}
+			if e.key_plus_one == kp1 {
+				e.val = target_offset
+				return nil
+			}
+			idx = (idx + 1) & mask
+		}
 	case File_Offset_Map:
-		key_buf: [64]u8
+		key_buf: [64]u8 = ---
 		key := _file_offset_map_key(&m, source_offset, key_buf[:])
 		return hash_map_put_by_hash(&m.m, key, Uint{u64(target_offset)})
 	}
@@ -112,7 +185,18 @@ _Compactor :: struct {
 }
 
 @(private)
-_compactor_reserve_block :: proc(c: ^_Compactor, size: int) -> (res: i64, err: Error) {
+_compactor_reserve_block :: #force_inline proc(c: ^_Compactor, size: int) -> (res: i64, err: Error) {
+	#partial switch &dst in c.target_core {
+	case Core_Memory:
+		offset := i64(len(dst.buf))
+		new_len := int(offset) + size
+		if new_len > cap(dst.buf) {
+			reserve(&dst.buf, max(new_len, cap(dst.buf) * 2 + 4096))
+		}
+		non_zero_resize(&dst.buf, new_len)
+		dst.pos = i64(new_len)
+		return offset, nil
+	}
 	offset := core_length(c.target_core) or_return
 	core_seek_to(c.target_core, offset) or_return
 	if size <= 512 {
@@ -296,12 +380,12 @@ _compactor_remap_array_list_index :: proc(c: ^_Compactor, source_offset, size: i
 
 	target_offset := _compactor_reserve_block(c, INDEX_BLOCK_SIZE) or_return
 	core_seek_to(c.source_core, source_offset) or_return
-	block_bytes: [INDEX_BLOCK_SIZE]u8
+	block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
 	core_read_exact(c.source_core, block_bytes[:]) or_return
 	remapped_block: [INDEX_BLOCK_SIZE]u8
 	remaining := size
 	for i := 0; i < SLOT_COUNT && remaining > 0; i += 1 {
-		sb: [SLOT_LENGTH]u8
+		sb: [SLOT_LENGTH]u8 = ---
 		copy(sb[:], block_bytes[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH])
 		child_slot := slot_from_bytes_raw(sb)
 		count := min(remaining, child_size)
@@ -326,7 +410,7 @@ _compactor_remap_array_list_index :: proc(c: ^_Compactor, source_offset, size: i
 @(private)
 _compactor_populate_array_list :: proc(c: ^_Compactor, source_offset, target_offset: i64) -> Error {
 	core_seek_to(c.source_core, source_offset) or_return
-	hb: [ARRAY_LIST_HEADER_LENGTH]u8
+	hb: [ARRAY_LIST_HEADER_LENGTH]u8 = ---
 	core_read_exact(c.source_core, hb[:]) or_return
 	header := array_list_header_from_bytes(hb) or_return
 
@@ -340,7 +424,7 @@ _compactor_populate_array_list :: proc(c: ^_Compactor, source_offset, target_off
 @(private)
 _compactor_populate_btree :: proc(c: ^_Compactor, source_offset, target_offset: i64) -> Error {
 	core_seek_to(c.source_core, source_offset) or_return
-	hb: [BTREE_HEADER_LENGTH]u8
+	hb: [BTREE_HEADER_LENGTH]u8 = ---
 	core_read_exact(c.source_core, hb[:]) or_return
 	header := btree_header_from_bytes(hb) or_return
 	remapped_root := _compactor_remap_btree_node(c, header.root_ptr) or_return
@@ -356,7 +440,7 @@ _compactor_remap_btree_node :: proc(c: ^_Compactor, node_offset: i64) -> (res: i
 		return mapped, nil
 	}
 	core_seek_to(c.source_core, node_offset) or_return
-	node_header: [BTREE_NODE_HEADER_SIZE]u8
+	node_header: [BTREE_NODE_HEADER_SIZE]u8 = ---
 	core_read_exact(c.source_core, node_header[:]) or_return
 	kind_int := node_header[0]
 	if kind_int > u8(BTree_Node_Kind.Branch) {
@@ -386,11 +470,15 @@ _compactor_remap_btree_node :: proc(c: ^_Compactor, node_offset: i64) -> (res: i
 @(private)
 _compactor_populate_btree_leaf :: proc(c: ^_Compactor, source_offset, target_offset: i64, kind, num: u8) -> Error {
 	core_seek_to(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE) or_return
-	buf: [BTREE_LEAF_BLOCK_SIZE]u8
+	buf: [BTREE_LEAF_BLOCK_SIZE]u8 = ---
 	buf[0] = kind
 	buf[1] = num
 	body := buf[BTREE_NODE_HEADER_SIZE:]
-	core_read_exact(c.source_core, body[:int(num) * SLOT_LENGTH]) or_return
+	active_len := int(num) * SLOT_LENGTH
+	core_read_exact(c.source_core, body[:active_len]) or_return
+	if active_len < len(body) {
+		intrinsics.mem_zero(raw_data(body[active_len:]), len(body) - active_len)
+	}
 
 	for i in 0 ..< int(num) {
 		tag := Tag(body[i * SLOT_LENGTH] & 0x7F)
@@ -413,11 +501,15 @@ _compactor_populate_btree_leaf :: proc(c: ^_Compactor, source_offset, target_off
 @(private)
 _compactor_populate_btree_branch :: proc(c: ^_Compactor, source_offset, target_offset: i64, kind, num: u8) -> Error {
 	core_seek_to(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE) or_return
-	buf: [BTREE_BRANCH_BLOCK_SIZE]u8
+	buf: [BTREE_BRANCH_BLOCK_SIZE]u8 = ---
 	buf[0] = kind
 	buf[1] = num
 	body := buf[BTREE_NODE_HEADER_SIZE:]
-	core_read_exact(c.source_core, body[:SLOT_LENGTH * BTREE_SLOT_COUNT + int(num) * 8]) or_return
+	active_len := SLOT_LENGTH * BTREE_SLOT_COUNT + int(num) * 8
+	core_read_exact(c.source_core, body[:active_len]) or_return
+	if active_len < len(body) {
+		intrinsics.mem_zero(raw_data(body[active_len:]), len(body) - active_len)
+	}
 
 	for i in 0 ..< int(num) {
 		sb: [SLOT_LENGTH]u8 = ---
@@ -484,11 +576,15 @@ _compactor_remap_sorted_map_node :: proc(c: ^_Compactor, node_offset: i64) -> (r
 @(private)
 _compactor_populate_sorted_map_leaf :: proc(c: ^_Compactor, source_offset, target_offset: i64, kind, num: u8) -> Error {
 	core_seek_to(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE) or_return
-	buf: [SORTED_LEAF_BLOCK_SIZE]u8
+	buf: [SORTED_LEAF_BLOCK_SIZE]u8 = ---
 	buf[0] = kind
 	buf[1] = num
 	body := buf[BTREE_NODE_HEADER_SIZE:]
-	core_read_exact(c.source_core, body[:int(num) * SLOT_LENGTH]) or_return
+	active_len := int(num) * SLOT_LENGTH
+	core_read_exact(c.source_core, body[:active_len]) or_return
+	if active_len < len(body) {
+		intrinsics.mem_zero(raw_data(body[active_len:]), len(body) - active_len)
+	}
 
 	for i in 0 ..< int(num) {
 		tag := Tag(body[i * SLOT_LENGTH] & 0x7F)
@@ -511,11 +607,15 @@ _compactor_populate_sorted_map_leaf :: proc(c: ^_Compactor, source_offset, targe
 @(private)
 _compactor_populate_sorted_map_branch :: proc(c: ^_Compactor, source_offset, target_offset: i64, kind, num: u8) -> Error {
 	core_seek_to(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE) or_return
-	buf: [SORTED_BRANCH_BLOCK_SIZE]u8
+	buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
 	buf[0] = kind
 	buf[1] = num
 	body := buf[BTREE_NODE_HEADER_SIZE:]
-	core_read_exact(c.source_core, body[:SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + int(num) * 8]) or_return
+	active_len := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + int(num) * 8
+	core_read_exact(c.source_core, body[:active_len]) or_return
+	if active_len < len(body) {
+		intrinsics.mem_zero(raw_data(body[active_len:]), len(body) - active_len)
+	}
 
 	for i in 0 ..< int(num) {
 		sb: [SLOT_LENGTH]u8 = ---
@@ -582,19 +682,27 @@ _compactor_populate_hash_map :: proc(c: ^_Compactor, source_offset, target_offse
 @(private)
 _compactor_populate_kv_pair :: proc(c: ^_Compactor, source_offset, target_offset: i64, tag: Tag) -> Error {
 	core_seek_to(c.source_core, source_offset) or_return
-	kv_pair: Key_Value_Pair
-	stack_hash: [64]u8
-	if tag == .KV_Pair {
-		hsize := int(c.hash_size)
-		hbuf := stack_hash[:hsize] if hsize <= len(stack_hash) else make([]u8, hsize, context.temp_allocator)
-		kv_pair = kv_pair_read_buf(c.source_core, hbuf) or_return
-	} else {
-		kv_pair = decode_kv_pair(c.source_core, tag, 0, context.temp_allocator) or_return
-	}
-	kv_pair.key_slot = _compactor_remap_slot(c, kv_pair.key_slot) or_return
-	kv_pair.value_slot = _compactor_remap_slot(c, kv_pair.value_slot) or_return
+	hsize := int(c.hash_size) if tag == .KV_Pair else 0
+	total := hsize + SORTED_KV_PAIR_LENGTH
+	stack_buf: [128]u8 = ---
+	b := stack_buf[:total] if total <= len(stack_buf) else make([]u8, total, context.temp_allocator)
+	core_read_exact(c.source_core, b) or_return
+
+	key_slot := slot_from_slice_raw(b[hsize : hsize + SLOT_LENGTH])
+	tag_validate(key_slot.tag) or_return
+	val_slot := slot_from_slice_raw(b[hsize + SLOT_LENGTH : total])
+	tag_validate(val_slot.tag) or_return
+
+	key_slot = _compactor_remap_slot(c, key_slot) or_return
+	val_slot = _compactor_remap_slot(c, val_slot) or_return
+
+	kb := slot_to_bytes(key_slot)
+	vb := slot_to_bytes(val_slot)
+	copy(b[hsize : hsize + SLOT_LENGTH], kb[:])
+	copy(b[hsize + SLOT_LENGTH : total], vb[:])
+
 	core_seek_to(c.target_core, target_offset) or_return
-	return encode_kv_pair(c.target_core, tag, kv_pair)
+	return core_write_all(c.target_core, b)
 }
 
 @(private)
@@ -639,6 +747,19 @@ database_compact :: proc(db: ^Database, target_core: ^Core, offset_map: ^Offset_
 	source_root := database_read_root_slot(db) or_return
 	if slot_empty(source_root) {
 		return target, nil
+	}
+
+	#partial switch &dst in target_core {
+	case Core_Memory:
+		want_cap := 4096
+		if source_root.tag != .Array_List {
+			if src_len, lerr := core_length(db.core); lerr == nil && src_len > 4096 {
+				want_cap = min(int(src_len), 65536)
+			}
+		}
+		if cap(dst.buf) < want_cap {
+			reserve(&dst.buf, want_cap)
+		}
 	}
 
 	compactor := _Compactor{
