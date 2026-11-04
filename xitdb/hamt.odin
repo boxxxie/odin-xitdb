@@ -26,7 +26,7 @@ read_map_slot :: proc(
 	max_offset := (int(db.header.hash_size) * 8) / BIT_COUNT
 
 	for {
-		if int(key_offset) > max_offset {
+		if int(key_offset) >= max_offset {
 			return {}, .Key_Offset_Exceeded
 		}
 
@@ -246,7 +246,7 @@ remove_map_slot :: proc(
 	key_offset: u8,
 	frozen_at: i64,
 ) -> (res: Slot, err: Error) {
-	if int(key_offset) > (int(db.header.hash_size) * 8) / BIT_COUNT {
+	if int(key_offset) >= (int(db.header.hash_size) * 8) / BIT_COUNT {
 		return {}, .Key_Offset_Exceeded
 	}
 

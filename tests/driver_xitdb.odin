@@ -1574,12 +1574,13 @@ driver_verify_hamt_branch_splitting_and_shortening :: proc(ctx: ^Suite_Ctx, base
 	top_nibble := int(h_base[len(h_base) - 1] & 0x0f)
 
 	Hamt_Conflict_State :: struct {
+		ctx:    ^Suite_Ctx,
 		h_base: []u8,
 		h_c2:   []u8,
 		h_c4:   []u8,
 		step:   int,
 	}
-	st := Hamt_Conflict_State{h_base = h_base, h_c2 = h_c2, h_c4 = h_c4}
+	st := Hamt_Conflict_State{ctx = ctx, h_base = h_base, h_c2 = h_c2, h_c4 = h_c4}
 
 	cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
 		s := (^Hamt_Conflict_State)(user_data)
@@ -1596,6 +1597,16 @@ driver_verify_hamt_branch_splitting_and_shortening :: proc(ctx: ^Suite_Ctx, base
 		case 3:
 			_, err := xitdb.hash_map_remove_by_hash(&m, s.h_c4)
 			return err
+		case 4:
+			// Cap `Core_Memory.max_size` partway through splitting the 8 shared nibbles of `h_c4`,
+			// catch `.Write_Failed`, restore `max_size`, and still commit the transaction
+			mem := &(&s.ctx.primary_core).(xitdb.Core_Memory)
+			cur_len := i64(len(mem.buf))
+			saved_max := mem.max_size
+			mem.max_size = cur_len + xitdb.INDEX_BLOCK_SIZE * 2
+			split_err := xitdb.hash_map_put_by_hash(&m, s.h_c4, "should_fail")
+			mem.max_size = saved_max
+			testing.expect_value(s.ctx.t, split_err, xitdb.Xitdb_Error.Write_Failed)
 		}
 		return nil
 	}
@@ -1644,6 +1655,19 @@ driver_verify_hamt_branch_splitting_and_shortening :: proc(ctx: ^Suite_Ctx, base
 	c2_in_m1, _ := xitdb.hash_map_get_cursor_by_hash(m1, h_c2)
 	v2_m1, _ := xitdb.cursor_read_string(c2_in_m1.?, 64, context.temp_allocator)
 	testing.expect_value(ctx.t, v2_m1, "val_c2")
+
+	// Moment 4: a nested `.Max_Size_Exceeded` partway through splitting `h_c4` (caught inside the
+	// transaction callback) must leave `h_base` and its `.KV_Pair` slot intact
+	st.step = 4
+	testing.expect_value(ctx.t, driver_run_moment_tx(ctx, 3, cb, &st), nil)
+	m4 := driver_read_moment_map(ctx, 4)
+	slot_m4 := _read_hamt_root_slot(ctx, m4, top_nibble)
+	testing.expect_value(ctx.t, slot_m4.tag, xitdb.Tag.KV_Pair)
+	base_in_m4, _ := xitdb.hash_map_get_cursor_by_hash(m4, h_base)
+	vbase_m4, _ := xitdb.cursor_read_string(base_in_m4.?, 64, context.temp_allocator)
+	testing.expect_value(ctx.t, vbase_m4, "val_base")
+	c4_in_m4, _ := xitdb.hash_map_get_cursor_by_hash(m4, h_c4)
+	testing.expect(ctx.t, c4_in_m4 == nil, "Expected failed collision-split key to be absent in Moment 4")
 }
 
 @(private = "file")
@@ -2738,6 +2762,23 @@ driver_verify_fast_path_corruption_and_truncation_guards :: proc(ctx: ^Suite_Ctx
 		// Restore `hm` tag byte
 		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, hm_slot.value), nil)
 		testing.expect_value(ctx.t, xitdb.core_write_all(&core, orig_hm_tag_byte[:]), nil)
+
+		// 5b. Corrupt `hm` root index block into a self-referential `.Index` cycle:
+		// Verify `hash_map_get_cursor` and `remove_map_slot` return `.Key_Offset_Exceeded` without out-of-bounds panic
+		orig_hm_block: [xitdb.INDEX_BLOCK_SIZE]u8
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, hm_slot.value), nil)
+		testing.expect_value(ctx.t, xitdb.core_read_exact(&core, orig_hm_block[:]), nil)
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, hm_slot.value), nil)
+		for _ in 0 ..< xitdb.SLOT_COUNT {
+			testing.expect_value(ctx.t, xitdb.core_write_slot(&core, xitdb.Slot{value = hm_slot.value, tag = .Index}), nil)
+		}
+		_, hm_cycle_get_err := xitdb.hash_map_get_cursor(hm, "alpha")
+		testing.expect_value(ctx.t, hm_cycle_get_err, xitdb.Xitdb_Error.Key_Offset_Exceeded)
+		cycle_hash := make([]u8, int(db.header.hash_size), context.temp_allocator)
+		_, hm_cycle_rem_err := xitdb.remove_map_slot(&db, hm_slot.value, cycle_hash, 0, 0)
+		testing.expect_value(ctx.t, hm_cycle_rem_err, xitdb.Xitdb_Error.Key_Offset_Exceeded)
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, hm_slot.value), nil)
+		testing.expect_value(ctx.t, xitdb.core_write_all(&core, orig_hm_block[:]), nil)
 
 		// 6. Mid-node truncation of `sm` child 0 leaf (truncate right in the middle of the 146-byte leaf block):
 		// Verify `read_sorted_node` and `sorted_map_iterator` return `.Unexpected_EOF`

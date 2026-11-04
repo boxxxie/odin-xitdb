@@ -11,6 +11,7 @@ DEFAULT_BUFFER_SIZE :: 2 * 1024 * 1024
 Core_Memory :: struct {
 	buf:       [dynamic]u8,
 	pos:       i64,
+	max_size:  Maybe(i64),
 	allocator: runtime.Allocator,
 }
 
@@ -359,17 +360,27 @@ core_read_exact :: proc(c: ^Core, p: []u8) -> Error {
 }
 
 // Write all bytes of `p` to `c`.
+@(private)
+_memory_resize :: #force_inline proc(m: ^Core_Memory, end_pos: int) -> Error {
+	if end_pos > len(m.buf) {
+		if max_sz, ok := m.max_size.?; ok && i64(end_pos) > max_sz {
+			return Xitdb_Error.Write_Failed
+		}
+		if alloc_err := resize(&m.buf, end_pos); alloc_err != nil {
+			return Xitdb_Error.Write_Failed
+		}
+	}
+	return nil
+}
+
 core_write_all :: proc(c: ^Core, p: []u8) -> Error {
 	if len(p) == 0 {
 		return nil
 	}
 	switch &v in c {
 	case Core_Memory:
-		old_size := int(len(v.buf))
 		end_pos := int(v.pos) + len(p)
-		if end_pos > old_size {
-			resize(&v.buf, end_pos)
-		}
+		_memory_resize(&v, end_pos) or_return
 		copy(v.buf[int(v.pos):end_pos], p)
 		v.pos = i64(end_pos)
 		return nil
@@ -513,12 +524,9 @@ core_read_i64 :: #force_inline proc(c: ^Core) -> (res: i64, err: Error) {
 core_write_i64 :: #force_inline proc(c: ^Core, v: i64) -> Error {
 	#partial switch &m in c {
 	case Core_Memory:
-		old_size := len(m.buf)
 		pos := int(m.pos)
 		end_pos := pos + 8
-		if end_pos > old_size {
-			resize(&m.buf, end_pos)
-		}
+		_memory_resize(&m, end_pos) or_return
 		endian.unchecked_put_u64be(m.buf[pos:end_pos], u64(v))
 		m.pos = i64(end_pos)
 		return nil
@@ -562,12 +570,9 @@ core_read_slot :: #force_inline proc(c: ^Core) -> (s: Slot, err: Error) {
 core_write_slot :: #force_inline proc(c: ^Core, s: Slot) -> Error {
 	#partial switch &v in c {
 	case Core_Memory:
-		old_size := len(v.buf)
 		pos := int(v.pos)
 		end_pos := pos + SLOT_LENGTH
-		if end_pos > old_size {
-			resize(&v.buf, end_pos)
-		}
+		_memory_resize(&v, end_pos) or_return
 		full_bit := u8(0x80) if s.full else u8(0)
 		v.buf[pos] = full_bit | (u8(s.tag) & 0x7f)
 		endian.unchecked_put_u64be(v.buf[pos + 1 : end_pos], u64(s.value))

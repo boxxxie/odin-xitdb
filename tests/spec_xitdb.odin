@@ -839,8 +839,9 @@ spec_hamt_hash_prefix_conflict_branching_and_branch_shortening :: proc(t: ^testi
 	// GIVEN keys whose SHA-1 digests collide with "foo" in the first 2 bytes ("58555")
 	// and first 4 bytes ("11602875152")
 	// THEN the HAMT root slot splits from .KV_Pair -> .Index on insertion, stays .Index
-	// when the 2-byte collision is removed, and shortens back to .KV_Pair when the 4-byte
-	// collision is removed
+	// when the 2-byte collision is removed, shortens back to .KV_Pair when the 4-byte
+	// collision is removed, and preserves the existing .KV_Pair if a nested collision split
+	// fails midway (e.g. .Out_Of_Memory) and is caught inside a transaction
 	then_hamt_splits_on_prefix_conflicts_and_shortens_on_removal(
 		&ctx,
 		base_key = "foo",
