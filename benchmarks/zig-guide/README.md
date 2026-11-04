@@ -27,7 +27,7 @@ This directory is a practical, peer-engineering reference prepared for [`xitdb`]
 1. **Zero Wire-Format Changes:** All 63 shared benchmarks produce **byte-for-byte identical** databases (`0` footprint mismatches). Every proposed change preserves exact big-endian slot, node, header, and CRC-64/XZ trailer layouts.
 2. **Preserve Public APIs & Abstractions:** Keep `Database(db_kind, HashInt)`, `Cursor(write_mode)`, `BTreeNode`, `SortedNode`, and `std.Io.Reader` / `std.Io.Writer` intact.
 3. **No Code Explosion:** All 6 adjustments combined total **~140 net lines of Zig**—and in several places (such as `SortedMap` node search) *reduce* repetition by replacing four separate linear scan loops with two 12-line binary search helpers.
-4. **Keep What Zig Already Wins:** On `#43 Compaction (Heterogeneous DAG + dedup)`, **Zig is 1.15x faster than Odin** (`110.1 ms` vs `126.6 ms`) because Zig's `std.AutoHashMap(u64, u64)` uses SIMD SwissTable metadata probing. All recommendations keep `Compactor`'s `AutoHashMap` architecture untouched.
+4. **Compaction (`#41–#43`):** Prior to commit `3b3da70`, Zig was `1.15x` faster than Odin on `#43 Compaction (Heterogeneous DAG + dedup)` (`105.7 µs` vs `126.6 µs`) because Zig's `std.AutoHashMap(u64, u64)` used SwissTable probing while Odin used a general-purpose `map[i64]i64`. Commit `3b3da70` replaced Odin's `map[i64]i64` with a custom open-addressed `[]Memory_Offset_Entry` table using Fibonacci multiplicative hashing (`0x9e3779b97f4a7c15`) and single-pass `_compactor_reserve_block`, making Odin **3.22x faster** (`32.8 µs` vs `105.7 µs`) and winning **63 / 63** shared benchmarks.
 
 ---
 

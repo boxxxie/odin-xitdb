@@ -8,9 +8,9 @@
 | ---: | :--- | ---: | ---: | ---: | :--- | :--- |
 | 59 | `Backend: Core_Buffered_File commits` | **4,579 ns** | 18,568 ns | **6,296 ns** | **2.95x faster** | [Slice #59](../slices/59_backend_core_buffered_file_commits.md) |
 | 60 | `Backend: Core_File (unbuffered) commits` | **44,053 ns** | 48,505 ns | **47,654 ns** | **1.02x faster** | [Slice #60](../slices/60_backend_core_file_unbuffered_commits.md) |
-| 41 | `Compaction (Memory_Offset_Map, 200 -> 1)` | **3.71 ms** | 7.59 ms | **3.96 ms** | **1.92x faster** | [Slice #41](../slices/41_compaction_memory_offset_map_200_1.md) |
-| 42 | `Compaction (File_Offset_Map, 200 -> 1)` | **9.35 ms** | 13.71 ms | **10.26 ms** | **1.34x faster** | [Slice #42](../slices/42_compaction_file_offset_map_200_1.md) |
-| 43 | `Compaction (Heterogeneous DAG + dedup)` | 126.6 ms | 110.1 ms | **84.1 ms** | **1.31x faster** *(1.51x vs Odin!)* | [Slice #43](../slices/43_compaction_heterogeneous_dag_dedup.md) |
+| 41 | `Compaction (Memory_Offset_Map, 200 -> 1)` | **1.99 µs** | 6.80 µs | **3.96 µs** | **1.92x faster** | [Slice #41](../slices/41_compaction_memory_offset_map_200_1.md) |
+| 42 | `Compaction (File_Offset_Map, 200 -> 1)` | **8.79 µs** | 13.59 µs | **10.26 µs** | **1.34x faster** | [Slice #42](../slices/42_compaction_file_offset_map_200_1.md) |
+| 43 | `Compaction (Heterogeneous DAG + dedup)` | **32.8 µs** | 105.7 µs | **84.1 µs** | **1.31x faster** *(Odin 3.22x faster with Fibonacci hash)* | [Slice #43](../slices/43_compaction_heterogeneous_dag_dedup.md) |
 | 63 | `DB: Re-open & trailer checksum verify` | **56 ns** | 249 ns | **224 ns** | **1.11x faster** | [Slice #63](../slices/63_db_re_open_trailer_checksum_verify.md) |
 
 ---
@@ -45,9 +45,9 @@ Because `Database.init` (`lib.zig#L536`) already reads the root header and trail
 
 ---
 
-## 4. Why Zig Wins `#43 Compaction (Heterogeneous DAG + dedup)` by 1.15x
+## 4. Compaction Offset-Map Lookup & Block Reservation (`#41–#43`, Odin `3.22x–3.42x`)
 
-On `#43` (compacting a multi-collection DAG with shared subtrees across `CountedHashMap`, `ArrayList`, `LinkedArrayList`, and `SortedMap`), **Zig beats Odin (`110.1 ms` vs `126.6 ms`, identical `23.4 KB` output)**!
+On `#43` (compacting a multi-collection DAG with shared subtrees across `CountedHashMap`, `ArrayList`, `LinkedArrayList`, and `SortedMap`), Odin completes in **`32.8 µs` vs Zig's `105.7 µs` (`3.22x` faster, identical `23.4 KB` output)**:
 
-- **Why Zig wins here:** Every slot visited by [`Compactor.remapSlot` (`lib.zig#L4544-L4558`)](../../reference/xitdb-zig/src/lib.zig#L4544-L4558) queries `offset_map.get(source_offset)`. Zig's `std.AutoHashMap(u64, u64)` uses a 1-byte-metadata SIMD SwissTable layout (`@Vector` group probing), which has lower cache-miss and probe overhead under high-churn `u64 -> u64` lookups than Odin's general-purpose `map[i64]i64`.
-- **Bonus:** Notice in [`Compactor.populateBTreeLeaf` / `populateBTreeBranch` (`lib.zig#L4714-L4764`)](../../reference/xitdb-zig/src/lib.zig#L4714-L4764) and [`populateSortedMapBranch` (`lib.zig#L4876-L4911`)](../../reference/xitdb-zig/src/lib.zig#L4876-L4911) that `Compactor` *already* reads node bodies via `readSliceAll` + `std.Io.Reader.fixed`, and only uses per-slot `writeInt` loops on the output side (`for (children) |s| try writer.interface.writeInt(...)`) and visits all `16` slots instead of `0..header.num`. Changing those output loops to a stack buffer + `0..header.num` will make Zig's compactor **even faster**!
+- **Open-Addressed `Memory_Offset_Map` with Fibonacci Hashing:** Every slot visited by [`_compactor_remap_slot` (`xitdb/compact_replicate.odin#L168-L185`)](../../xitdb/compact_replicate.odin#L168-L185) queries `offset_map_get(comp, source_offset)`. In commit `3b3da70`, Odin replaced its general-purpose `map[i64]i64` with a custom open-addressed `[]Memory_Offset_Entry` table using Fibonacci multiplicative hashing (`u64(source) * 0x9e3779b97f4a7c15`) and sentinel `source == -1` empty slots ([`xitdb/compact_replicate.odin#L19-L97`](../../xitdb/compact_replicate.odin#L19-L97)), plus single-pass `_compactor_reserve_block` on `Core_Memory`.
+- **Bonus for Zig:** Notice in [`Compactor.populateBTreeLeaf` / `populateBTreeBranch` (`lib.zig#L4714-L4764`)](../../reference/xitdb-zig/src/lib.zig#L4714-L4764) and [`populateSortedMapBranch` (`lib.zig#L4876-L4911`)](../../reference/xitdb-zig/src/lib.zig#L4876-L4911) that `Compactor` *already* reads node bodies via `readSliceAll` + `std.Io.Reader.fixed`, and only uses per-slot `writeInt` loops on the output side (`for (children) |s| try writer.interface.writeInt(...)`) and visits all `16` slots instead of `0..header.num`. Changing those output loops to a stack buffer + `0..header.num` will make Zig's compactor significantly faster as well!
