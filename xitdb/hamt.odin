@@ -263,19 +263,22 @@ remove_map_slot :: proc(
 		next_slot = remove_map_slot(db, slot.value, key_hash, key_offset + 1, frozen_at) or_return
 	case .KV_Pair:
 		hash_size := int(db.header.hash_size)
-		if h_slice, in_mem, slice_err := core_slice_at(db.core, slot.value, hash_size); in_mem {
+		kv_len := hash_size + SLOT_LENGTH * 2
+		if kv_slice, in_mem, slice_err := core_slice_at(db.core, slot.value, kv_len); in_mem {
 			if slice_err != nil {
 				return {}, slice_err
 			}
-			if !bytes.equal(h_slice, key_hash) {
+			_ = slot_from_slice(kv_slice[hash_size : hash_size + SLOT_LENGTH]) or_return
+			_ = slot_from_slice(kv_slice[hash_size + SLOT_LENGTH : kv_len]) or_return
+			if !bytes.equal(kv_slice[:hash_size], key_hash) {
 				return {}, .Key_Not_Found
 			}
 		} else {
 			core_seek_to(db.core, slot.value) or_return
 			stack_hash: [64]u8 = ---
 			hash_buf := stack_hash[:hash_size] if hash_size <= len(stack_hash) else make([]u8, hash_size, context.temp_allocator)
-			core_read_exact(db.core, hash_buf) or_return
-			if !bytes.equal(hash_buf, key_hash) {
+			kv_pair := kv_pair_read_buf(db.core, hash_buf) or_return
+			if !bytes.equal(kv_pair.hash, key_hash) {
 				return {}, .Key_Not_Found
 			}
 		}
@@ -313,7 +316,7 @@ remove_map_slot :: proc(
 			if index_block[j * SLOT_LENGTH] == 0 {
 				continue
 			}
-			block_slot = slot_from_slice_raw(index_block[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH])
+			block_slot = slot_from_slice(index_block[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH]) or_return
 		}
 		if block_slot.tag == .None {
 			continue
@@ -400,7 +403,7 @@ read_array_list_slot :: proc(
 		i := (key >> (u64(shift) * BIT_COUNT)) & i64(MASK)
 		slot_pos := index_pos + i64(SLOT_LENGTH) * i
 		core_seek_to(db.core, slot_pos) or_return
-		slot := core_read_slot_raw(db.core) or_return
+		slot := core_read_slot(db.core) or_return
 
 		if shift == 0 {
 			return Slot_Pointer{position = slot_pos, slot = slot}, nil
@@ -472,7 +475,7 @@ read_array_list_slice :: proc(
 	index_pos := header.ptr
 	for shift > next_shift {
 		core_seek_to(db.core, index_pos) or_return
-		slot := core_read_slot_raw(db.core) or_return
+		slot := core_read_slot(db.core) or_return
 		shift -= 1
 		index_pos = slot.value
 	}

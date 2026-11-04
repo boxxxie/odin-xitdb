@@ -15,74 +15,23 @@
 
 ---
 
-## 2. `CoreBufferedFile`: Why Commits Lose the In-Memory Window (`#59`, `4.06x`)
+## 2. `CoreBufferedFile`: Multi-Handle Safety & Why `flush()` Must Clear `memory.buffer` and `file_len`
 
-`CoreBufferedFile` ([`lib.zig#L5067-L5232`](../../reference/xitdb-zig/src/lib.zig#L5067-L5232)) is already thoughtfully designed around a single contiguous window `[memory_pos, memory_pos + buffer_size)`. Within a *single* transaction, reads of newly written nodes hit `memory.buffer` (`lib.zig#L5093-L5100`).
+> [!CAUTION]
+> **Why Retaining `memory.buffer` or `file_len` Across `flush()` Loses Commits Under Multi-Process File Locks:**
+> An earlier version of this guide proposed adding `flushed_len: usize` to `CoreBufferedFile` so `flush()` would keep `memory.buffer` and `file_len` populated across transactions. **That optimization is unsafe whenever two handles take turns writing to the same file** (such as two processes coordinating under a file lock):
+>
+> 1. Handle 1 initializes the database and commits Transaction 1 (`0..L1`). Because `memory_pos == 0`, the 17-byte `RootHeader` at offset `20..37` is inside Handle 1's `memory.buffer`, and `Handle 1.file_len == L1`.
+> 2. Handle 2 acquires the lock, reads `RootHeader` (`L1`) from disk, appends Transaction 2 at `L1..L2`, and updates `RootHeader` at offset `20` on disk to point to `L2`.
+> 3. Handle 1 acquires the lock for Transaction 3. If `flush()` did not clear `Handle 1.memory.buffer` and `Handle 1.file_len`:
+>    - Handle 1's `readRootHeader()` reads offset `20..37` from its own **stale `memory.buffer`** (seeing Transaction 1's root instead of Transaction 2's root!).
+>    - Handle 1's `core.length()` returns its stale cached `file_len = L1` (or truncates the file back to `L1`!), **overwriting Transaction 2 at `L1`** so a fresh open sees `1 3` instead of `1 2 3`!
+>
+> **Required Invariant (Enforced in Both Upstream Zig and Odin [`xitdb/core.odin#L144-L152`](../../xitdb/core.odin#L144-L152)):**
+> - `flush()` **must** clear `self.file_len = null` and `self.memory.buffer.clearRetainingCapacity()`.
+> - `length()` and `setLength()` must never cache `file_len` outside an active write window (`file_len` is only cached while buffering uncommitted writes in `Writer.drain` / `core_write_all` and cleared on `flush()`).
+> - Tested in [`spec_buffered_file_multi_handle_alternating_commits_preserve_all_moments`](../../tests/spec_xitdb.odin#L1197-L1210).
 
-However, trace what happens **at the end of every transaction** in [`commitRoot` (`lib.zig#L776-L790`)](../../reference/xitdb-zig/src/lib.zig#L776-L790) and [`Cursor.writePath` (`lib.zig#L3177-L3179`)](../../reference/xitdb-zig/src/lib.zig#L3177-L3179):
-
-```zig
-// 1. commitRoot (lib.zig#L787-L789):
-try self.core.sync();          // -> flush() writes tx window to disk & CLEARS memory.buffer!
-try self.writeRootHeader(root); // -> writes 17 bytes at offset 20 (sets memory_pos = 20!)
-
-// 2. Cursor.writePath (lib.zig#L3177-L3179):
-if (self.db.tx_start == null) {
-    try self.db.core.sync();   // -> flush() writes 17B RootHeader & CLEARS memory.buffer again!
-}
-```
-
-Look at [`CoreBufferedFile.flush()` (`lib.zig#L5226-L5231`)](../../reference/xitdb-zig/src/lib.zig#L5226-L5231):
-
-```zig
-pub fn flush(self: *CoreBufferedFile) !void {
-    self.file_len = null;
-    if (self.memory.buffer.written().len > 0) {
-        try self.writeToFile(self.memory_pos, self.memory.buffer.written());
-        self.memory.buffer.clearRetainingCapacity(); // <-- evicts hot tail cache!
-    }
-}
-```
-
-Because `flush()` calls `clearRetainingCapacity()` and resets `file_len = null`:
-1. At the start of Transaction $N+1$, `memory.buffer` is **completely empty**.
-2. Every read of data committed in Transaction $N$ (`readRootHeader`, `readRootTrailer`, `ArrayList` header + index block, `HashMap` root block, and `KeyValuePair`s) misses `memory.buffer` and falls into `r.parent.file.reader()` (`lib.zig#L5103`), which has `.buffer = &.{}`—issuing **~15–20 unbuffered `preadv` syscalls** plus an `fstat` (`file.length()`) on every commit!
-
-### What Odin Does (`xitdb/core.odin#L25-L33`, `#L145-L151`, `#L393-L425`)
-
-Odin adds **one integer field** to `Core_Buffered_File`: `flushed_len: usize`.
-1. When `flush()` runs, it writes only the newly appended dirty suffix `memory.buf[flushed_len..]` to disk and advances `flushed_len = len(memory.buf)`—**keeping the committed tail window resident in `memory.buf`** as a read cache until the window reaches `memory_max_size`!
-2. When `writeRootHeader` writes 17 bytes at offset `20` (`w.pos + n <= memory_pos`, strictly before the tail window), it calls `writeToFile(20, buf)` directly **without resetting `memory_pos` to 20 or evicting the hot tail buffer**.
-
-### Idiomatic Zig Update (~18 Lines in `CoreBufferedFile`)
-
-```zig
-const CoreBufferedFile = struct {
-    memory: CoreMemory,
-    memory_max_size: u64,
-    memory_pos: u64 = 0,
-    flushed_len: usize = 0, // bytes in `memory.buffer.written()[0..flushed_len]` already on disk
-    file: CoreFile,
-    file_len: ?u64 = null,
-```
-
-1. **In `flush()` (`lib.zig#L5226-L5231`):** Write only the un-flushed tail `[flushed_len..]` and keep the clean bytes in `memory.buffer` for subsequent reads. Note that `writeToFile` (`lib.zig#L5242`) already updates `if (file_len) |len| self.file_len = @max(len, pos + bytes.len);`, so omitting `self.file_len = null;` in `flush()` also eliminates 2 redundant `fstat` (`file.length()`) syscalls per commit:
-   ```zig
-   pub fn flush(self: *CoreBufferedFile) !void {
-       const written = self.memory.buffer.written();
-       if (written.len > self.flushed_len) {
-           try self.writeToFile(self.memory_pos + self.flushed_len, written[self.flushed_len..]);
-           self.flushed_len = written.len;
-       }
-   }
-   ```
-2. **In `Writer.drain()` (`lib.zig#L5139-L5166`):**
-   - If `buffer_size > 0 and w.pos + n <= parent.memory_pos` (such as updating the 17-byte `RootHeader` at offset `20`), write directly via `parent.writeToFile(w.pos, buf)` without evicting `[memory_pos, memory_pos + buffer_size)`.
-   - When sliding to a new window (`w.pos > parent.memory_pos + buffer_size` or exceeding `memory_max_size`), call `try parent.flush()`, `parent.memory.buffer.clearRetainingCapacity()`, `parent.flushed_len = 0`, `parent.memory_pos = w.pos`.
-   - If an in-window write overwrites bytes below `flushed_len` (rare), set `parent.flushed_len = @min(parent.flushed_len, @as(usize, @intCast(w.pos - parent.memory_pos)))`.
-3. **In `setLength()` (`lib.zig#L5207-L5219`):** Clamp `self.flushed_len = @min(self.flushed_len, self.memory.buffer.written().len)` after shrinking.
-
-Crash-safety is 100% unchanged (`commitRoot`'s `sync()` still writes every dirty byte to the OS before updating `RootHeader`), while ~90% of `preadv` syscalls across consecutive transactions disappear!
 
 ---
 

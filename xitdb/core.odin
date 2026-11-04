@@ -26,7 +26,6 @@ Core_Buffered_File :: struct {
 	memory:          Core_Memory,
 	memory_max_size: i64,
 	memory_pos:      i64,
-	flushed_len:     int,
 	pos:             i64,
 	file:            Core_File,
 	file_len:        Maybe(i64),
@@ -143,9 +142,10 @@ _buffered_write_to_file :: proc(bf: ^Core_Buffered_File, pos: i64, data: []u8) -
 
 @(private)
 _buffered_flush :: proc(bf: ^Core_Buffered_File) -> Error {
-	if len(bf.memory.buf) > bf.flushed_len {
-		_buffered_write_to_file(bf, bf.memory_pos + i64(bf.flushed_len), bf.memory.buf[bf.flushed_len:]) or_return
-		bf.flushed_len = len(bf.memory.buf)
+	bf.file_len = nil
+	if len(bf.memory.buf) > 0 {
+		_buffered_write_to_file(bf, bf.memory_pos, bf.memory.buf[:]) or_return
+		clear(&bf.memory.buf)
 	}
 	return nil
 }
@@ -162,7 +162,6 @@ core_length :: proc(c: ^Core) -> (length: i64, err: Error) {
 			flen = fl
 		} else {
 			flen = os.file_size(v.file.file) or_return
-			v.file_len = flen
 		}
 		buf_size := i64(len(v.memory.buf))
 		if buf_size == 0 {
@@ -264,18 +263,12 @@ core_set_length :: proc(c: ^Core, new_len: i64) -> Error {
 		buf_size := i64(len(v.memory.buf))
 		if new_len <= v.memory_pos {
 			clear(&v.memory.buf)
-			v.flushed_len = 0
 		} else if new_len < v.memory_pos + buf_size {
 			new_buf_len := int(new_len - v.memory_pos)
 			resize(&v.memory.buf, new_buf_len)
-			if v.flushed_len > new_buf_len {
-				v.flushed_len = new_buf_len
-			}
 		}
 		v.file_len = nil
-		if err := os.truncate(v.file.file, new_len); err == nil {
-			v.file_len = new_len
-		}
+		_ = os.truncate(v.file.file, new_len)
 		if v.pos > new_len {
 			v.pos = new_len
 		}
@@ -300,7 +293,11 @@ core_read :: proc(c: ^Core, p: []u8) -> (read_n: int, err: Error) {
 		v.pos += i64(to_read)
 		return to_read, nil
 	case Core_File:
-		return os.read(v.file, p)
+		n, r_err := os.read(v.file, p)
+		if r_err == io.Error.EOF {
+			return n, io.Error.EOF
+		}
+		return n, r_err
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
 		if buf_len > 0 && v.pos >= v.memory_pos && v.pos < v.memory_pos + buf_len {
@@ -315,9 +312,12 @@ core_read :: proc(c: ^Core, p: []u8) -> (read_n: int, err: Error) {
 		if buf_len > 0 && v.pos < v.memory_pos {
 			max_size = min(len(p), int(v.memory_pos - v.pos))
 		}
-		n, err := os.read(v.file.file, p[:max_size])
+		n, r_err := os.read(v.file.file, p[:max_size])
 		v.pos += i64(n)
-		return n, err
+		if r_err == io.Error.EOF {
+			return n, io.Error.EOF
+		}
+		return n, r_err
 	}
 	return 0, .Invalid_Database
 }
@@ -385,29 +385,17 @@ core_write_all :: proc(c: ^Core, p: []u8) -> Error {
 		return nil
 	case Core_Buffered_File:
 		n := i64(len(p))
+		buf_size := i64(len(v.memory.buf))
+		if buf_size == 0 ||
+		   v.pos > v.memory_pos + buf_size ||
+		   (v.pos >= v.memory_pos && v.pos - v.memory_pos + n > v.memory_max_size) {
+			_buffered_flush(&v) or_return
+			v.memory_pos = v.pos
+		}
 		if v.file_len == nil {
 			fl := os.file_size(v.file.file) or_return
 			v.file_len = fl
 		}
-		buf_size := i64(len(v.memory.buf))
-		if buf_size > 0 && v.pos + n <= v.memory_pos {
-			// Write is strictly before the buffered tail window (e.g. Root_Header at offset 20):
-			// write directly to the file without evicting the hot tail buffer.
-			_buffered_write_to_file(&v, v.pos, p) or_return
-			v.pos += n
-			return nil
-		}
-		if buf_size == 0 {
-			v.memory_pos = v.pos
-			v.flushed_len = 0
-		} else if v.pos > v.memory_pos + buf_size ||
-		          (v.pos >= v.memory_pos && v.pos - v.memory_pos + n > v.memory_max_size) {
-			_buffered_flush(&v) or_return
-			clear(&v.memory.buf)
-			v.flushed_len = 0
-			v.memory_pos = v.pos
-		}
-		buf_size = i64(len(v.memory.buf))
 		if v.pos >= v.memory_pos && v.pos - v.memory_pos + n <= v.memory_max_size {
 			rel_off := int(v.pos - v.memory_pos)
 			end_off := rel_off + len(p)
@@ -415,18 +403,9 @@ core_write_all :: proc(c: ^Core, p: []u8) -> Error {
 				resize(&v.memory.buf, end_off)
 			}
 			copy(v.memory.buf[rel_off:end_off], p)
-			if rel_off < v.flushed_len {
-				if end_off <= v.flushed_len {
-					_buffered_write_to_file(&v, v.pos, p) or_return
-				} else {
-					v.flushed_len = rel_off
-				}
-			}
 		} else {
-			if v.pos < v.memory_pos + buf_size && v.pos + n > v.memory_pos {
+			if v.pos < v.memory_pos + i64(len(v.memory.buf)) && v.pos + n > v.memory_pos {
 				_buffered_flush(&v) or_return
-				clear(&v.memory.buf)
-				v.flushed_len = 0
 			}
 			_buffered_write_to_file(&v, v.pos, p) or_return
 		}

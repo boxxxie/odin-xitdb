@@ -4,9 +4,19 @@
 
 This directory is a practical, peer-engineering reference prepared for [`xitdb`](../../reference/xitdb-zig/src/lib.zig) maintainers and contributors. It isolates the exact architectural differences between the Odin implementation ([`xitdb/*.odin`](../../xitdb)) and the upstream Zig `0.17.0` reference ([`reference/xitdb-zig/src/lib.zig`](../../reference/xitdb-zig/src/lib.zig)) across all **63 shared 1v1 benchmarks**, and proposes small, idiomatic Zig adjustments that capture the same speedups **without sacrificing human readability, altering the v1 wire format, or inflating code size**.
 
-> [!TIP]
-> **Ready-to-Apply Git Patch:** All 6 adjustments have been implemented, verified against 100% of upstream `src/test.zig` (11/11 test suites), and benchmarked across all 63 `ReleaseFast` workloads with **0 byte-footprint mismatches**. You can inspect or apply the complete diff directly from [**`benchmarks/zig-guide/zig_optimizations.patch`**](zig_optimizations.patch) (`git -C reference/xitdb-zig apply ../../benchmarks/zig-guide/zig_optimizations.patch`).
-> *(Note: The main [`benchmarks/README.md`](../README.md) and [`benchmarks/zig.jsonl`](../zig.jsonl) intentionally track unpatched upstream `reference/xitdb-zig`.)*
+> [!NOTE]
+> **Upstream Merge Status (`reference/xitdb-zig` `42cd00e..6b93af1`):**
+> Upstream `xitdb-zig` accepted and merged the core algorithmic and batch-I/O optimizations from this guide:
+> - **`42cd00e`**: Direct `std.mem.readInt` slot decoding in `Cursor.Iter.readSlotBlock` ([Guide 01](01_core_memory_zero_vtable_io.md))
+> - **`fcb3a3a`**: Stack-buffered `readBTreeNode` / `writeBTreeNodeAt` & `readSortedNode` / `writeSortedNodeAt`, direct leaf slot seek in `readBTreeSlot` & `sortedGetByIndex` (with `rem >= num` leaf bounds validation), and $O(\log_2 16)$ binary search (`sortedBranchSearch` / `sortedLeafSearch`) ([Guides 02 & 03](02_btree_node_batch_io_and_leaf_seek.md))
+> - **`eb50a54`**: Lazy 1-slot descent in `removeMapSlot` ([Guide 04](04_hamt_single_pass_kv_and_lazy_remove.md))
+> - **`6b93af1`**: Redundant `seekTo` removal before `format_tag` in `Cursor.readBytesObject` ([Guide 05](05_cursor_bytes_streams_and_paths.md))
+>
+> Upstream review also identified important correctness hazards in three items from our original fork patch (`b84b89d`), which we subsequently fixed in our Odin implementation (`xitdb/cursor.odin` and `xitdb/core.odin`) and covered with dedicated ATDD specifications (`Scenarios 33–35`):
+> 1. **Item 1 (`CoreMemory.Reader` `.fixed(written)`)**: Requires an explicit `seekTo` after any write to refresh `interface.buffer` and does not advance `reader.pos` during `readSliceAll`, making it easy to misuse ([Guide 01](01_core_memory_zero_vtable_io.md)).
+> 2. **Item 5 (`Cursor.Reader` zero-copy `.fixed(slice)`)**: Caching a slice of `CoreMemory.buffer` inside `Cursor.Reader` when opened causes a dangling pointer if the reader is held across a write that reallocates the buffer. Fixed in Odin by removing `Cursor_Reader.direct_slice` and resolving `core_slice_at` dynamically at each read call ([Guide 05](05_cursor_bytes_streams_and_paths.md)).
+> 3. **Item 6 (`CoreBufferedFile.flushed_len` tail retention)**: Retaining `memory.buffer` or `file_len` across `flush()` causes a lost commit (`1 3` instead of `1 2 3`) when two buffered handles take turns writing under a file lock. Fixed in Odin by clearing `memory.buf` and `file_len` in `_buffered_flush` and never caching `file_len` during read-only `core_length` calls ([Guide 06](06_buffered_file_tail_cache_and_compaction.md)).
+
 
 ---
 

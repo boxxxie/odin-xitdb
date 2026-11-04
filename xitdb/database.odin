@@ -189,7 +189,6 @@ database_init :: proc(core: ^Core, hasher := Hasher{}) -> (db: Database, err: Er
 	#partial switch &bf in core {
 	case Core_Buffered_File:
 		clear(&bf.memory.buf)
-		bf.flushed_len = 0
 		bf.memory_pos = 0
 		bf.pos = 0
 		bf.file_len = nil

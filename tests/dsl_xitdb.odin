@@ -309,6 +309,19 @@ then_linked_array_list_append_context_nests_collections :: proc(ctx: ^Suite_Ctx)
 	driver_verify_linked_array_list_append_context(ctx)
 }
 
+then_cursor_reader_survives_buffer_reallocation_window_shift_and_truncation :: proc(ctx: ^Suite_Ctx) {
+	driver_verify_cursor_reader_reallocation_window_shift_and_truncation(ctx)
+}
+
+then_buffered_file_multi_handle_alternating_commits_preserve_all_moments :: proc(ctx: ^Suite_Ctx, commit_values: []string) {
+	driver_verify_buffered_file_multi_handle_alternating_commits(ctx, commit_values)
+}
+
+then_corrupt_slot_tags_inflated_branch_counts_and_truncated_btree_nodes_are_rejected :: proc(ctx: ^Suite_Ctx) {
+	driver_verify_fast_path_corruption_and_truncation_guards(ctx)
+}
+
+
 
 
 

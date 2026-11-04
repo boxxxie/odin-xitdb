@@ -1177,6 +1177,52 @@ spec_sorted_set_key_only_leaf_entries_map_reinterpretation_and_linked_list_appen
 	then_linked_array_list_append_context_nests_collections(&ctx)
 }
 
+// ----------------------------------------------------------------------------
+// Scenario 33: `Cursor_Reader` Lifetime Across Buffer Reallocation, Window Shifts & Truncation
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_cursor_reader_survives_buffer_reallocation_window_flushes_and_truncation :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
+
+	// THEN holding an open Cursor_Reader across writes that reallocate Core_Memory.buf or shift Core_Buffered_File's
+	// tail window preserves exact streaming reads without dangling slices, and detects post-open truncation
+	then_cursor_reader_survives_buffer_reallocation_window_shift_and_truncation(&ctx)
+}
+
+// ----------------------------------------------------------------------------
+// Scenario 34: `Core_Buffered_File` Multi-Handle Alternating Commits Preserve All Moments
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_buffered_file_multi_handle_alternating_commits_preserve_all_moments :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
+
+	// THEN two independent Core_Buffered_File handles taking turns committing moments ("1", "2", "3", "4")
+	// to the same file never overwrite or lose commits due to stale tail-cache state
+	then_buffered_file_multi_handle_alternating_commits_preserve_all_moments(
+		&ctx,
+		[]string{"1", "2", "3", "4"},
+	)
+}
+
+// ----------------------------------------------------------------------------
+// Scenario 35: Fast-Path Corruption & Truncation Guards on B-Tree, B+Tree, and HAMT
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_corrupt_slot_tags_inflated_branch_counts_and_truncated_btree_nodes_are_rejected :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
+
+	// THEN corrupt slot tags, inflated branch subtree counts (rem >= num at leaf), and mid-node truncations
+	// return deterministic errors across both Core_Memory fast paths and Core_File seek+read paths
+	then_corrupt_slot_tags_inflated_branch_counts_and_truncated_btree_nodes_are_rejected(&ctx)
+}
+
+
 
 
 

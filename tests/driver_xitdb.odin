@@ -2368,6 +2368,388 @@ driver_verify_linked_array_list_append_context :: proc(ctx: ^Suite_Ctx) {
 	testing.expect_value(ctx.t, kind_str, "logout")
 }
 
+driver_verify_cursor_reader_reallocation_window_shift_and_truncation :: proc(ctx: ^Suite_Ctx) {
+	// 1. In-memory database: hold a Cursor_Reader across multiple large writes that force
+	// `Core_Memory.buf` reallocation (`cap(buf)` grows multiple times)
+	mem_core: xitdb.Core = xitdb.core_memory_init()
+	defer _ = xitdb.core_destroy(&mem_core)
+
+	mem_db, init_err := xitdb.database_init(&mem_core, xitdb.sha1_hasher())
+	testing.expect_value(ctx.t, init_err, nil)
+
+	expected_payload := "0123456789abcdef-initial-payload-held-across-reallocation-and-commits-xyz"
+
+	Seed_State :: struct {
+		payload: string,
+	}
+	seed_st := Seed_State{payload = expected_payload}
+	seed_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+		s := (^Seed_State)(user_data)
+		m := xitdb.write_hash_map_init(cursor^) or_return
+		xitdb.hash_map_put(&m, "target", s.payload) or_return
+		xitdb.hash_map_put(&m, "short_target", "inline8!") or_return
+		return nil
+	}
+	testing.expect_value(ctx.t, xitdb.database_run_context(&mem_db, seed_cb, &seed_st), nil)
+
+	// Open a Cursor_Reader on `"target"` (.Bytes) and `"short_target"` (.Short_Bytes) BEFORE growing the buffer
+	rc0 := xitdb.database_root_cursor(&mem_db)
+	m0, _ := xitdb.read_hash_map_init(rc0.read_cursor)
+
+	target_cur, _ := xitdb.hash_map_get_cursor(m0, "target")
+	reader, r_err := xitdb.cursor_reader(target_cur.?)
+	testing.expect_value(ctx.t, r_err, nil)
+
+	short_cur, _ := xitdb.hash_map_get_cursor(m0, "short_target")
+	short_reader, sr_err := xitdb.cursor_reader(short_cur.?)
+	testing.expect_value(ctx.t, sr_err, nil)
+
+	// Read first 16 bytes before reallocation
+	prefix_buf: [16]u8
+	testing.expect_value(ctx.t, xitdb.cursor_reader_read_fully(&reader, prefix_buf[:]), nil)
+	testing.expect_value(ctx.t, string(prefix_buf[:]), expected_payload[:16])
+
+	initial_cap := cap((&mem_core.(xitdb.Core_Memory)).buf)
+
+	// Perform multiple large transactions that grow `Core_Memory.buf` well past `initial_cap` (forcing reallocations)
+	Grow_State :: struct {
+		round: int,
+		blob:  string,
+	}
+	big_blob_bytes := make([]u8, 65536, context.temp_allocator)
+	for i in 0 ..< len(big_blob_bytes) {
+		big_blob_bytes[i] = u8('A' + (i % 26))
+	}
+	grow_st := Grow_State{blob = string(big_blob_bytes)}
+	grow_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+		g := (^Grow_State)(user_data)
+		m := xitdb.write_hash_map_init(cursor^) or_return
+		for j in 0 ..< 4 {
+			k := fmt.tprintf("grow_%d_%d", g.round, j)
+			xitdb.hash_map_put(&m, k, g.blob) or_return
+		}
+		return nil
+	}
+	for round in 0 ..< 3 {
+		grow_st.round = round
+		testing.expect_value(ctx.t, xitdb.database_run_context(&mem_db, grow_cb, &grow_st), nil)
+	}
+
+	new_cap := cap((&mem_core.(xitdb.Core_Memory)).buf)
+	testing.expect(ctx.t, new_cap > initial_cap * 4, "Expected Core_Memory.buf to reallocate to a much larger capacity")
+
+	// Continue reading the remaining bytes from the pre-existing `reader` after reallocation
+	rest_bytes, rest_err := xitdb.cursor_reader_read_all(&reader, context.temp_allocator)
+	testing.expect_value(ctx.t, rest_err, nil)
+	testing.expect_value(ctx.t, string(rest_bytes), expected_payload[16:])
+
+	// Seek back to 0 on the same `reader` and read the entire payload again
+	testing.expect_value(ctx.t, xitdb.cursor_reader_seek_to(&reader, 0), nil)
+	full_bytes, full_err := xitdb.cursor_reader_read_all(&reader, context.temp_allocator)
+	testing.expect_value(ctx.t, full_err, nil)
+	testing.expect_value(ctx.t, string(full_bytes), expected_payload)
+
+	// Verify `short_reader` also reads cleanly
+	short_bytes, sb_err := xitdb.cursor_reader_read_all(&short_reader, context.temp_allocator)
+	testing.expect_value(ctx.t, sb_err, nil)
+	testing.expect_value(ctx.t, string(short_bytes), "inline8!")
+
+	// Truncating `mem_core` below `reader.start_position + reader.size` causes subsequent reads to return `.Unexpected_EOF`
+	testing.expect_value(ctx.t, xitdb.core_set_length(&mem_core, reader.start_position + 5), nil)
+	testing.expect_value(ctx.t, xitdb.cursor_reader_seek_to(&reader, 0), nil)
+	trunc_buf: [16]u8
+	_, trunc_read_err := xitdb.cursor_reader_read(&reader, trunc_buf[:])
+	testing.expect_value(ctx.t, trunc_read_err, xitdb.Xitdb_Error.Unexpected_EOF)
+	testing.expect_value(ctx.t, xitdb.cursor_reader_read_fully(&reader, trunc_buf[:]), xitdb.Xitdb_Error.Unexpected_EOF)
+
+	// 2. Buffered file database: hold a `Cursor_Reader` while large writes flush and shift `memory_pos` past `start_position`
+	bf_path := driver_temp_path(ctx.t, "reader_window_shift.xit")
+	defer _ = os.remove(bf_path)
+
+	bf_core, bf_open_err := xitdb.core_buffered_file_open(bf_path, 256, {.Read, .Write, .Create, .Trunc})
+	testing.expect_value(ctx.t, bf_open_err, nil)
+	defer _ = xitdb.core_destroy(&bf_core, true)
+
+	bf_db, bf_init_err := xitdb.database_init(&bf_core, xitdb.sha1_hasher())
+	testing.expect_value(ctx.t, bf_init_err, nil)
+	testing.expect_value(ctx.t, xitdb.database_run_context(&bf_db, seed_cb, &seed_st), nil)
+
+	bf_rc0 := xitdb.database_root_cursor(&bf_db)
+	bf_m0, _ := xitdb.read_hash_map_init(bf_rc0.read_cursor)
+	bf_target_cur, _ := xitdb.hash_map_get_cursor(bf_m0, "target")
+
+	bf_reader, bf_r_err := xitdb.cursor_reader(bf_target_cur.?)
+	testing.expect_value(ctx.t, bf_r_err, nil)
+	testing.expect_value(ctx.t, xitdb.cursor_reader_read_fully(&bf_reader, prefix_buf[:]), nil)
+	testing.expect_value(ctx.t, string(prefix_buf[:]), expected_payload[:16])
+
+	// Commit large data so `Core_Buffered_File` flushes and shifts its tail window far past `bf_reader.start_position`
+	grow_st.round = 10
+	testing.expect_value(ctx.t, xitdb.database_run_context(&bf_db, grow_cb, &grow_st), nil)
+
+	bf_rest, bf_rest_err := xitdb.cursor_reader_read_all(&bf_reader, context.temp_allocator)
+	testing.expect_value(ctx.t, bf_rest_err, nil)
+	testing.expect_value(ctx.t, string(bf_rest), expected_payload[16:])
+}
+
+driver_verify_buffered_file_multi_handle_alternating_commits :: proc(ctx: ^Suite_Ctx, commit_values: []string) {
+	shared_path := driver_temp_path(ctx.t, "multi_handle_buffered.xit")
+	defer _ = os.remove(shared_path)
+
+	// Open two independent `Core_Buffered_File` handles on the same OS file (simulating two processes under a file lock)
+	c1, err1 := xitdb.core_buffered_file_open(shared_path, 4096, {.Read, .Write, .Create, .Trunc})
+	testing.expect_value(ctx.t, err1, nil)
+	defer _ = xitdb.core_destroy(&c1, true)
+
+	db1, init1 := xitdb.database_init(&c1, xitdb.sha1_hasher())
+	testing.expect_value(ctx.t, init1, nil)
+
+	c2, err2 := xitdb.core_buffered_file_open(shared_path, 4096, {.Read, .Write})
+	testing.expect_value(ctx.t, err2, nil)
+	defer _ = xitdb.core_destroy(&c2, true)
+
+	db2, init2 := xitdb.database_init(&c2, xitdb.sha1_hasher())
+	testing.expect_value(ctx.t, init2, nil)
+
+	Append_State :: struct {
+		val: string,
+	}
+	append_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+		s := (^Append_State)(user_data)
+		list := xitdb.write_array_list_init(cursor^) or_return
+		return xitdb.array_list_append(&list, s.val)
+	}
+
+	read_all_on_handle :: proc(t: ^testing.T, db: ^xitdb.Database) -> []string {
+		rc := xitdb.database_root_cursor(db)
+		list, err := xitdb.read_array_list_init(rc.read_cursor)
+		testing.expect_value(t, err, nil)
+		cnt, _ := xitdb.array_list_count(list)
+		res := make([]string, cnt, context.temp_allocator)
+		for i: i64 = 0; i < cnt; i += 1 {
+			mc, g_err := xitdb.array_list_get_cursor(list, i)
+			testing.expect_value(t, g_err, nil)
+			val, s_err := xitdb.cursor_read_string(mc.?, 64, context.temp_allocator)
+			testing.expect_value(t, s_err, nil)
+			res[i] = val
+		}
+		return res
+	}
+
+	// Alternate commits between `db1` and `db2`, reading on the opposite handle before and after each commit
+	for val, idx in commit_values {
+		writer_db := &db1 if idx % 2 == 0 else &db2
+		reader_db := &db2 if idx % 2 == 0 else &db1
+
+		// Pre-commit read on both handles (exercises `core_length` / `read_root_cursor` before writing)
+		pre_vals := read_all_on_handle(ctx.t, writer_db)
+		driver_assert_string_slice(ctx.t, pre_vals, commit_values[:idx])
+
+		st := Append_State{val = val}
+		testing.expect_value(ctx.t, xitdb.database_run_context(writer_db, append_cb, &st), nil)
+
+		// Post-commit read on both the writer handle and the peer handle
+		writer_vals := read_all_on_handle(ctx.t, writer_db)
+		driver_assert_string_slice(ctx.t, writer_vals, commit_values[:idx + 1])
+
+		peer_vals := read_all_on_handle(ctx.t, reader_db)
+		driver_assert_string_slice(ctx.t, peer_vals, commit_values[:idx + 1])
+	}
+
+	// Open a fresh third handle from disk and verify all commits `commit_values` are durable (`1 2 3 4`, never `1 3`)
+	c3, err3 := xitdb.core_buffered_file_open(shared_path, 4096, {.Read})
+	testing.expect_value(ctx.t, err3, nil)
+	defer _ = xitdb.core_destroy(&c3, true)
+
+	db3, init3 := xitdb.database_init(&c3, xitdb.sha1_hasher())
+	testing.expect_value(ctx.t, init3, nil)
+
+	fresh_vals := read_all_on_handle(ctx.t, &db3)
+	driver_assert_string_slice(ctx.t, fresh_vals, commit_values)
+}
+
+driver_verify_fast_path_corruption_and_truncation_guards :: proc(ctx: ^Suite_Ctx) {
+	// Test both `.Memory` (in-memory `core_slice_at` fast path) and `.File` (seek+read path)
+	for is_memory in ([]bool{true, false}) {
+		file_path := driver_temp_path(ctx.t, "corrupt_guards.xit")
+		defer if !is_memory do _ = os.remove(file_path)
+
+		core: xitdb.Core
+		if is_memory {
+			core = xitdb.core_memory_init()
+		} else {
+			fcore, ferr := xitdb.core_file_open(file_path, {.Read, .Write, .Create, .Trunc}, true)
+			testing.expect_value(ctx.t, ferr, nil)
+			core = fcore
+		}
+		defer _ = xitdb.core_destroy(&core, true)
+
+		db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
+		testing.expect_value(ctx.t, init_err, nil)
+
+		// Seed a 20-element Linked_Array_List (2-tier B-Tree with Branch -> 2 Leaves),
+		// a 20-element Sorted_Map (2-tier B+Tree with Branch -> 2 Leaves),
+		// and a Hash_Map
+		Seed_Corrupt_State :: struct {}
+		sc_st := Seed_Corrupt_State{}
+		seed_cb :: proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+			root := xitdb.write_hash_map_init(cursor^) or_return
+			ll_cur := xitdb.hash_map_put_cursor(&root, "ll") or_return
+			ll := xitdb.write_linked_array_list_init(ll_cur) or_return
+			sm_cur := xitdb.hash_map_put_cursor(&root, "sm") or_return
+			sm := xitdb.write_sorted_map_init(sm_cur) or_return
+			hm_cur := xitdb.hash_map_put_cursor(&root, "hm") or_return
+			hm := xitdb.write_hash_map_init(hm_cur) or_return
+
+			for i in 0 ..< 20 {
+				k := fmt.tprintf("k%02d", i)
+				xitdb.linked_array_list_append(&ll, k) or_return
+				xitdb.sorted_map_put(&sm, k, u64(i)) or_return
+				xitdb.hash_map_put(&hm, k, u64(i)) or_return
+			}
+			return nil
+		}
+		testing.expect_value(ctx.t, xitdb.database_run_context(&db, seed_cb, &sc_st), nil)
+
+		rc := xitdb.database_root_cursor(&db)
+		m0, _ := xitdb.read_hash_map_init(rc.read_cursor)
+
+		ll_cur, _ := xitdb.hash_map_get_cursor(m0, "ll")
+		ll, _ := xitdb.read_linked_array_list_init(ll_cur.?)
+		ll_slot, _ := xitdb.linked_array_list_slot(ll)
+
+		sm_cur, _ := xitdb.hash_map_get_cursor(m0, "sm")
+		sm, _ := xitdb.read_sorted_map_init(sm_cur.?)
+		sm_slot, _ := xitdb.sorted_map_slot(sm)
+
+		hm_cur, _ := xitdb.hash_map_get_cursor(m0, "hm")
+		hm, _ := xitdb.read_hash_map_init(hm_cur.?)
+		hm_slot, _ := xitdb.hash_map_slot(hm)
+
+		// Read B-Tree header of `ll` ([0..8] = size, [8..16] = root_ptr)
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, ll_slot.value + 8), nil)
+		ll_root_ptr, _ := xitdb.core_read_i64(&core)
+
+		// Read B+Tree header of `sm` ([0..8] = size, [8..16] = root_ptr)
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, sm_slot.value + 8), nil)
+		sm_root_ptr, _ := xitdb.core_read_i64(&core)
+
+		// 1. Corrupt `ll` branch `counts[0]` from 8 to 15 so `rank = 10` routes to child 0 (`num = 8`) with `rem = 10 >= num`:
+		// Verify `linked_array_list_get_cursor(ll, 10)` returns `.Invalid_BTree_Node`
+		ll_counts0_pos := ll_root_ptr + xitdb.BTREE_NODE_HEADER_SIZE + xitdb.SLOT_LENGTH * xitdb.BTREE_SLOT_COUNT
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, ll_counts0_pos), nil)
+		orig_ll_cnt0, _ := xitdb.core_read_i64(&core)
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, ll_counts0_pos), nil)
+		testing.expect_value(ctx.t, xitdb.core_write_i64(&core, 15), nil)
+
+		_, ll_rem_err := xitdb.linked_array_list_get_cursor(ll, 10)
+		testing.expect_value(ctx.t, ll_rem_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
+
+		// Restore `ll` `counts[0]`
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, ll_counts0_pos), nil)
+		testing.expect_value(ctx.t, xitdb.core_write_i64(&core, orig_ll_cnt0), nil)
+
+		// 2. Corrupt `sm` branch `counts[0]` from 8 to 15 so `rank = 10` routes to child 0 (`num = 8`) with `rem = 10 >= num`:
+		// Verify `sorted_map_get_index_cursor(sm, 10)` returns `.Invalid_BTree_Node`
+		sm_counts0_pos := sm_root_ptr + xitdb.BTREE_NODE_HEADER_SIZE + xitdb.SLOT_LENGTH * 2 * xitdb.BTREE_SLOT_COUNT
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, sm_counts0_pos), nil)
+		orig_sm_cnt0, _ := xitdb.core_read_i64(&core)
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, sm_counts0_pos), nil)
+		testing.expect_value(ctx.t, xitdb.core_write_i64(&core, 15), nil)
+
+		_, sm_rem_err := xitdb.sorted_map_get_index_kv_pair(sm, 10)
+		testing.expect_value(ctx.t, sm_rem_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
+
+		// Restore `sm` `counts[0]`
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, sm_counts0_pos), nil)
+		testing.expect_value(ctx.t, xitdb.core_write_i64(&core, orig_sm_cnt0), nil)
+
+		// 3. Corrupt a slot tag byte (`0x63` = 99) in `ll` child 0 leaf slot 0:
+		// Verify `linked_array_list_get_cursor(ll, 0)` and `linked_array_list_iterator` return `.Unexpected_Tag`
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, ll_root_ptr + xitdb.BTREE_NODE_HEADER_SIZE), nil)
+		ll_child0_slot, _ := xitdb.core_read_slot(&core)
+		ll_leaf0_tag_pos := ll_child0_slot.value + xitdb.BTREE_NODE_HEADER_SIZE
+		orig_ll_tag_byte: [1]u8
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, ll_leaf0_tag_pos), nil)
+		testing.expect_value(ctx.t, xitdb.core_read_exact(&core, orig_ll_tag_byte[:]), nil)
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, ll_leaf0_tag_pos), nil)
+		testing.expect_value(ctx.t, xitdb.core_write_all(&core, []u8{99}), nil)
+
+		_, ll_tag_err := xitdb.linked_array_list_get_cursor(ll, 0)
+		testing.expect_value(ctx.t, ll_tag_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, ll_from_err := xitdb.linked_array_list_iterator_from(ll, 0)
+		testing.expect_value(ctx.t, ll_from_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		ll_it, ll_it_init_err := xitdb.linked_array_list_iterator(ll)
+		testing.expect_value(ctx.t, ll_it_init_err, nil)
+		_, ll_iter_err := xitdb.cursor_iterator_next(&ll_it)
+		testing.expect_value(ctx.t, ll_iter_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, ll_node_err := xitdb.read_btree_node(&db, ll_child0_slot.value)
+		testing.expect_value(ctx.t, ll_node_err, xitdb.Xitdb_Error.Unexpected_Tag)
+
+		// Restore `ll` leaf tag byte
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, ll_leaf0_tag_pos), nil)
+		testing.expect_value(ctx.t, xitdb.core_write_all(&core, orig_ll_tag_byte[:]), nil)
+
+		// 4. Corrupt a slot tag byte (`99`) in `sm` child 0 leaf slot 0:
+		// Verify `sorted_map_get_cursor(sm, "k00")`, `sorted_map_get_index_kv_pair(sm, 0)`, `sorted_map_rank(sm, "k00")`,
+		// `sorted_map_iterator_from_index(sm, 0)`, `sorted_map_iterator_from_string(sm, "k00")`, and `cursor_iterator_next`
+		// all return `.Unexpected_Tag`
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, sm_root_ptr + xitdb.BTREE_NODE_HEADER_SIZE), nil)
+		sm_child0_slot, _ := xitdb.core_read_slot(&core)
+		sm_leaf0_tag_pos := sm_child0_slot.value + xitdb.BTREE_NODE_HEADER_SIZE
+		orig_sm_tag_byte: [1]u8
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, sm_leaf0_tag_pos), nil)
+		testing.expect_value(ctx.t, xitdb.core_read_exact(&core, orig_sm_tag_byte[:]), nil)
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, sm_leaf0_tag_pos), nil)
+		testing.expect_value(ctx.t, xitdb.core_write_all(&core, []u8{99}), nil)
+
+		_, sm_get_err := xitdb.sorted_map_get_cursor(sm, "k00")
+		testing.expect_value(ctx.t, sm_get_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, sm_idx_err := xitdb.sorted_map_get_index_kv_pair(sm, 0)
+		testing.expect_value(ctx.t, sm_idx_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, sm_rank_err := xitdb.sorted_map_rank(sm, "k00")
+		testing.expect_value(ctx.t, sm_rank_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, sm_from_idx_err := xitdb.sorted_map_iterator_from_index(sm, 0)
+		testing.expect_value(ctx.t, sm_from_idx_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, sm_from_key_err := xitdb.sorted_map_iterator_from_string(sm, "k00")
+		testing.expect_value(ctx.t, sm_from_key_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		sm_it, sm_it_init_err := xitdb.sorted_map_iterator(sm)
+		testing.expect_value(ctx.t, sm_it_init_err, nil)
+		_, sm_iter_err := xitdb.cursor_iterator_next(&sm_it)
+		testing.expect_value(ctx.t, sm_iter_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, sm_node_err := xitdb.read_sorted_node(&db, sm_child0_slot.value)
+		testing.expect_value(ctx.t, sm_node_err, xitdb.Xitdb_Error.Unexpected_Tag)
+
+		// Restore `sm` leaf tag byte
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, sm_leaf0_tag_pos), nil)
+		testing.expect_value(ctx.t, xitdb.core_write_all(&core, orig_sm_tag_byte[:]), nil)
+
+		// 5. Corrupt a slot tag byte (`99`) in `hm` root index block:
+		// Verify `hash_map_iterator(hm)` returns `.Unexpected_Tag`
+		orig_hm_tag_byte: [1]u8
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, hm_slot.value), nil)
+		testing.expect_value(ctx.t, xitdb.core_read_exact(&core, orig_hm_tag_byte[:]), nil)
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, hm_slot.value), nil)
+		testing.expect_value(ctx.t, xitdb.core_write_all(&core, []u8{99}), nil)
+
+		_, hm_iter_err := xitdb.hash_map_iterator(hm)
+		testing.expect_value(ctx.t, hm_iter_err, xitdb.Xitdb_Error.Unexpected_Tag)
+
+		// Restore `hm` tag byte
+		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, hm_slot.value), nil)
+		testing.expect_value(ctx.t, xitdb.core_write_all(&core, orig_hm_tag_byte[:]), nil)
+
+		// 6. Mid-node truncation of `sm` child 0 leaf (truncate right in the middle of the 146-byte leaf block):
+		// Verify `read_sorted_node` and `sorted_map_iterator` return `.Unexpected_EOF`
+		testing.expect_value(ctx.t, xitdb.core_set_length(&core, sm_child0_slot.value + 30), nil)
+		_, sm_trunc_node_err := xitdb.read_sorted_node(&db, sm_child0_slot.value)
+		testing.expect_value(ctx.t, sm_trunc_node_err, xitdb.Xitdb_Error.Unexpected_EOF)
+		_, sm_trunc_err := xitdb.sorted_map_iterator(sm)
+		testing.expect_value(ctx.t, sm_trunc_err, xitdb.Xitdb_Error.Unexpected_EOF)
+	}
+}
+
+
 
 
 

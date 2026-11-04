@@ -82,11 +82,14 @@ case Core_Memory:
 
 Zig `0.17.0` already has `std.Io.Reader.fixed(slice)` built into the standard library! When `interface` is initialized with `.fixed(bytes)`, `interface.buffer` points directly to the backing slice (`end = bytes.len`), so `readSliceAll` and `takeInt` become a single inline bounds check + `@memcpy` with **zero vtable calls**.
 
-### Important Subtlety: Safe Interleaving with `CoreMemory.Writer`
+### Important Subtlety: Why `CoreMemory.Reader` With `.fixed(written)` Requires Explicit `seekTo` After Writes
 
-In a few places (such as [`readMapSlot`](../../reference/xitdb-zig/src/lib.zig#L1605-L1606) and [`hash_map_init`](../../reference/xitdb-zig/src/lib.zig#L1311-L1312)), `lib.zig` creates `var reader = self.core.reader()` and `var writer = self.core.writer()` in the same scope. If `writer` appends bytes and reallocates `self.buffer`, a stale slice cached inside `reader.interface.buffer` before the write would dangle if read later.
+In `lib.zig`, several functions create `var reader = self.core.reader()` and `var writer = self.core.writer()` in the same scope. If `CoreMemory.reader()` initializes `interface = .fixed(self.buffer.written())`, then:
+1. Any subsequent `writer` append that reallocates `self.buffer` invalidates `reader.interface.buffer` until `reader.seekTo(...)` is called.
+2. Any read that relies on `reader.pos` advancing without an explicit `seekTo(...)` must be careful because `std.Io.Reader.fixed` advances `interface.seek`, not `reader.pos`.
 
-Refreshing `self.interface` from `self.parent.buffer.written()` inside `seekTo()` guarantees that any `try reader.seekTo(...)` after a write always sees the latest allocation and length:
+Because of that fragile implicit requirement (`seekTo` must be called before reading after any write, and `reader.pos` is not updated by `readSliceAll`), **upstream `xitdb-zig` (`42cd00e`) intentionally kept `CoreMemory.Reader.stream` (which dynamically resolves `r.parent.buffer.written()[r.pos..]` on every read) and instead merged the safe `Cursor.Iter.readSlotBlock` direct `std.mem.readInt` optimization (`42cd00e`)**.
+
 
 ```zig
 const CoreMemory = struct {

@@ -439,7 +439,6 @@ Cursor_Reader :: struct {
 	size:              i64,
 	start_position:    i64,
 	relative_position: i64,
-	direct_slice:      []u8,
 }
 
 cursor_reader :: proc(c: Read_Cursor) -> (res: Cursor_Reader, err: Error) {
@@ -449,19 +448,11 @@ cursor_reader :: proc(c: Read_Cursor) -> (res: Cursor_Reader, err: Error) {
 		core_seek_to(c.db.core, slot_ptr.slot.value) or_return
 		size := core_read_long(c.db.core) or_return
 		start_position := core_position(c.db.core) or_return
-		direct_slice: []u8
-		#partial switch &mem in c.db.core {
-		case Core_Memory:
-			if start_position >= 0 && size >= 0 && start_position + size <= i64(len(mem.buf)) {
-				direct_slice = mem.buf[int(start_position):int(start_position + size)]
-			}
-		}
 		return Cursor_Reader{
 			parent            = c,
 			size              = size,
 			start_position    = start_position,
 			relative_position = 0,
-			direct_slice      = direct_slice,
 		}, nil
 	case .Short_Bytes:
 		buf: [8]u8 = ---
@@ -479,19 +470,11 @@ cursor_reader :: proc(c: Read_Cursor) -> (res: Cursor_Reader, err: Error) {
 			return {}, .Expected_Slot_Position
 		}
 		start_position := pos + 1
-		direct_slice: []u8
-		#partial switch &mem in c.db.core {
-		case Core_Memory:
-			if start_position >= 0 && start_position + i64(value_size) <= i64(len(mem.buf)) {
-				direct_slice = mem.buf[int(start_position):int(start_position) + value_size]
-			}
-		}
 		return Cursor_Reader{
 			parent            = c,
 			size              = i64(value_size),
 			start_position    = start_position,
 			relative_position = 0,
-			direct_slice      = direct_slice,
 		}, nil
 	case:
 		return {}, .Unexpected_Tag
@@ -506,8 +489,11 @@ cursor_reader_read :: #force_inline proc(r: ^Cursor_Reader, p: []u8) -> (res: in
 	if read_size == 0 {
 		return 0, nil
 	}
-	if r.direct_slice != nil {
-		intrinsics.mem_copy_non_overlapping(raw_data(p), &r.direct_slice[int(r.relative_position)], int(read_size))
+	if src_slice, in_mem, slice_err := core_slice_at(r.parent.db.core, r.start_position + r.relative_position, int(read_size)); in_mem {
+		if slice_err != nil {
+			return 0, slice_err
+		}
+		intrinsics.mem_copy_non_overlapping(raw_data(p), raw_data(src_slice), int(read_size))
 		r.relative_position += read_size
 		return int(read_size), nil
 	}
@@ -522,11 +508,15 @@ cursor_reader_read_fully :: #force_inline proc(r: ^Cursor_Reader, buf: []u8) -> 
 	if r.size < r.relative_position || r.size - r.relative_position < n {
 		return .End_Of_Stream
 	}
-	if r.direct_slice != nil {
-		if n > 0 {
-			intrinsics.mem_copy_non_overlapping(raw_data(buf), &r.direct_slice[int(r.relative_position)], int(n))
-			r.relative_position += n
+	if n == 0 {
+		return nil
+	}
+	if src_slice, in_mem, slice_err := core_slice_at(r.parent.db.core, r.start_position + r.relative_position, int(n)); in_mem {
+		if slice_err != nil {
+			return slice_err
 		}
+		intrinsics.mem_copy_non_overlapping(raw_data(buf), raw_data(src_slice), int(n))
+		r.relative_position += n
 		return nil
 	}
 	core_seek_to(r.parent.db.core, r.start_position + r.relative_position) or_return
@@ -700,26 +690,6 @@ _fill_slot_block_from :: proc(cursor: Read_Cursor, position: i64, start_idx: int
 }
 
 @(private)
-_fill_slot_block_raw_from :: proc(cursor: Read_Cursor, position: i64, start_idx: int, end_idx: int, level: ^Iter_Level) -> Error {
-	level.position = position
-	level.index = u8(start_idx)
-	level.count = u8(end_idx)
-	rem_slots := end_idx - start_idx
-	if rem_slots <= 0 {
-		return nil
-	}
-	core_seek_to(cursor.db.core, position + i64(start_idx) * SLOT_LENGTH) or_return
-	index_block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
-	core_read_exact(cursor.db.core, index_block_bytes[:rem_slots * SLOT_LENGTH]) or_return
-	for j in 0 ..< rem_slots {
-		sb: [SLOT_LENGTH]u8 = ---
-		copy(sb[:], index_block_bytes[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH])
-		level.block[start_idx + j] = slot_from_bytes_raw(sb)
-	}
-	return nil
-}
-
-@(private)
 _init_iter_level :: proc(cursor: Read_Cursor, position: i64, level: ^Iter_Level) -> Error {
 	return _fill_slot_block_from(cursor, position, 0, SLOT_COUNT, level)
 }
@@ -737,19 +707,7 @@ _init_btree_iter_level :: proc(cursor: Read_Cursor, node_ptr: i64, level: ^Iter_
 		return .Invalid_BTree_Node
 	}
 	position := node_ptr + BTREE_NODE_HEADER_SIZE
-	level.position = position
-	level.index = 0
-	level.count = u8(num)
-	if num > 0 {
-		index_block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
-		core_read_exact(cursor.db.core, index_block_bytes[:num * SLOT_LENGTH]) or_return
-		for j in 0 ..< num {
-			sb: [SLOT_LENGTH]u8 = ---
-			copy(sb[:], index_block_bytes[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH])
-			level.block[j] = slot_from_bytes_raw(sb)
-		}
-	}
-	return nil
+	return _fill_slot_block_from(cursor, position, 0, num, level)
 }
 
 cursor_iterator :: proc(unresolved_cursor: Read_Cursor) -> (res: Cursor_Iterator, err: Error) {
@@ -855,7 +813,7 @@ cursor_iterator_sorted_from_index :: proc(unresolved_cursor: Read_Cursor, start_
 		level := &res.stack[res.stack_len]
 		if BTree_Node_Kind(kind_int) == .Leaf {
 			r := int(rem)
-			_fill_slot_block_raw_from(cursor, position, r, num, level) or_return
+			_fill_slot_block_from(cursor, position, r, num, level) or_return
 			res.stack_len += 1
 			break
 		}
@@ -872,7 +830,7 @@ cursor_iterator_sorted_from_index :: proc(unresolved_cursor: Read_Cursor, start_
 			rem -= cnt
 			i += 1
 		}
-		_fill_slot_block_raw_from(cursor, position, i, num, level) or_return
+		_fill_slot_block_from(cursor, position, i, num, level) or_return
 		res.stack_len += 1
 		node_ptr = level.block[i].value
 	}
@@ -914,9 +872,7 @@ cursor_iterator_sorted_from_key :: proc(unresolved_cursor: Read_Cursor, start_ke
 				index_block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
 				core_read_exact(cursor.db.core, index_block_bytes[:num * SLOT_LENGTH]) or_return
 				for j in 0 ..< num {
-					sb: [SLOT_LENGTH]u8 = ---
-					copy(sb[:], index_block_bytes[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH])
-					level.block[j] = slot_from_bytes_raw(sb)
+					level.block[j] = slot_from_slice(index_block_bytes[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH]) or_return
 				}
 			}
 			lo := 0
@@ -949,9 +905,7 @@ cursor_iterator_sorted_from_key :: proc(unresolved_cursor: Read_Cursor, start_ke
 		sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
 		for lo < hi {
 			mid := int(uint(lo + hi) >> 1)
-			sb: [SLOT_LENGTH]u8 = ---
-			copy(sb[:], branch_buf[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH])
-			sep_slot := slot_from_bytes_raw(sb)
+			sep_slot := slot_from_slice(branch_buf[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH]) or_return
 			c := compare_key(cursor.db, sep_slot, start_key) or_return
 			if c <= 0 {
 				lo = mid + 1
@@ -965,9 +919,7 @@ cursor_iterator_sorted_from_key :: proc(unresolved_cursor: Read_Cursor, start_ke
 			before += i64(endian.unchecked_get_u64be(branch_buf[counts_off + k * 8 : counts_off + (k + 1) * 8]))
 		}
 		for j in i ..< num {
-			sb: [SLOT_LENGTH]u8 = ---
-			copy(sb[:], branch_buf[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH])
-			level.block[j] = slot_from_bytes_raw(sb)
+			level.block[j] = slot_from_slice(branch_buf[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH]) or_return
 		}
 		level.position = position
 		level.index = u8(i)
@@ -1053,7 +1005,7 @@ cursor_iterator_linked_array_list_from_index :: proc(unresolved_cursor: Read_Cur
 		level := &res.stack[res.stack_len]
 		if BTree_Node_Kind(kind_int) == .Leaf {
 			r := int(rem)
-			_fill_slot_block_raw_from(cursor, position, r, num, level) or_return
+			_fill_slot_block_from(cursor, position, r, num, level) or_return
 			res.stack_len += 1
 			break
 		}
@@ -1070,7 +1022,7 @@ cursor_iterator_linked_array_list_from_index :: proc(unresolved_cursor: Read_Cur
 			rem -= cnt
 			i += 1
 		}
-		_fill_slot_block_raw_from(cursor, position, i, num, level) or_return
+		_fill_slot_block_from(cursor, position, i, num, level) or_return
 		res.stack_len += 1
 		node_ptr = level.block[i].value
 	}

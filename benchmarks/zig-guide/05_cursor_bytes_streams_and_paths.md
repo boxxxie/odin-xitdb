@@ -73,42 +73,12 @@ In [`Cursor.readBytesObject` (`lib.zig#L3295-L3316`)](../../reference/xitdb-zig/
 },
 ```
 
-### B. Zero-Copy `Cursor.Reader` on `CoreMemory`
+### B. Reallocation-Safe `Cursor.Reader` on `CoreMemory`
 
-If `db_kind == .memory` (known at `comptime` inside `Database(db_kind, HashInt)`!), `Cursor.reader()` can return a fixed `std.Io.Reader` slice straight over `self.db.core.buffer.written()[start_position .. start_position + size]` whenever `slot.tag == .bytes` (or when `slot_ptr.position != null` for `.short_bytes`):
+> [!WARNING]
+> **Why `.interface = .fixed(slice)` in `Cursor.reader()` Is Unsafe Across Writes:**
+> Initializing `Cursor.Reader.interface = .fixed(mem_bytes[start_position..][0..size])` inside `Cursor.reader()` caches a raw pointer into `self.db.core.buffer.written()`. If a caller holds a `Cursor.Reader` across a subsequent write that grows and reallocates `CoreMemory.buffer`, `interface.buffer` becomes a **dangling slice** (causing a use-after-free segfault on the next read).
+>
+> **Safe Design (Used in Both Zig & Odin):**
+> Never store a slice into `CoreMemory.buffer` inside `Cursor.Reader`. Instead, resolve `self.parent.db.core.buffer.written()` dynamically at the moment of each read (inside `Cursor.Reader.stream` in Zig, or via `core_slice_at` inside `cursor_reader_read` / `cursor_reader_read_fully` in Odin [`xitdb/cursor.odin#L597-L654`](../../xitdb/cursor.odin#L597-L654)). Because the slice is resolved on each read and never retained across calls, growing or truncating `CoreMemory.buffer` while a `Cursor.Reader` is open is 100% memory-safe (`spec_cursor_reader_survives_buffer_reallocation_window_flushes_and_truncation`).
 
-```zig
-// Inside Cursor.reader() (`lib.zig#L3370-L3385`), `.bytes` arm:
-if (comptime db_kind == .memory) {
-    const mem_bytes = self.db.core.buffer.written();
-    if (start_position + size <= mem_bytes.len) {
-        const slice = mem_bytes[@intCast(start_position)..][0..@intCast(size)];
-        return .{
-            .parent = self,
-            .interface = .fixed(slice),
-            .size = size,
-            .start_position = start_position,
-            .pos = size, // all `size` bytes are already in `interface.buffer[0..size]`
-        };
-    }
-}
-```
-
-And in [`Cursor.Reader.seekTo` (`lib.zig#L2971-L2981`)](../../reference/xitdb-zig/src/lib.zig#L2971-L2981), checking `const window_start = self.pos - self.interface.end;` instead of `logical_pos` allows both forward **and backward** seeks (`try bar_reader.seekTo(0)` in `src/test.zig#L1468`) to stay inside the buffered window without invalidating `interface.end`:
-
-```zig
-pub fn seekTo(self: *Reader, offset: u64) !void {
-    const logical_pos = self.logicalPos();
-    const window_start = self.pos - self.interface.end;
-    if (offset < window_start or offset >= self.pos) {
-        self.interface.seek = 0;
-        self.interface.end = 0;
-        self.pos = offset;
-    } else {
-        const logical_delta: isize = @intCast(@as(i65, @intCast(offset)) - @as(i65, @intCast(logical_pos)));
-        self.interface.seek = @intCast(@as(isize, @intCast(self.interface.seek)) + logical_delta);
-    }
-}
-```
-
-With this in place, `#53 Stream: Cursor_Reader random seek + 64B read` drops from `28.4 ns` to **`5.0 ns` (5.67x faster, beating Odin's `6.1 ns`)**!

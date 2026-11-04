@@ -64,7 +64,7 @@ Tag :: enum u8 {
 
 MAX_TAG_VALUE :: u8(Tag.Sorted_KV_Pair)
 
-tag_validate :: proc(t: Tag) -> Error {
+tag_validate :: #force_inline proc(t: Tag) -> Error {
 	if u8(t) > MAX_TAG_VALUE {
 		return .Unexpected_Tag
 	}
@@ -902,6 +902,12 @@ slot_from_slice_raw :: #force_inline proc(b: []u8) -> Slot #no_bounds_check {
 
 slot_from_bytes :: #force_inline proc(buf: [SLOT_LENGTH]u8) -> (s: Slot, err: Error) {
 	s = slot_from_bytes_raw(buf)
+	tag_validate(s.tag) or_return
+	return s, nil
+}
+
+slot_from_slice :: #force_inline proc(b: []u8) -> (s: Slot, err: Error) #no_bounds_check {
+	s = slot_from_slice_raw(b)
 	tag_validate(s.tag) or_return
 	return s, nil
 }
