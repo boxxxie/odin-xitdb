@@ -3,9 +3,12 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const patched = b.option(bool, "patched", "Use reference/xitdb-zig-patched instead of upstream reference/xitdb-zig") orelse false;
+
+    const zig_dir = if (patched) "reference/xitdb-zig-patched" else "reference/xitdb-zig";
 
     const xitdb = b.addModule("xitdb", .{
-        .root_source_file = b.path("reference/xitdb-zig/src/lib.zig"),
+        .root_source_file = b.path(b.fmt("{s}/src/lib.zig", .{zig_dir})),
     });
 
     const bench_exe = b.addExecutable(.{
@@ -30,7 +33,7 @@ pub fn build(b: *std.Build) void {
 
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("reference/xitdb-zig/src/test.zig"),
+            .root_source_file = b.path(b.fmt("{s}/src/test.zig", .{zig_dir})),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -39,6 +42,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    const test_step = b.step("test", "Run upstream xitdb-zig library tests");
+    const test_step = b.step("test", "Run xitdb-zig library tests (pass -Dpatched=true for patched fork)");
     test_step.dependOn(&run_unit_tests.step);
 }

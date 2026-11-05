@@ -1,3 +1,7 @@
 [submodule "reference/xitdb-zig"]
 	path = reference/xitdb-zig
 	url = https://github.com/xit-vcs/xitdb.git
+[submodule "reference/xitdb-zig-patched"]
+	path = reference/xitdb-zig-patched
+	url = git@github.com:boxxxie/xitdb.git
+	branch = patched
