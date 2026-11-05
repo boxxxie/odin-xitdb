@@ -43,6 +43,7 @@ jobs:
         shell: cmd
         run: |
           git clone --depth 1 https://github.com/LuaJIT/LuaJIT.git C:\luajit
+          powershell -NoProfile -Command "(Get-Content C:\luajit\src\lj_err.c) -replace '0xe24c4a00', '0x624c4a00' | Set-Content C:\luajit\src\lj_err.c"
           cd /d C:\luajit\src
           call msvcbuild.bat
           copy /Y C:\luajit\src\lua51.dll "%GITHUB_WORKSPACE%\lua51.dll"
