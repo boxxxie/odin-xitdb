@@ -7,7 +7,7 @@ when ODIN_OS == .Linux {
 } else when ODIN_OS == .Darwin {
 	foreign import luajit_lib "system:luajit-5.1"
 } else when ODIN_OS == .Windows {
-	foreign import luajit_lib "system:luajit-5.1.lib"
+	foreign import luajit_lib "system:lua51.lib"
 }
 
 // ============================================================================

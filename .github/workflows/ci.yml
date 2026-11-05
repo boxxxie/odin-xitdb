@@ -23,8 +23,38 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install LuaJIT (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libluajit-5.1-dev
+
+      - name: Install LuaJIT (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install luajit
+          echo "LIBRARY_PATH=$(brew --prefix luajit)/lib" >> $GITHUB_ENV
+          echo "DYLD_LIBRARY_PATH=$(brew --prefix luajit)/lib" >> $GITHUB_ENV
+
+      - name: Setup MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build LuaJIT (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          git clone --depth 1 https://github.com/LuaJIT/LuaJIT.git C:\luajit
+          cd /d C:\luajit\src
+          call msvcbuild.bat
+          copy /Y C:\luajit\src\lua51.dll "%GITHUB_WORKSPACE%\lua51.dll"
+          copy /Y C:\luajit\src\lua51.lib "%GITHUB_WORKSPACE%\lua51.lib"
+          echo LIB=C:\luajit\src;%GITHUB_WORKSPACE%;%LIB%>> "%GITHUB_ENV%"
+          echo C:\luajit\src>> "%GITHUB_PATH%"
+
       - name: Check library package syntax & types
-        run: odin check xitdb -no-entry-point
+        run: |
+          odin check xitdb/luajit -no-entry-point
+          odin check xitdb -no-entry-point
+          odin check cmd/xit
 
       - name: Check benchmark suite syntax & types
         run: odin check benchmarks
