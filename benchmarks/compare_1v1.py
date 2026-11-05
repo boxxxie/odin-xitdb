@@ -27,6 +27,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH_DIR = os.path.join(ROOT_DIR, "benchmarks")
 ODIN_JSONL = os.path.join(BENCH_DIR, "odin.jsonl")
 ZIG_JSONL = os.path.join(BENCH_DIR, "zig.jsonl")
+LUA_JSONL = os.path.join(BENCH_DIR, "lua.jsonl")
 HISTORY_JSONL = os.path.join(BENCH_DIR, "history.jsonl")
 
 
@@ -458,7 +459,7 @@ def inspect_test(records: List[Dict[str, Any]], pattern: str, commit: Optional[s
 def load_all_history() -> List[Dict[str, Any]]:
     records = load_jsonl_file(HISTORY_JSONL)
     if not records:
-        records = load_jsonl_file(ODIN_JSONL) + load_jsonl_file(ZIG_JSONL)
+        records = load_jsonl_file(ODIN_JSONL) + load_jsonl_file(ZIG_JSONL) + load_jsonl_file(LUA_JSONL)
     return records
 
 
@@ -1917,7 +1918,7 @@ def main() -> None:
         metavar=("SHA_A", "SHA_B"),
         help="Compare benchmark distributions between two git commit SHAs",
     )
-    parser.add_argument("--lang", choices=["odin", "zig", "both"], default="odin", help="Language for --compare-commits")
+    parser.add_argument("--lang", choices=["odin", "zig", "lua", "both", "all"], default="odin", help="Language to run or compare")
     parser.add_argument("--list-commits", action="store_true", help="List all commits and run sessions in history")
     parser.add_argument("--inspect", type=str, default=None, help="Inspect all runs and sample distributions for matching tests")
     parser.add_argument(
@@ -2004,7 +2005,12 @@ def main() -> None:
     if args.compare_commits:
         sha_a, sha_b = args.compare_commits
         records = load_all_history()
-        langs = ["odin", "zig"] if args.lang == "both" else [args.lang]
+        if args.lang == "all":
+            langs = ["odin", "zig", "lua"]
+        elif args.lang == "both":
+            langs = ["odin", "zig"]
+        else:
+            langs = [args.lang]
         for lg in langs:
             compare_commits(records, sha_a, sha_b, lg)
         return
@@ -2063,8 +2069,9 @@ def main() -> None:
             if args.filter:
                 extra_flags += ["--filter", args.filter]
 
-            run_odin = args.lang in ("odin", "both") or args.groups is None
-            run_zig = (args.lang in ("zig", "both") or args.groups is None) and (args.groups != "dsl")
+            run_odin = args.lang in ("odin", "both", "all") or (args.groups is None and args.lang not in ("zig", "lua"))
+            run_zig = (args.lang in ("zig", "both", "all") or (args.groups is None and args.lang not in ("odin", "lua"))) and (args.groups != "dsl")
+            run_lua = args.lang in ("lua", "all")
 
             if run_odin:
                 run_cmd(
@@ -2080,6 +2087,13 @@ def main() -> None:
                     zig_build_args + ["--"] + common_flags + extra_flags,
                     f"xitdb-zig (-Doptimize=ReleaseFast -Dcpu=native{' -Dpatched=true' if args.patched else ''})",
                 )
+            if run_lua:
+                run_cmd(
+                    ["odin", "run", "benchmarks", "-o:speed", "-microarch:native", "--", "--lang", "lua"] + common_flags + extra_flags,
+                    "xitdb-lua (Lua 5.4 via Odin -o:speed -microarch:native)",
+                )
+                if args.lang == "lua":
+                    return
 
     odin_raw = load_jsonl_file(ODIN_JSONL)
     zig_raw = load_jsonl_file(ZIG_JSONL)

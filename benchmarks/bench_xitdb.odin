@@ -38,6 +38,7 @@ g_append_primary: bool = false
 g_save_history:   bool = true
 g_jsonl_path:     string = "benchmarks/odin.jsonl"
 g_history_path:   string = "benchmarks/history.jsonl"
+g_lang:           string = "odin"
 g_groups_filter:  string = ""
 g_name_filter:    string = ""
 
@@ -146,6 +147,12 @@ parse_cli_args :: proc() {
 		} else if strings.has_prefix(arg, "--groups=") || strings.has_prefix(arg, "-groups:") || strings.has_prefix(arg, "--group=") || strings.has_prefix(arg, "-group:") {
 			eq := strings.index_any(arg, "=:")
 			g_groups_filter = arg[eq + 1:]
+		} else if (arg == "--lang" || arg == "-lang") && i + 1 < len(args) {
+			g_lang = strings.to_lower(args[i + 1], context.allocator)
+			i += 1
+		} else if strings.has_prefix(arg, "--lang=") || strings.has_prefix(arg, "-lang:") {
+			eq := strings.index_any(arg, "=:")
+			g_lang = strings.to_lower(arg[eq + 1:], context.allocator)
 		} else if (arg == "--filter" || arg == "-filter") && i + 1 < len(args) {
 			g_name_filter = args[i + 1]
 			i += 1
@@ -154,6 +161,9 @@ parse_cli_args :: proc() {
 			g_name_filter = arg[eq + 1:]
 		}
 		i += 1
+	}
+	if g_lang == "lua" && g_jsonl_path == "benchmarks/odin.jsonl" {
+		g_jsonl_path = "benchmarks/lua.jsonl"
 	}
 	g_selective_run = (len(g_groups_filter) > 0 && g_groups_filter != "all") || len(g_name_filter) > 0
 }
@@ -238,8 +248,9 @@ calc_percentile :: proc(sorted: []f64, p: f64) -> f64 {
 print_header :: proc() {
 	fmt.println("=================================================================================================================================================================")
 	fmt.printf(
-		"  Commit: %s | Lang: odin | Runs: %d (Warmup: %d) | Run ID: %s\n",
+		"  Commit: %s | Lang: %s | Runs: %d (Warmup: %d) | Run ID: %s\n",
 		g_commit_sha,
+		g_lang,
 		g_runs,
 		g_warmup,
 		g_run_id,
@@ -272,7 +283,7 @@ print_result :: proc(r: Bench_Result) {
 	}
 	acc := &g_group_accum[slot]
 	if acc.count == 0 {
-		acc.name = r.name
+		acc.name = strings.clone(r.name, context.allocator)
 		acc.ops = r.ops
 		acc.bytes_used = r.bytes_used
 	} else if r.bytes_used > 0 {
@@ -383,8 +394,9 @@ flush_group_results :: proc() {
 			samples_json := strings.to_string(sb)
 
 			line := fmt.tprintf(
-				"{{\"rank\":%d,\"lang\":\"odin\",\"commit\":\"%s\",\"run_id\":\"%s\",\"name\":\"%s\",\"ops\":%d,\"runs\":%d,\"warmup\":%d,\"total_ms\":%.3f,\"ns_per_op\":%.0f,\"mean_ns\":%.2f,\"median_ns\":%.2f,\"stddev_ns\":%.2f,\"variance_ns2\":%.2f,\"cv_pct\":%.2f,\"min_ns\":%.0f,\"max_ns\":%.0f,\"iqr_ns\":%.2f,\"p95_ns\":%.0f,\"p99_ns\":%.0f,\"ops_per_sec\":%.0f,\"bytes_used\":%d,\"samples_ns\":%s}}\n",
+				"{{\"rank\":%d,\"lang\":\"%s\",\"commit\":\"%s\",\"run_id\":\"%s\",\"name\":\"%s\",\"ops\":%d,\"runs\":%d,\"warmup\":%d,\"total_ms\":%.3f,\"ns_per_op\":%.0f,\"mean_ns\":%.2f,\"median_ns\":%.2f,\"stddev_ns\":%.2f,\"variance_ns2\":%.2f,\"cv_pct\":%.2f,\"min_ns\":%.0f,\"max_ns\":%.0f,\"iqr_ns\":%.2f,\"p95_ns\":%.0f,\"p99_ns\":%.0f,\"ops_per_sec\":%.0f,\"bytes_used\":%d,\"samples_ns\":%s}}\n",
 				g_bench_rank,
+				g_lang,
 				g_commit_sha,
 				g_run_id,
 				acc.name,
@@ -2429,13 +2441,23 @@ main :: proc() {
 	}
 
 	print_header()
-	run_group("hamt", 0, bench_hamt, 2_000)
-	run_group("lists", 13, bench_lists, 2_000)
-	run_group("sorted_map", 27, bench_sorted_map, 2_000)
-	run_group("compaction", 38, bench_compaction_and_replication, 200)
-	run_group("hashers", 44, bench_hashers_and_byte_streams, 2_000)
-	run_group("backends", 57, bench_backends, 500)
-	run_group("dsl", 63, run_dsl_benchmarks, 0)
+	if g_lang == "lua" {
+		run_group("hamt", 0, bench_hamt_lua, 2_000)
+		run_group("lists", 13, bench_lists_lua, 2_000)
+		run_group("sorted_map", 27, bench_sorted_map_lua, 2_000)
+		run_group("compaction", 38, bench_compaction_and_replication_lua, 200)
+		run_group("hashers", 44, bench_hashers_and_byte_streams_lua, 2_000)
+		run_group("backends", 57, bench_backends_lua, 500)
+		run_group("dsl", 63, run_dsl_benchmarks_lua, 0)
+	} else {
+		run_group("hamt", 0, bench_hamt, 2_000)
+		run_group("lists", 13, bench_lists, 2_000)
+		run_group("sorted_map", 27, bench_sorted_map, 2_000)
+		run_group("compaction", 38, bench_compaction_and_replication, 200)
+		run_group("hashers", 44, bench_hashers_and_byte_streams, 2_000)
+		run_group("backends", 57, bench_backends, 500)
+		run_group("dsl", 63, run_dsl_benchmarks, 0)
+	}
 
 	if g_selective_run && !g_append_primary && g_jsonl_file != nil {
 		for r in 1 ..< MAX_TOTAL_RANKS {
