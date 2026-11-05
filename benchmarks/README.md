@@ -25,12 +25,16 @@ odin run benchmarks -o:speed -microarch:native -- --runs 5 --append
 odin run benchmarks -o:speed -microarch:native -no-bounds-check -- --runs 5
 ```
 
-### 1v1 Comparison with Upstream Zig (`reference/xitdb-zig`)
+### 1v1 Comparison with Upstream Zig (`reference/xitdb-zig` & `reference/xitdb-zig-patched`)
 
-The upstream Zig reference implementation is tracked in `reference/xitdb-zig`. To run the Zig benchmark suite (requires Zig `0.17.0-dev` matching `reference/xitdb-zig/build.zig.zon`):
+The upstream Zig reference implementation is tracked in `reference/xitdb-zig` (and our patched fork with all 6 guide optimizations is tracked in `reference/xitdb-zig-patched`). To run the Zig benchmark suite (requires Zig `0.17.0-dev` matching `reference/xitdb-zig/build.zig.zon`):
 
 ```bash
+# Run against upstream reference/xitdb-zig (default)
 zig build bench -Doptimize=ReleaseFast -Dcpu=native -- --runs 5 --warmup 1
+
+# Run against reference/xitdb-zig-patched
+zig build bench -Doptimize=ReleaseFast -Dcpu=native -Dpatched=true -- --runs 5 --warmup 1
 ```
 
 Or run both suites back-to-back with unified commit/run tagging and statistical significance reporting (Welch's $z$-test):
@@ -104,104 +108,48 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 > - Read the [**Idiomatic Zig Optimization Guide (`zig-guide/README.md`)**](zig-guide/README.md) for six standalone, peer-engineering deep dives ([`01 CoreMemory`](zig-guide/01_core_memory_zero_vtable_io.md) · [`02 LinkedArrayList`](zig-guide/02_btree_node_batch_io_and_leaf_seek.md) · [`03 SortedMap`](zig-guide/03_sorted_bptree_binary_search.md) · [`04 HAMT`](zig-guide/04_hamt_single_pass_kv_and_lazy_remove.md) · [`05 Cursor & Paths`](zig-guide/05_cursor_bytes_streams_and_paths.md) · [`06 CoreBufferedFile & Compactor`](zig-guide/06_buffered_file_tail_cache_and_compaction.md)) showing how to achieve the same speedups in Zig `0.17` in ~140 net LOC without sacrificing readability or wire compatibility.
 
 <!-- BEGIN_BENCHMARK_TABLE -->
-### 1. Latest Code-Change Impact & Affected Benchmarks (`40c719e2b02d` → `3b3da703c200`, Odin, 75 / 75 tests re-run)
+### 1. Latest Code-Change Impact & Affected Benchmarks (`3b3da703c200` → `2ea57460f65b`, Odin, 16 / 75 tests re-run)
 
-- **Code Diff Inspected:** `df250db~1..df250db` · **Changed Files:** `xitdb/core.odin`, `xitdb/hamt.odin`
-- **Modified Procedures:** `core_read_exact`, `core_write_all`, `read_map_slot`, `remove_map_slot`
-- **Mapped Benchmark Scope:** Odin groups=`hamt`, `lists`, `sorted_map`, `compaction`, `hashers`, `backends`, `dsl` (**75 / 75** Odin benchmarks executed; **0** unchanged benchmarks retained from `40c719e`)
+- **Code Diff Inspected:** `e672ad7~1..e672ad7` · **Changed Files:** `xitdb/btree.odin`, `xitdb/compact_replicate.odin`, `xitdb/core.odin`, `xitdb/cursor.odin`
+- **Modified Procedures:** `_compactor_reserve_block`, `_memory_offset_map_grow`, `btree_get_for_write`, `btree_insert`, `btree_remove`, `btree_split_left`, `btree_split_right`, `btree_split`, `core_write_all`, `cursor_iterator_linked_array_list_from_index`, `cursor_iterator_sorted_from_index`, `database_compact`, `offset_map_put`
+- **Mapped Benchmark Scope:** Odin groups=`lists`, `sorted_map`, `compaction`, `hashers`, `backends` · filter=`Linked_Array_List|Heterogeneous DAG|4-level nested|Compaction|Post-compaction|Core_Buffered_File|File_Offset_Map|Sorted_Map (B+Tree) index-seek|Linked_Array_List (B-Tree) index-seek` (**16 / 75** Odin benchmarks executed; **59** unchanged benchmarks retained from `3b3da70`)
 
-#### 1.1 Sub-100ns Fast Path (`ns`, 20 affected tests)
+#### 1.1 Sub-100ns Fast Path (`ns`, 2 affected tests)
 
-| # | Benchmark | Verdict | Delta | Speedup | Base `40c719e` (`ns`) | Curr `3b3da70` (`ns`) | Welch $z$ | Base Mean ± σ | Curr Mean ± σ |
+| # | Benchmark | Verdict | Delta | Speedup | Base `3b3da70` (`ns`) | Curr `2ea5746` (`ns`) | Welch $z$ | Base Mean ± σ | Curr Mean ± σ |
 | ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | [`HAMT Hash_Map point lookup (with SHA-1)`](bench_xitdb.odin#L498-L514) [🔍 40p](slices/02_hamt_hash_map_point_lookup_with_sha_1.md) | `~NOISE` | `-4.2%` | 1.04x | 95 | **91** | `0.2` | 109 ± 31.4 | 106 ± 32.6 |
-| 3 | [`HAMT Hash_Map lookup (pre-hashed digest)`](bench_xitdb.odin#L516-L533) [🔍 33p](slices/03_hamt_hash_map_lookup_pre_hashed_digest.md) | `~NOISE` | `-5.0%` | 1.05x | 60 | **57** | `0.8` | 77 ± 27.4 | 65 ± 18.9 |
-| 6 | [`HAMT Hash_Map unordered iterator scan`](bench_xitdb.odin#L596-L612) [🔍 20p](slices/06_hamt_hash_map_unordered_iterator_scan.md) | `~NOISE` | `-2.7%` | 1.03x | 37 | **36** | `1.4` | 37 ± 0.8 | 36 ± 0.4 |
-| 13 | [`HAMT Counted_Hash_Set membership check`](bench_xitdb.odin#L769-L785) [🔍 42p](slices/13_hamt_counted_hash_set_membership_check.md) | `~NOISE` | `+0.0%` | 1.00x | 91 | **91** | `0.5` | 91 ± 1.5 | 91 ± 1.2 |
-| 15 | [`Array_List (Radix Trie) random get`](bench_xitdb.odin#L830-L845) [🔍 24p](slices/15_array_list_radix_trie_random_get.md) | `~NOISE` | `+0.0%` | 1.00x | 46 | **46** | `2.3` | 46 ± 0.5 | 46 ± 0.5 |
-| 16 | [`Array_List (Radix Trie) iterator scan`](bench_xitdb.odin#L847-L864) [🔍 21p](slices/16_array_list_radix_trie_iterator_scan.md) | `~NOISE` | `-7.7%` | 1.08x | 13 | **12** | `2.4` | 13 ± 0.5 | 12 ± 0.0 |
-| 17 | [`Array_List (Radix Trie) in-place put`](bench_xitdb.odin#L866-L884) [🔍 67p](slices/17_array_list_radix_trie_in_place_put.md) | `~NOISE` | `+7.9%` | 0.93x | 89 | **96** | `5.9` | 89 ± 1.1 | 95 ± 1.9 |
-| 21 | [`Linked_Array_List (B-Tree) random get`](bench_xitdb.odin#L956-L971) [🔍 30p](slices/21_linked_array_list_b_tree_random_get.md) | `~NOISE` | `+3.8%` | 0.96x | 53 | **55** | `2.3` | 54 ± 0.9 | 55 ± 1.3 |
-| 22 | [`Linked_Array_List (B-Tree) iterator scan`](bench_xitdb.odin#L973-L990) [🔍 21p](slices/22_linked_array_list_b_tree_iterator_scan.md) | `~NOISE` | `+0.0%` | 1.00x | 13 | **13** | `0.0` | 13 ± 0.5 | 13 ± 0.5 |
-| 31 | [`Sorted_Map (B+Tree) ordered scan`](bench_xitdb.odin#L1180-L1195) [🔍 20p](slices/31_sorted_map_b_tree_ordered_scan.md) | `~NOISE` | `+0.0%` | 1.00x | 13 | **13** | `0.0` | 13 ± 0.0 | 13 ± 0.0 |
-| 34 | [`Sorted_Map (B+Tree) get_index select`](bench_xitdb.odin#L1242-L1254) [🔍 29p](slices/34_sorted_map_b_tree_get_index_select.md) | `~NOISE` | `+1.6%` | 0.98x | 64 | **65** | `0.0` | 65 ± 1.3 | 65 ± 0.8 |
-| 47 | [`Bytes: Inline Short_Bytes read_bytes_buf`](bench_xitdb.odin#L1602-L1627) [🔍 93p](slices/47_bytes_inline_short_bytes_read_bytes_buf.md) | `~NOISE` | `+0.0%` | 1.00x | 6 | **6** | `0.0` | 6 ± 0.0 | 6 ± 0.0 |
-| 48 | [`Bytes: External Bytes read_bytes_buf`](bench_xitdb.odin#L1629-L1638) [🔍 12p](slices/48_bytes_external_bytes_read_bytes_buf.md) | `~NOISE` | `+0.0%` | 1.00x | 9 | **9** | `0.0` | 9 ± 0.0 | 9 ± 0.0 |
-| 49 | [`Bytes: Tagged Short_Bytes read_bytes_buf`](bench_xitdb.odin#L1640-L1656) [🔍 77p](slices/49_bytes_tagged_short_bytes_read_bytes_buf.md) | `~NOISE` | `+0.0%` | 1.00x | 6 | **6** | `0.0` | 6 ± 0.0 | 6 ± 0.0 |
-| 50 | [`Bytes: Tagged External Bytes read_bytes_buf`](bench_xitdb.odin#L1658-L1667) [🔍 12p](slices/50_bytes_tagged_external_bytes_read_bytes_buf.md) | `~NOISE` | `+0.0%` | 1.00x | 9 | **9** | `1.0` | 9 ± 0.4 | 9 ± 0.0 |
-| 52 | [`Stream: Cursor_Reader (256 x 4KB = 1MB)`](bench_xitdb.odin#L1709-L1725) [🔍 15p](slices/52_stream_cursor_reader_256_x_4kb_1mb.md) | `~NOISE` | `-1.9%` | 1.02x | 52 | **51** | `2.7` | 53 ± 0.9 | 51 ± 1.0 |
-| 53 | [`Stream: Cursor_Reader random seek + 64B read`](bench_xitdb.odin#L1727-L1742) [🔍 6p](slices/53_stream_cursor_reader_random_seek_64b_read.md) | `~NOISE` | `-50.0%` | 2.00x | 6 | **3** | `8.5` | 6 ± 0.9 | 3 ± 0.0 |
-| 54 | [`Stream: Cursor_Writer random seek + 16B patch`](bench_xitdb.odin#L1744-L1774) [🔍 55p](slices/54_stream_cursor_writer_random_seek_16b_patch.md) | `~NOISE` | `+0.0%` | 1.00x | 13 | **13** | `0.6` | 13 ± 0.4 | 13 ± 0.5 |
-| 57 | [`Cursor: Full KV-pair scan (read_kv_pair)`](bench_xitdb.odin#L1856-L1889) [🔍 118p](slices/57_cursor_full_kv_pair_scan_read_kv_pair.md) | `~NOISE` | `-1.0%` | 1.01x | 97 | **96** | `0.7` | 97 ± 2.1 | 97 ± 1.5 |
-| 63 | [`DB: Re-open & trailer checksum verify`](bench_xitdb.odin#L2087-L2102) [🔍 37p](slices/63_db_re_open_trailer_checksum_verify.md) | `~NOISE` | `+0.0%` | 1.00x | 56 | **56** | `0.9` | 56 ± 0.5 | 57 ± 1.4 |
+| 21 | [`Linked_Array_List (B-Tree) random get`](bench_xitdb.odin#L956-L971) [🔍 30p](slices/21_linked_array_list_b_tree_random_get.md) | `~NOISE` | `-1.8%` | 1.02x | 55 | **54** | `1.5` | 55 ± 1.3 | 54 ± 1.2 |
+| 22 | [`Linked_Array_List (B-Tree) iterator scan`](bench_xitdb.odin#L973-L990) [🔍 21p](slices/22_linked_array_list_b_tree_iterator_scan.md) | `~NOISE` | `+7.7%` | 0.93x | 13 | **14** | `1.3` | 13 ± 0.5 | 14 ± 0.4 |
 
-#### 1.2 Sub-Microsecond Collection & Cursor Ops (`ns`, 36 affected tests)
+#### 1.2 Sub-Microsecond Collection & Cursor Ops (`ns`, 9 affected tests)
 
-| # | Benchmark | Verdict | Delta | Speedup | Base `40c719e` (`ns`) | Curr `3b3da70` (`ns`) | Welch $z$ | Base Mean ± σ | Curr Mean ± σ |
+| # | Benchmark | Verdict | Delta | Speedup | Base `3b3da70` (`ns`) | Curr `2ea5746` (`ns`) | Welch $z$ | Base Mean ± σ | Curr Mean ± σ |
 | ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | [`HAMT Hash_Map bulk put (1 tx)`](bench_xitdb.odin#L471-L496) [🔍 82p](slices/01_hamt_hash_map_bulk_put_1_tx.md) | `~NOISE` | `+6.9%` | 0.94x | 202 | **216** | `0.1` | 241 ± 86.3 | 236 ± 39.4 |
-| 4 | [`HAMT CoW branched moment commits`](bench_xitdb.odin#L535-L566) [🔍 84p](slices/04_hamt_cow_branched_moment_commits.md) | `~NOISE` | `+0.7%` | 0.99x | 923 | **929** | `0.9` | 1,138 ± 307 | 1,002 ± 169 |
-| 5 | [`HAMT Hash_Map remove & branch shortening`](bench_xitdb.odin#L568-L594) [🔍 79p](slices/05_hamt_hash_map_remove_branch_shortening.md) | `~NOISE` | `+1.8%` | 0.98x | 167 | **170** | `0.5` | 173 ± 16.6 | 178 ± 19.8 |
-| 7 | [`HAMT Hash_Map in-place overwrite (1 tx)`](bench_xitdb.odin#L614-L637) [🔍 82p](slices/07_hamt_hash_map_in_place_overwrite_1_tx.md) | `~NOISE` | `+2.6%` | 0.97x | 192 | **197** | `0.2` | 201 ± 16.6 | 203 ± 13.2 |
-| 8 | [`HAMT Counted_Hash_Map bulk put (1 tx)`](bench_xitdb.odin#L639-L663) [🔍 89p](slices/08_hamt_counted_hash_map_bulk_put_1_tx.md) | `~NOISE` | `+5.2%` | 0.95x | 210 | **221** | `0.9` | 218 ± 22.8 | 232 ± 24.8 |
-| 9 | [`HAMT Counted_Hash_Map remove`](bench_xitdb.odin#L665-L683) [🔍 76p](slices/09_hamt_counted_hash_map_remove.md) | `~NOISE` | `+0.0%` | 1.00x | 165 | **165** | `0.7` | 172 ± 11.7 | 168 ± 8.9 |
-| 10 | [`HAMT deep suffix-collision put (depth 10+)`](bench_xitdb.odin#L685-L725) [🔍 79p](slices/10_hamt_deep_suffix_collision_put_depth_10.md) | `~NOISE` | `-6.7%` | 1.07x | 193 | **180** | `1.0` | 202 ± 24.8 | 188 ± 20.2 |
-| 11 | [`HAMT deep suffix-collision branch collapse`](bench_xitdb.odin#L727-L747) [🔍 76p](slices/11_hamt_deep_suffix_collision_branch_collapse.md) | `~NOISE` | `-3.8%` | 1.04x | 211 | **203** | `1.3` | 212 ± 3.8 | 207 ± 7.6 |
-| 12 | [`HAMT Counted_Hash_Set key-only put (1 tx)`](bench_xitdb.odin#L749-L767) [🔍 78p](slices/12_hamt_counted_hash_set_key_only_put_1_tx.md) | `~NOISE` | `+0.5%` | 1.00x | 222 | **223** | `0.3` | 236 ± 32.9 | 231 ± 19.9 |
-| 14 | [`Array_List (Radix Trie) append`](bench_xitdb.odin#L795-L828) [🔍 80p](slices/14_array_list_radix_trie_append.md) | `~NOISE` | `+0.9%` | 0.99x | 108 | **109** | `0.3` | 109 ± 0.9 | 109 ± 1.5 |
-| 18 | [`Array_List (Radix Trie) index-seek page(10)`](bench_xitdb.odin#L886-L900) [🔍 21p](slices/18_array_list_radix_trie_index_seek_page_10.md) | `~NOISE` | `+1.7%` | 0.98x | 347 | **353** | `1.0` | 349 ± 6.3 | 353 ± 3.9 |
-| 19 | [`Array_List (Radix Trie) depth-collapse slice`](bench_xitdb.odin#L902-L918) [🔍 66p](slices/19_array_list_radix_trie_depth_collapse_slice.md) | `~NOISE` | `-0.3%` | 1.00x | 701 | **699** | `0.3` | 699 ± 8.6 | 701 ± 14.1 |
-| 20 | [`Linked_Array_List (B-Tree) append`](bench_xitdb.odin#L921-L954) [🔍 94p](slices/20_linked_array_list_b_tree_append.md) | `~NOISE` | `+7.4%` | 0.93x | 231 | **248** | `7.9` | 231 ± 4.5 | 247 ± 1.3 |
-| 23 | [`Linked_Array_List (B-Tree) middle insert`](bench_xitdb.odin#L992-L1018) [🔍 83p](slices/23_linked_array_list_b_tree_middle_insert.md) | `~NOISE` | `+9.3%` | 0.91x | 258 | **282** | `10.3` | 258 ± 2.9 | 282 ± 4.3 |
-| 24 | [`Linked_Array_List (B-Tree) middle remove`](bench_xitdb.odin#L1020-L1039) [🔍 84p](slices/24_linked_array_list_b_tree_middle_remove.md) | `~NOISE` | `-3.2%` | 1.03x | 349 | **338** | `1.7` | 350 ± 6.4 | 342 ± 8.2 |
-| 25 | [`Linked_Array_List (B-Tree) concat + slice`](bench_xitdb.odin#L1041-L1066) [🔍 89p](slices/25_linked_array_list_b_tree_concat_slice.md) | `~NOISE` | `+4.7%` | 0.96x | 807 | **845** | `4.8` | 812 ± 13.1 | 845 ± 8.3 |
-| 26 | [`Linked_Array_List (B-Tree) in-place put`](bench_xitdb.odin#L1068-L1085) [🔍 75p](slices/26_linked_array_list_b_tree_in_place_put.md) | `~NOISE` | `+5.0%` | 0.95x | 161 | **169** | `6.1` | 162 ± 1.9 | 169 ± 1.5 |
-| 27 | [`Linked_Array_List (B-Tree) index-seek page(10)`](bench_xitdb.odin#L1087-L1101) [🔍 20p](slices/27_linked_array_list_b_tree_index_seek_page_10.md) | `~NOISE` | `+4.3%` | 0.96x | 394 | **411** | `6.2` | 395 ± 2.3 | 410 ± 4.8 |
-| 28 | [`Sorted_Map (B+Tree) out-of-order put`](bench_xitdb.odin#L1110-L1148) [🔍 112p](slices/28_sorted_map_b_tree_out_of_order_put.md) | `~NOISE` | `-2.8%` | 1.03x | 388 | **377** | `9.1` | 387 ± 1.7 | 376 ± 1.9 |
-| 29 | [`Sorted_Map (B+Tree) key lookup`](bench_xitdb.odin#L1150-L1165) [🔍 37p](slices/29_sorted_map_b_tree_key_lookup.md) | `~NOISE` | `-0.6%` | 1.01x | 163 | **162** | `0.5` | 163 ± 1.0 | 163 ± 1.5 |
-| 30 | [`Sorted_Map (B+Tree) rank query`](bench_xitdb.odin#L1167-L1178) [🔍 22p](slices/30_sorted_map_b_tree_rank_query.md) | `~NOISE` | `-2.3%` | 1.02x | 131 | **128** | `4.8` | 131 ± 0.7 | 128 ± 1.1 |
-| 32 | [`Sorted_Map (B+Tree) lower-bound page(10)`](bench_xitdb.odin#L1197-L1212) [🔍 29p](slices/32_sorted_map_b_tree_lower_bound_page_10.md) | `~NOISE` | `+0.0%` | 1.00x | 466 | **466** | `0.6` | 465 ± 1.5 | 466 ± 1.9 |
-| 33 | [`Sorted_Map (B+Tree) remove & rebalance`](bench_xitdb.odin#L1214-L1240) [🔍 84p](slices/33_sorted_map_b_tree_remove_rebalance.md) | `~NOISE` | `+5.2%` | 0.95x | 230 | **242** | `7.8` | 231 ± 2.6 | 243 ± 2.3 |
-| 35 | [`Sorted_Map (B+Tree) index-seek page(10)`](bench_xitdb.odin#L1256-L1271) [🔍 21p](slices/35_sorted_map_b_tree_index_seek_page_10.md) | `~NOISE` | `+3.2%` | 0.97x | 401 | **414** | `12.4` | 401 ± 1.5 | 414 ± 1.7 |
-| 36 | [`Sorted_Map (B+Tree) in-place overwrite`](bench_xitdb.odin#L1273-L1291) [🔍 95p](slices/36_sorted_map_b_tree_in_place_overwrite.md) | `~NOISE` | `+1.7%` | 0.98x | 362 | **368** | `9.2` | 362 ± 1.3 | 368 ± 0.5 |
-| 37 | [`Sorted_Set (B+Tree) key-only put (1 tx)`](bench_xitdb.odin#L1293-L1314) [🔍 95p](slices/37_sorted_set_b_tree_key_only_put_1_tx.md) | `~NOISE` | `+1.2%` | 0.99x | 343 | **347** | `3.4` | 343 ± 2.0 | 348 ± 2.4 |
-| 38 | [`Sorted_Set (B+Tree) contains lookup`](bench_xitdb.odin#L1316-L1330) [🔍 36p](slices/38_sorted_set_b_tree_contains_lookup.md) | `~NOISE` | `+3.5%` | 0.97x | 144 | **149** | `4.3` | 145 ± 0.9 | 148 ± 1.6 |
-| 39 | [`Replication (genesis -> 200 moments)`](bench_xitdb.odin#L1372-L1390) [🔍 42p](slices/39_replication_genesis_200_moments.md) | `~NOISE` | `+0.0%` | 1.00x | 104 | **104** | `0.9` | 107 ± 11.2 | 103 ± 1.6 |
-| 40 | [`Replication (incremental 1-moment delta)`](bench_xitdb.odin#L1392-L1417) [🔍 93p](slices/40_replication_incremental_1_moment_delta.md) | **REGRESSION** | `+11.0%` | 0.90x | 743 | **825** | `4.2` | 752 ± 17.9 | 842 ± 44.7 |
-| 45 | [`Hasher: SHA-1 (20B) HAMT put`](bench_xitdb.odin#L1578-L1599) [🔍 99p](slices/45_hasher_sha_1_20b_hamt_put.md) | `~NOISE` | `-5.4%` | 1.06x | 223 | **211** | `7.7` | 223 ± 2.9 | 210 ± 2.3 |
-| 46 | [`Hasher: SHA-256 (32B) HAMT put`](bench_xitdb.odin#L1578-L1599) [🔍 102p](slices/46_hasher_sha_256_32b_hamt_put.md) | `~NOISE` | `-6.0%` | 1.06x | 233 | **219** | `12.2` | 233 ± 2.5 | 219 ± 0.5 |
-| 51 | [`Stream: Cursor_Writer (256 x 4KB = 1MB)`](bench_xitdb.odin#L1670-L1707) [🔍 67p](slices/51_stream_cursor_writer_256_x_4kb_1mb.md) | `~NOISE` | `-8.3%` | 1.09x | 288 | **264** | `3.5` | 291 ± 9.9 | 264 ± 14.2 |
-| 55 | [`Path: 4-level nested cursor_write_path`](bench_xitdb.odin#L1777-L1830) [🔍 62p](slices/55_path_4_level_nested_cursor_write_path.md) | `~NOISE` | `+6.1%` | 0.94x | 230 | **244** | `2.5` | 231 ± 1.9 | 241 ± 8.5 |
-| 56 | [`Path: 4-level nested cursor_read_path`](bench_xitdb.odin#L1832-L1853) [🔍 18p](slices/56_path_4_level_nested_cursor_read_path.md) | `~NOISE` | `-4.1%` | 1.04x | 148 | **142** | `2.7` | 148 ± 4.2 | 142 ± 1.5 |
-| 62 | [`Tx: Aborted transaction rollback truncate`](bench_xitdb.odin#L2064-L2085) [🔍 77p](slices/62_tx_aborted_transaction_rollback_truncate.md) | `~NOISE` | `-5.6%` | 1.06x | 693 | **654** | `20.5` | 693 ± 3.5 | 655 ± 2.2 |
-| 65 | [`DSL Layer 1: String Selector get_uint (N=500)`](bench_xitdb.odin#L2167-L2179) [🔍 71p](slices/65_dsl_layer_1_string_selector_get_uint_n_500.md) | `~NOISE` | `+2.4%` | 0.98x | 540 | **553** | `3.0` | 540 ± 10.9 | 557 ± 6.7 |
+| 20 | [`Linked_Array_List (B-Tree) append`](bench_xitdb.odin#L921-L954) [🔍 94p](slices/20_linked_array_list_b_tree_append.md) | `~NOISE` | `-5.6%` | 1.06x | 248 | **234** | `8.1` | 247 ± 1.3 | 232 ± 4.1 |
+| 23 | [`Linked_Array_List (B-Tree) middle insert`](bench_xitdb.odin#L992-L1018) [🔍 83p](slices/23_linked_array_list_b_tree_middle_insert.md) | `~NOISE` | `-5.0%` | 1.05x | 282 | **268** | `3.7` | 282 ± 4.3 | 268 ± 7.5 |
+| 24 | [`Linked_Array_List (B-Tree) middle remove`](bench_xitdb.odin#L1020-L1039) [🔍 84p](slices/24_linked_array_list_b_tree_middle_remove.md) | `~NOISE` | `+0.9%` | 0.99x | 338 | **341** | `0.5` | 342 ± 8.2 | 340 ± 6.0 |
+| 25 | [`Linked_Array_List (B-Tree) concat + slice`](bench_xitdb.odin#L1041-L1066) [🔍 89p](slices/25_linked_array_list_b_tree_concat_slice.md) | `~NOISE` | `+3.9%` | 0.96x | 845 | **878** | `1.9` | 845 ± 8.3 | 916 ± 84.7 |
+| 26 | [`Linked_Array_List (B-Tree) in-place put`](bench_xitdb.odin#L1068-L1085) [🔍 75p](slices/26_linked_array_list_b_tree_in_place_put.md) | `~NOISE` | `+0.6%` | 0.99x | 169 | **170** | `1.1` | 169 ± 1.5 | 170 ± 2.0 |
+| 27 | [`Linked_Array_List (B-Tree) index-seek page(10)`](bench_xitdb.odin#L1087-L1101) [🔍 20p](slices/27_linked_array_list_b_tree_index_seek_page_10.md) | `~NOISE` | `+0.5%` | 1.00x | 411 | **413** | `0.9` | 410 ± 4.8 | 417 ± 16.2 |
+| 35 | [`Sorted_Map (B+Tree) index-seek page(10)`](bench_xitdb.odin#L1256-L1271) [🔍 21p](slices/35_sorted_map_b_tree_index_seek_page_10.md) | `~NOISE` | `+4.3%` | 0.96x | 414 | **432** | `9.1` | 414 ± 1.7 | 430 ± 3.8 |
+| 55 | [`Path: 4-level nested cursor_write_path`](bench_xitdb.odin#L1777-L1830) [🔍 62p](slices/55_path_4_level_nested_cursor_write_path.md) | `~NOISE` | `-3.3%` | 1.03x | 244 | **236** | `0.8` | 241 ± 8.5 | 237 ± 2.6 |
+| 56 | [`Path: 4-level nested cursor_read_path`](bench_xitdb.odin#L1832-L1853) [🔍 18p](slices/56_path_4_level_nested_cursor_read_path.md) | `~NOISE` | `+4.2%` | 0.96x | 142 | **148** | `2.3` | 142 ± 1.5 | 153 ± 10.3 |
 
-#### 1.3 Multi-Microsecond Transactions, Compaction & Queries (`µs`, 19 affected tests)
+#### 1.3 Multi-Microsecond Transactions, Compaction & Queries (`µs`, 5 affected tests)
 
-| # | Benchmark | Verdict | Delta | Speedup | Base `40c719e` (`µs`) | Curr `3b3da70` (`µs`) | Welch $z$ | Base Mean ± σ | Curr Mean ± σ |
+| # | Benchmark | Verdict | Delta | Speedup | Base `3b3da70` (`µs`) | Curr `2ea5746` (`µs`) | Welch $z$ | Base Mean ± σ | Curr Mean ± σ |
 | ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 41 | [`Compaction (Memory_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1419-L1437) [🔍 90p](slices/41_compaction_memory_offset_map_200_1.md) | **FASTER** | `-46.2%` | 1.86x | 3.71 | **1.99** | `10.7` | 3.89 ± 0.32 | 2.06 ± 0.20 |
-| 42 | [`Compaction (File_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1439-L1460) [🔍 89p](slices/42_compaction_file_offset_map_200_1.md) | `~NOISE` | `+0.9%` | 0.99x | 9.35 | **9.43** | `0.2` | 9.49 ± 0.48 | 9.55 ± 0.43 |
-| 43 | [`Compaction (Heterogeneous DAG + dedup)`](bench_xitdb.odin#L1462-L1521) [🔍 154p](slices/43_compaction_heterogeneous_dag_dedup.md) | **FASTER** | `-74.1%` | 3.86x | 126.6 | **32.8** | `42.9` | 126.4 ± 4.40 | 33.1 ± 2.08 |
-| 44 | [`Replication (Post-compaction resync)`](bench_xitdb.odin#L1523-L1548) [🔍 43p](slices/44_replication_post_compaction_resync.md) | `~NOISE` | `+0.1%` | 1.00x | 1.46 | **1.46** | `0.1` | 1.46 ± 0.04 | 1.46 ± 0.02 |
-| 58 | [`Backend: Core_Memory commits`](bench_xitdb.odin#L1912-L1939) [🔍 101p](slices/58_backend_core_memory_commits.md) | **FASTER** | `-10.8%` | 1.12x | 1.22 | **1.09** | `24.2` | 1.22 ± 0.01 | 1.08 ± 0.01 |
-| 59 | [`Backend: Core_Buffered_File commits`](bench_xitdb.odin#L1942-L1981) [🔍 102p](slices/59_backend_core_buffered_file_commits.md) | **REGRESSION** | `+265.0%` | 0.27x | 4.58 | **16.7** | `176.3` | 4.58 ± 0.02 | 16.7 ± 0.15 |
-| 60 | [`Backend: Core_File (unbuffered) commits`](bench_xitdb.odin#L1984-L2018) [🔍 101p](slices/60_backend_core_file_unbuffered_commits.md) | `~NOISE` | `+1.3%` | 0.99x | 44.1 | **44.6** | `3.0` | 44.1 ± 0.19 | 44.7 ± 0.35 |
-| 61 | [`Tx: Mid-tx database_freeze + CoW clone`](bench_xitdb.odin#L2021-L2062) [🔍 96p](slices/61_tx_mid_tx_database_freeze_cow_clone.md) | `~NOISE` | `-8.1%` | 1.09x | 1.12 | **1.03** | `15.8` | 1.11 ± 0.01 | 1.03 ± 0.01 |
-| 64 | [`DSL Layer 2: Tx Commit + Secondary Index (N=500)`](bench_xitdb.odin#L2128-L2163) [🔍 99p](slices/64_dsl_layer_2_tx_commit_secondary_index_n_500.md) | `~NOISE` | `-7.1%` | 1.08x | 4.32 | **4.02** | `2.9` | 4.48 ± 0.37 | 4.01 ± 0.02 |
-| 66 | [`DSL Layer 3: Struct marshal (N=200)`](bench_xitdb.odin#L2183-L2219) [🔍 170p](slices/66_dsl_layer_3_struct_marshal_n_200.md) | `~NOISE` | `-6.0%` | 1.06x | 4.23 | **3.98** | `3.3` | 4.41 ± 0.28 | 3.99 ± 0.05 |
-| 67 | [`DSL Layer 3: Struct unmarshal (N=200)`](bench_xitdb.odin#L2221-L2231) [🔍 139p](slices/67_dsl_layer_3_struct_unmarshal_n_200.md) | `~NOISE` | `-0.9%` | 1.01x | 1.98 | **1.96** | `1.0` | 1.97 ± 0.03 | 1.96 ± 0.02 |
-| 68 | [`DSL Layer 3: Datomic pull projection (N=200)`](bench_xitdb.odin#L2233-L2243) [🔍 101p](slices/68_dsl_layer_3_datomic_pull_projection_n_200.md) | `~NOISE` | `-6.7%` | 1.07x | 1.71 | **1.60** | `2.1` | 1.84 ± 0.25 | 1.61 ± 0.03 |
-| 69 | [`DSL Layer 4: diff_moments (1 of 700 mutated)`](bench_xitdb.odin#L2248-L2265) [🔍 158p](slices/69_dsl_layer_4_diff_moments_1_of_700_mutated.md) | `~NOISE` | `-4.5%` | 1.05x | 286.6 | **273.8** | `5.6` | 287.0 ± 2.01 | 275.6 ± 4.09 |
-| 70 | [`DSL Layer 4: history_of lineage (3 moments)`](bench_xitdb.odin#L2267-L2276) [🔍 75p](slices/70_dsl_layer_4_history_of_lineage_3_moments.md) | **REGRESSION** | `+19.0%` | 0.84x | 1.88 | **2.24** | `8.7` | 1.83 ± 0.09 | 2.24 ± 0.06 |
-| 71 | [`DSL Layer 5: Datalog B+Tree Prefix + Join`](bench_xitdb.odin#L2280-L2300) [🔍 123p](slices/71_dsl_layer_5_datalog_b_tree_prefix_join.md) | `~NOISE` | `-7.0%` | 1.08x | 14.5 | **13.5** | `2.3` | 14.9 ± 0.97 | 13.8 ± 0.50 |
-| 72 | [`DSL Layer 5: Datalog Grouped Aggs (N=500)`](bench_xitdb.odin#L2303-L2318) [🔍 123p](slices/72_dsl_layer_5_datalog_grouped_aggs_n_500.md) | `~NOISE` | `-9.1%` | 1.10x | 628.2 | **571.2** | `3.8` | 620.2 ± 18.3 | 577.6 ± 16.9 |
-| 73 | [`DSL Layer 5: Datalog Cycle-Safe reach (32-ring)`](bench_xitdb.odin#L2321-L2336) [🔍 123p](slices/73_dsl_layer_5_datalog_cycle_safe_reach_32_ring.md) | `~NOISE` | `-5.1%` | 1.05x | 28.2 | **26.7** | `3.1` | 28.8 ± 1.43 | 26.8 ± 0.40 |
-| 74 | [`DSL Layer 2: Secondary Index Evict+Update (N=200)`](bench_xitdb.odin#L2340-L2357) [🔍 98p](slices/74_dsl_layer_2_secondary_index_evict_update_n_200.md) | `~NOISE` | `-5.9%` | 1.06x | 3.17 | **2.99** | `2.4` | 3.22 ± 0.13 | 3.03 ± 0.12 |
-| 75 | [`DSL Layer 3/4: Cyclic Graph pull + diff (N=200)`](bench_xitdb.odin#L2360-L2402) [🔍 185p](slices/75_dsl_layer_3_4_cyclic_graph_pull_diff_n_200.md) | `~NOISE` | `-6.1%` | 1.06x | 7.46 | **7.01** | `7.9` | 7.48 ± 0.13 | 6.98 ± 0.05 |
+| 41 | [`Compaction (Memory_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1419-L1437) [🔍 90p](slices/41_compaction_memory_offset_map_200_1.md) | `~NOISE` | `+15.5%` | 0.87x | 1.99 | **2.30** | `2.4` | 2.06 ± 0.20 | 2.36 ± 0.19 |
+| 42 | [`Compaction (File_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1439-L1460) [🔍 89p](slices/42_compaction_file_offset_map_200_1.md) | `~NOISE` | `+2.1%` | 0.98x | 9.43 | **9.63** | `0.8` | 9.55 ± 0.43 | 9.76 ± 0.40 |
+| 43 | [`Compaction (Heterogeneous DAG + dedup)`](bench_xitdb.odin#L1462-L1521) [🔍 154p](slices/43_compaction_heterogeneous_dag_dedup.md) | `~NOISE` | `-0.2%` | 1.00x | 32.8 | **32.8** | `0.3` | 33.1 ± 2.08 | 33.4 ± 1.67 |
+| 44 | [`Replication (Post-compaction resync)`](bench_xitdb.odin#L1523-L1548) [🔍 43p](slices/44_replication_post_compaction_resync.md) | `~NOISE` | `+4.8%` | 0.95x | 1.46 | **1.53** | `4.0` | 1.46 ± 0.02 | 1.55 ± 0.04 |
+| 59 | [`Backend: Core_Buffered_File commits`](bench_xitdb.odin#L1942-L1981) [🔍 102p](slices/59_backend_core_buffered_file_commits.md) | `~NOISE` | `+1.5%` | 0.99x | 16.7 | **17.0** | `3.0` | 16.7 ± 0.15 | 17.0 ± 0.08 |
 
 
-### 2. Odin Full Suite Results (`-o:speed -microarch:native`, Commit `3b3da703c200`, 5 samples across 1 run(s))
+### 2. Odin Full Suite Results (`-o:speed -microarch:native`, Commit `2ea57460f65b`, 5 samples across 1 run(s))
+
+> **Selective update (`2ea5746`):** Re-ran **16 / 75** affected benchmarks (marked with `↻` in `#` below; see Section 1 above for the code-change impact & progression table). Unchanged benchmarks retain their prior baseline.
+
 
 #### 2.1 Sub-100ns Fast Path (`< 100 ns` · `10M–167M ops/s`, 20 tests)
 
@@ -214,8 +162,8 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 15 | [`Array_List (Radix Trie) random get`](bench_xitdb.odin#L830-L845) [🔍 24p](slices/15_array_list_radix_trie_random_get.md) | **46** | 46 ± 0.5 | 1.2% | 21.7M | 22.2M | 1 | 46 | 46 | 45 | 46 | 2K |
 | 16 | [`Array_List (Radix Trie) iterator scan`](bench_xitdb.odin#L847-L864) [🔍 21p](slices/16_array_list_radix_trie_iterator_scan.md) | **12** | 12 ± 0.0 | 0.0% | 83.3M | 83.3M | 0 | 12 | 12 | 12 | 12 | 2K |
 | 17 | [`Array_List (Radix Trie) in-place put`](bench_xitdb.odin#L866-L884) [🔍 67p](slices/17_array_list_radix_trie_in_place_put.md) | **96** | 95 ± 1.9 | 2.0% | 10.2M | 10.8M | 2 | 98 | 98 | 93 | 98 | 2K |
-| 21 | [`Linked_Array_List (B-Tree) random get`](bench_xitdb.odin#L956-L971) [🔍 30p](slices/21_linked_array_list_b_tree_random_get.md) | **55** | 55 ± 1.3 | 2.4% | 17.5M | 18.5M | 2 | 57 | 57 | 54 | 57 | 2K |
-| 22 | [`Linked_Array_List (B-Tree) iterator scan`](bench_xitdb.odin#L973-L990) [🔍 21p](slices/22_linked_array_list_b_tree_iterator_scan.md) | **13** | 13 ± 0.5 | 4.1% | 71.4M | 76.9M | 1 | 14 | 14 | 13 | 14 | 2K |
+| 21 ↻ | [`Linked_Array_List (B-Tree) random get`](bench_xitdb.odin#L956-L971) [🔍 30p](slices/21_linked_array_list_b_tree_random_get.md) | **54** | 54 ± 1.2 | 2.3% | 18.2M | 19.2M | 1 | 55 | 55 | 52 | 55 | 2K |
+| 22 ↻ | [`Linked_Array_List (B-Tree) iterator scan`](bench_xitdb.odin#L973-L990) [🔍 21p](slices/22_linked_array_list_b_tree_iterator_scan.md) | **14** | 14 ± 0.4 | 3.2% | 71.4M | 76.9M | 0 | 14 | 14 | 13 | 14 | 2K |
 | 31 | [`Sorted_Map (B+Tree) ordered scan`](bench_xitdb.odin#L1180-L1195) [🔍 20p](slices/31_sorted_map_b_tree_ordered_scan.md) | **13** | 13 ± 0.0 | 0.0% | 76.9M | 76.9M | 0 | 13 | 13 | 13 | 13 | 2K |
 | 34 | [`Sorted_Map (B+Tree) get_index select`](bench_xitdb.odin#L1242-L1254) [🔍 29p](slices/34_sorted_map_b_tree_get_index_select.md) | **65** | 65 ± 0.8 | 1.3% | 15.2M | 15.6M | 1 | 66 | 66 | 64 | 66 | 2K |
 | 47 | [`Bytes: Inline Short_Bytes read_bytes_buf`](bench_xitdb.odin#L1602-L1627) [🔍 93p](slices/47_bytes_inline_short_bytes_read_bytes_buf.md) | **6** | 6 ± 0.0 | 0.0% | 167M | 167M | 0 | 6 | 6 | 6 | 6 | 10K |
@@ -244,18 +192,18 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 14 | [`Array_List (Radix Trie) append`](bench_xitdb.odin#L795-L828) [🔍 80p](slices/14_array_list_radix_trie_append.md) | **109** | 109 ± 1.5 | 1.4% | 9.0M | 9.3M | 1 | 111 | 111 | 107 | 111 | 2K |
 | 18 | [`Array_List (Radix Trie) index-seek page(10)`](bench_xitdb.odin#L886-L900) [🔍 21p](slices/18_array_list_radix_trie_index_seek_page_10.md) | **353** | 353 ± 3.9 | 1.1% | 2.8M | 2.9M | 3 | 358 | 359 | 349 | 359 | 2K |
 | 19 | [`Array_List (Radix Trie) depth-collapse slice`](bench_xitdb.odin#L902-L918) [🔍 66p](slices/19_array_list_radix_trie_depth_collapse_slice.md) | **699** | 701 ± 14.1 | 2.0% | 1.4M | 1.5M | 26 | 716 | 717 | 687 | 717 | 500 |
-| 20 | [`Linked_Array_List (B-Tree) append`](bench_xitdb.odin#L921-L954) [🔍 94p](slices/20_linked_array_list_b_tree_append.md) | **248** | 247 ± 1.3 | 0.5% | 4.0M | 4.1M | 2 | 249 | 249 | 246 | 249 | 2K |
-| 23 | [`Linked_Array_List (B-Tree) middle insert`](bench_xitdb.odin#L992-L1018) [🔍 83p](slices/23_linked_array_list_b_tree_middle_insert.md) | **282** | 282 ± 4.3 | 1.5% | 3.5M | 3.6M | 2 | 288 | 289 | 277 | 289 | 500 |
-| 24 | [`Linked_Array_List (B-Tree) middle remove`](bench_xitdb.odin#L1020-L1039) [🔍 84p](slices/24_linked_array_list_b_tree_middle_remove.md) | **338** | 342 ± 8.2 | 2.4% | 2.8M | 3.0M | 9 | 353 | 355 | 336 | 355 | 500 |
-| 25 | [`Linked_Array_List (B-Tree) concat + slice`](bench_xitdb.odin#L1041-L1066) [🔍 89p](slices/25_linked_array_list_b_tree_concat_slice.md) | **845** | 845 ± 8.3 | 1.0% | 1.17M | 1.20M | 5 | 854 | 856 | 833 | 856 | 400 |
-| 26 | [`Linked_Array_List (B-Tree) in-place put`](bench_xitdb.odin#L1068-L1085) [🔍 75p](slices/26_linked_array_list_b_tree_in_place_put.md) | **169** | 169 ± 1.5 | 0.9% | 5.9M | 6.0M | 3 | 170 | 170 | 167 | 170 | 2K |
-| 27 | [`Linked_Array_List (B-Tree) index-seek page(10)`](bench_xitdb.odin#L1087-L1101) [🔍 20p](slices/27_linked_array_list_b_tree_index_seek_page_10.md) | **411** | 410 ± 4.8 | 1.2% | 2.4M | 2.5M | 8 | 415 | 415 | 404 | 415 | 2K |
+| 20 ↻ | [`Linked_Array_List (B-Tree) append`](bench_xitdb.odin#L921-L954) [🔍 94p](slices/20_linked_array_list_b_tree_append.md) | **234** | 232 ± 4.1 | 1.8% | 4.3M | 4.4M | 3 | 235 | 235 | 225 | 235 | 2K |
+| 23 ↻ | [`Linked_Array_List (B-Tree) middle insert`](bench_xitdb.odin#L992-L1018) [🔍 83p](slices/23_linked_array_list_b_tree_middle_insert.md) | **268** | 268 ± 7.5 | 2.8% | 3.6M | 3.9M | 9 | 275 | 275 | 257 | 275 | 500 |
+| 24 ↻ | [`Linked_Array_List (B-Tree) middle remove`](bench_xitdb.odin#L1020-L1039) [🔍 84p](slices/24_linked_array_list_b_tree_middle_remove.md) | **341** | 340 ± 6.0 | 1.8% | 2.9M | 3.0M | 6 | 345 | 345 | 330 | 345 | 500 |
+| 25 ↻ | [`Linked_Array_List (B-Tree) concat + slice`](bench_xitdb.odin#L1041-L1066) [🔍 89p](slices/25_linked_array_list_b_tree_concat_slice.md) | **878** | 916 ± 84.7 | 9.2% | 937K | 1.1M | 5 | 1,030 | 1,060 | 874 | 1,067 | 400 |
+| 26 ↻ | [`Linked_Array_List (B-Tree) in-place put`](bench_xitdb.odin#L1068-L1085) [🔍 75p](slices/26_linked_array_list_b_tree_in_place_put.md) | **170** | 170 ± 2.0 | 1.2% | 5.8M | 6.0M | 2 | 172 | 173 | 168 | 173 | 2K |
+| 27 ↻ | [`Linked_Array_List (B-Tree) index-seek page(10)`](bench_xitdb.odin#L1087-L1101) [🔍 20p](slices/27_linked_array_list_b_tree_index_seek_page_10.md) | **413** | 417 ± 16.2 | 3.9% | 2.3M | 2.5M | 10 | 438 | 441 | 398 | 442 | 2K |
 | 28 | [`Sorted_Map (B+Tree) out-of-order put`](bench_xitdb.odin#L1110-L1148) [🔍 112p](slices/28_sorted_map_b_tree_out_of_order_put.md) | **377** | 376 ± 1.9 | 0.5% | 2.6M | 2.7M | 2 | 379 | 379 | 374 | 379 | 2K |
 | 29 | [`Sorted_Map (B+Tree) key lookup`](bench_xitdb.odin#L1150-L1165) [🔍 37p](slices/29_sorted_map_b_tree_key_lookup.md) | **162** | 163 ± 1.5 | 0.9% | 6.1M | 6.2M | 1 | 165 | 165 | 161 | 165 | 2K |
 | 30 | [`Sorted_Map (B+Tree) rank query`](bench_xitdb.odin#L1167-L1178) [🔍 22p](slices/30_sorted_map_b_tree_rank_query.md) | **128** | 128 ± 1.1 | 0.9% | 7.7M | 7.9M | 0 | 130 | 130 | 127 | 130 | 2K |
 | 32 | [`Sorted_Map (B+Tree) lower-bound page(10)`](bench_xitdb.odin#L1197-L1212) [🔍 29p](slices/32_sorted_map_b_tree_lower_bound_page_10.md) | **466** | 466 ± 1.9 | 0.4% | 2.1M | 2.2M | 1 | 468 | 468 | 463 | 468 | 2K |
 | 33 | [`Sorted_Map (B+Tree) remove & rebalance`](bench_xitdb.odin#L1214-L1240) [🔍 84p](slices/33_sorted_map_b_tree_remove_rebalance.md) | **242** | 243 ± 2.3 | 1.0% | 4.0M | 4.1M | 1 | 246 | 247 | 241 | 247 | 1K |
-| 35 | [`Sorted_Map (B+Tree) index-seek page(10)`](bench_xitdb.odin#L1256-L1271) [🔍 21p](slices/35_sorted_map_b_tree_index_seek_page_10.md) | **414** | 414 ± 1.7 | 0.4% | 2.41M | 2.43M | 2 | 415 | 415 | 411 | 415 | 2K |
+| 35 ↻ | [`Sorted_Map (B+Tree) index-seek page(10)`](bench_xitdb.odin#L1256-L1271) [🔍 21p](slices/35_sorted_map_b_tree_index_seek_page_10.md) | **432** | 430 ± 3.8 | 0.9% | 2.3M | 2.4M | 5 | 434 | 434 | 425 | 434 | 2K |
 | 36 | [`Sorted_Map (B+Tree) in-place overwrite`](bench_xitdb.odin#L1273-L1291) [🔍 95p](slices/36_sorted_map_b_tree_in_place_overwrite.md) | **368** | 368 ± 0.5 | 0.1% | 2.7M | 2.7M | 1 | 368 | 368 | 367 | 368 | 2K |
 | 37 | [`Sorted_Set (B+Tree) key-only put (1 tx)`](bench_xitdb.odin#L1293-L1314) [🔍 95p](slices/37_sorted_set_b_tree_key_only_put_1_tx.md) | **347** | 348 ± 2.4 | 0.7% | 2.8M | 2.9M | 0 | 351 | 352 | 346 | 352 | 2K |
 | 38 | [`Sorted_Set (B+Tree) contains lookup`](bench_xitdb.odin#L1316-L1330) [🔍 36p](slices/38_sorted_set_b_tree_contains_lookup.md) | **149** | 148 ± 1.6 | 1.1% | 6.7M | 6.8M | 2 | 150 | 150 | 146 | 150 | 2K |
@@ -264,8 +212,8 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 45 | [`Hasher: SHA-1 (20B) HAMT put`](bench_xitdb.odin#L1578-L1599) [🔍 99p](slices/45_hasher_sha_1_20b_hamt_put.md) | **211** | 210 ± 2.3 | 1.1% | 4.7M | 4.8M | 4 | 212 | 212 | 207 | 212 | 2K |
 | 46 | [`Hasher: SHA-256 (32B) HAMT put`](bench_xitdb.odin#L1578-L1599) [🔍 102p](slices/46_hasher_sha_256_32b_hamt_put.md) | **219** | 219 ± 0.5 | 0.2% | 4.5M | 4.6M | 1 | 220 | 220 | 219 | 220 | 2K |
 | 51 | [`Stream: Cursor_Writer (256 x 4KB = 1MB)`](bench_xitdb.odin#L1670-L1707) [🔍 67p](slices/51_stream_cursor_writer_256_x_4kb_1mb.md) | **264** | 264 ± 14.2 | 5.4% | 3.5M | 4.0M | 17 | 282 | 284 | 250 | 285 | 256 |
-| 55 | [`Path: 4-level nested cursor_write_path`](bench_xitdb.odin#L1777-L1830) [🔍 62p](slices/55_path_4_level_nested_cursor_write_path.md) | **244** | 241 ± 8.5 | 3.5% | 4.0M | 4.3M | 15 | 249 | 249 | 231 | 249 | 500 |
-| 56 | [`Path: 4-level nested cursor_read_path`](bench_xitdb.odin#L1832-L1853) [🔍 18p](slices/56_path_4_level_nested_cursor_read_path.md) | **142** | 142 ± 1.5 | 1.0% | 6.9M | 7.1M | 1 | 144 | 144 | 140 | 144 | 500 |
+| 55 ↻ | [`Path: 4-level nested cursor_write_path`](bench_xitdb.odin#L1777-L1830) [🔍 62p](slices/55_path_4_level_nested_cursor_write_path.md) | **236** | 237 ± 2.6 | 1.1% | 4.1M | 4.2M | 1 | 241 | 242 | 236 | 242 | 500 |
+| 56 ↻ | [`Path: 4-level nested cursor_read_path`](bench_xitdb.odin#L1832-L1853) [🔍 18p](slices/56_path_4_level_nested_cursor_read_path.md) | **148** | 153 ± 10.3 | 6.7% | 5.8M | 6.8M | 4 | 167 | 170 | 147 | 171 | 500 |
 | 62 | [`Tx: Aborted transaction rollback truncate`](bench_xitdb.odin#L2064-L2085) [🔍 77p](slices/62_tx_aborted_transaction_rollback_truncate.md) | **654** | 655 ± 2.2 | 0.3% | 1.52M | 1.53M | 3 | 658 | 658 | 653 | 658 | 500 |
 | 65 | [`DSL Layer 1: String Selector get_uint (N=500)`](bench_xitdb.odin#L2167-L2179) [🔍 71p](slices/65_dsl_layer_1_string_selector_get_uint_n_500.md) | **553** | 557 ± 6.7 | 1.2% | 1.77M | 1.81M | 11 | 565 | 565 | 551 | 565 | 500 |
 
@@ -273,12 +221,12 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 
 | # | Benchmark | Med (`µs`) | Mean ± σ | CV | Min `ops/s` | Max `ops/s` | IQR | `p95` | `p99` | Min | Max | Ops |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 41 | [`Compaction (Memory_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1419-L1437) [🔍 90p](slices/41_compaction_memory_offset_map_200_1.md) | **1.99** | 2.06 ± 0.20 | 9.8% | 418K | 534K | 0.11 | 2.33 | 2.38 | 1.87 | 2.40 | 1 |
-| 42 | [`Compaction (File_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1439-L1460) [🔍 89p](slices/42_compaction_file_offset_map_200_1.md) | **9.43** | 9.55 ± 0.43 | 4.5% | 97.4K | 109K | 0.21 | 10.1 | 10.2 | 9.16 | 10.3 | 1 |
-| 43 | [`Compaction (Heterogeneous DAG + dedup)`](bench_xitdb.odin#L1462-L1521) [🔍 154p](slices/43_compaction_heterogeneous_dag_dedup.md) | **32.8** | 33.1 ± 2.08 | 6.3% | 27.7K | 32.4K | 2.56 | 35.7 | 36.0 | 30.9 | 36.1 | 1 |
-| 44 | [`Replication (Post-compaction resync)`](bench_xitdb.odin#L1523-L1548) [🔍 43p](slices/44_replication_post_compaction_resync.md) | **1.46** | 1.46 ± 0.02 | 1.2% | 674K | 693K | 0.03 | 1.48 | 1.48 | 1.44 | 1.48 | 1 |
+| 41 ↻ | [`Compaction (Memory_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1419-L1437) [🔍 90p](slices/41_compaction_memory_offset_map_200_1.md) | **2.30** | 2.36 ± 0.19 | 8.2% | 371K | 452K | 0.07 | 2.62 | 2.68 | 2.21 | 2.70 | 1 |
+| 42 ↻ | [`Compaction (File_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1439-L1460) [🔍 89p](slices/42_compaction_file_offset_map_200_1.md) | **9.63** | 9.76 ± 0.40 | 4.1% | 96.3K | 108K | 0.27 | 10.3 | 10.4 | 9.30 | 10.4 | 1 |
+| 43 ↻ | [`Compaction (Heterogeneous DAG + dedup)`](bench_xitdb.odin#L1462-L1521) [🔍 154p](slices/43_compaction_heterogeneous_dag_dedup.md) | **32.8** | 33.4 ± 1.67 | 5.0% | 27.6K | 31.3K | 1.28 | 35.7 | 36.1 | 32.0 | 36.2 | 1 |
+| 44 ↻ | [`Replication (Post-compaction resync)`](bench_xitdb.odin#L1523-L1548) [🔍 43p](slices/44_replication_post_compaction_resync.md) | **1.53** | 1.55 ± 0.04 | 2.7% | 620K | 661K | 0.05 | 1.60 | 1.61 | 1.51 | 1.61 | 1 |
 | 58 | [`Backend: Core_Memory commits`](bench_xitdb.odin#L1912-L1939) [🔍 101p](slices/58_backend_core_memory_commits.md) | **1.09** | 1.08 ± 0.01 | 0.6% | 917K | 931K | 0.01 | 1.09 | 1.09 | 1.07 | 1.09 | 500 |
-| 59 | [`Backend: Core_Buffered_File commits`](bench_xitdb.odin#L1942-L1981) [🔍 102p](slices/59_backend_core_buffered_file_commits.md) | **16.7** | 16.7 ± 0.15 | 0.9% | 59.0K | 60.5K | 0.10 | 16.9 | 16.9 | 16.5 | 16.9 | 500 |
+| 59 ↻ | [`Backend: Core_Buffered_File commits`](bench_xitdb.odin#L1942-L1981) [🔍 102p](slices/59_backend_core_buffered_file_commits.md) | **17.0** | 17.0 ± 0.08 | 0.4% | 58.7K | 59.4K | 0.07 | 17.0 | 17.0 | 16.8 | 17.0 | 500 |
 | 60 | [`Backend: Core_File (unbuffered) commits`](bench_xitdb.odin#L1984-L2018) [🔍 101p](slices/60_backend_core_file_unbuffered_commits.md) | **44.6** | 44.7 ± 0.35 | 0.8% | 22.1K | 22.6K | 0.25 | 45.1 | 45.2 | 44.3 | 45.2 | 500 |
 | 61 | [`Tx: Mid-tx database_freeze + CoW clone`](bench_xitdb.odin#L2021-L2062) [🔍 96p](slices/61_tx_mid_tx_database_freeze_cow_clone.md) | **1.03** | 1.03 ± 0.01 | 0.8% | 964K | 982K | 0.01 | 1.04 | 1.04 | 1.02 | 1.04 | 500 |
 | 64 | [`DSL Layer 2: Tx Commit + Secondary Index (N=500)`](bench_xitdb.odin#L2128-L2163) [🔍 99p](slices/64_dsl_layer_2_tx_commit_secondary_index_n_500.md) | **4.02** | 4.01 ± 0.02 | 0.5% | 249K | 251K | 0.03 | 4.02 | 4.02 | 3.98 | 4.02 | 500 |
@@ -374,7 +322,7 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 61 | [`Tx: Mid-tx database_freeze + CoW clone`](bench_xitdb.zig#L2181-L2231) [🔍 96p](slices/61_tx_mid_tx_database_freeze_cow_clone.md) | **1.96** | 1.93 ± 0.10 | 4.9% | 496K | 561K | 0.11 | 2.01 | 2.01 | 1.78 | 2.02 | 500 |
 | 62 | [`Tx: Aborted transaction rollback truncate`](bench_xitdb.zig#L2233-L2263) [🔍 77p](slices/62_tx_aborted_transaction_rollback_truncate.md) | **1.90** | 1.94 ± 0.10 | 5.3% | 471K | 537K | 0.03 | 2.08 | 2.12 | 1.86 | 2.12 | 500 |
 
-### 4. 1v1 Statistical Comparison (Odin vs. Zig, Commit `3b3da703c200`)
+### 4. 1v1 Statistical Comparison (Odin vs. Zig, Commit `2ea57460f65b`)
 
 #### 4.1 Sub-100ns Fast Path (`ns`, 20 tests)
 
@@ -387,8 +335,8 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 15 | [`Array_List (Radix Trie) random get`](bench_xitdb.odin#L830-L845) ([Zig](bench_xitdb.zig#L865-L880) · [🔍 24p](slices/15_array_list_radix_trie_random_get.md)) | **2.67x** | **46** | 123 | `140.9` ★ | 46 ± 0.5 | 1.2% | 46 | 123 ± 1.1 | 0.9% | 124 |
 | 16 | [`Array_List (Radix Trie) iterator scan`](bench_xitdb.odin#L847-L864) ([Zig](bench_xitdb.zig#L882-L896) · [🔍 21p](slices/16_array_list_radix_trie_iterator_scan.md)) | **2.50x** | **12** | 30 | `30.5` ★ | 12 ± 0.0 | 0.0% | 12 | 30 ± 1.3 | 4.4% | 31 |
 | 17 | [`Array_List (Radix Trie) in-place put`](bench_xitdb.odin#L866-L884) ([Zig](bench_xitdb.zig#L898-L918) · [🔍 67p](slices/17_array_list_radix_trie_in_place_put.md)) | **1.92x** | **96** | 184 | `38.9` ★ | 95 ± 1.9 | 2.0% | 98 | 184 ± 4.7 | 2.6% | 190 |
-| 21 | [`Linked_Array_List (B-Tree) random get`](bench_xitdb.odin#L956-L971) ([Zig](bench_xitdb.zig#L987-L1002) · [🔍 30p](slices/21_linked_array_list_b_tree_random_get.md)) | **2.18x** | **55** | 120 | `68.2` ★ | 55 ± 1.3 | 2.4% | 57 | 119 ± 1.6 | 1.4% | 121 |
-| 22 | [`Linked_Array_List (B-Tree) iterator scan`](bench_xitdb.odin#L973-L990) ([Zig](bench_xitdb.zig#L1004-L1018) · [🔍 21p](slices/22_linked_array_list_b_tree_iterator_scan.md)) | **3.92x** | **13** | 51 | `59.1` ★ | 13 ± 0.5 | 4.1% | 14 | 51 ± 1.3 | 2.6% | 52 |
+| 21 | [`Linked_Array_List (B-Tree) random get`](bench_xitdb.odin#L956-L971) ([Zig](bench_xitdb.zig#L987-L1002) · [🔍 30p](slices/21_linked_array_list_b_tree_random_get.md)) | **2.22x** | **54** | 120 | `71.1` ★ | 54 ± 1.2 | 2.3% | 55 | 119 ± 1.6 | 1.4% | 121 |
+| 22 | [`Linked_Array_List (B-Tree) iterator scan`](bench_xitdb.odin#L973-L990) ([Zig](bench_xitdb.zig#L1004-L1018) · [🔍 21p](slices/22_linked_array_list_b_tree_iterator_scan.md)) | **3.64x** | **14** | 51 | `60.0` ★ | 14 ± 0.4 | 3.2% | 14 | 51 ± 1.3 | 2.6% | 52 |
 | 31 | [`Sorted_Map (B+Tree) ordered scan`](bench_xitdb.odin#L1180-L1195) ([Zig](bench_xitdb.zig#L1206-L1219) · [🔍 20p](slices/31_sorted_map_b_tree_ordered_scan.md)) | **3.54x** | **13** | 46 | `65.5` ★ | 13 ± 0.0 | 0.0% | 13 | 46 ± 1.1 | 2.5% | 48 |
 | 34 | [`Sorted_Map (B+Tree) get_index select`](bench_xitdb.odin#L1242-L1254) ([Zig](bench_xitdb.zig#L1261-L1273) · [🔍 29p](slices/34_sorted_map_b_tree_get_index_select.md)) | **2.49x** | **65** | 162 | `101.8` ★ | 65 ± 0.8 | 1.3% | 66 | 161 ± 1.9 | 1.2% | 163 |
 | 47 | [`Bytes: Inline Short_Bytes read_bytes_buf`](bench_xitdb.odin#L1602-L1627) ([Zig](bench_xitdb.zig#L1721-L1752) · [🔍 93p](slices/47_bytes_inline_short_bytes_read_bytes_buf.md)) | **1.17x** | **6** | 7 | `99.0` ★ | 6 ± 0.0 | 0.0% | 6 | 7 ± 0.0 | 0.0% | 7 |
@@ -417,18 +365,18 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 14 | [`Array_List (Radix Trie) append`](bench_xitdb.odin#L795-L828) ([Zig](bench_xitdb.zig#L834-L863) · [🔍 80p](slices/14_array_list_radix_trie_append.md)) | **1.82x** | **109** | 198 | `44.4` ★ | 109 ± 1.5 | 1.4% | 111 | 197 ± 4.2 | 2.1% | 201 |
 | 18 | [`Array_List (Radix Trie) index-seek page(10)`](bench_xitdb.odin#L886-L900) ([Zig](bench_xitdb.zig#L920-L933) · [🔍 21p](slices/18_array_list_radix_trie_index_seek_page_10.md)) | **4.01x** | **353** | 1,415 | `52.2` ★ | 353 ± 3.9 | 1.1% | 358 | 1,430 ± 46.0 | 3.2% | 1,493 |
 | 19 | [`Array_List (Radix Trie) depth-collapse slice`](bench_xitdb.odin#L902-L918) ([Zig](bench_xitdb.zig#L935-L953) · [🔍 66p](slices/19_array_list_radix_trie_depth_collapse_slice.md)) | **1.86x** | **699** | 1,302 | `3.9` ★ | 701 ± 14.1 | 2.0% | 716 | 1,492 ± 451 | 30.2% | 2,104 |
-| 20 | [`Linked_Array_List (B-Tree) append`](bench_xitdb.odin#L921-L954) ([Zig](bench_xitdb.zig#L956-L985) · [🔍 94p](slices/20_linked_array_list_b_tree_append.md)) | **6.58x** | **248** | 1,632 | `151.8` ★ | 247 ± 1.3 | 0.5% | 249 | 1,641 ± 20.5 | 1.2% | 1,663 |
-| 23 | [`Linked_Array_List (B-Tree) middle insert`](bench_xitdb.odin#L992-L1018) ([Zig](bench_xitdb.zig#L1020-L1043) · [🔍 83p](slices/23_linked_array_list_b_tree_middle_insert.md)) | **7.07x** | **282** | 1,993 | `101.2` ★ | 282 ± 4.3 | 1.5% | 288 | 1,974 ± 37.1 | 1.9% | 2,007 |
-| 24 | [`Linked_Array_List (B-Tree) middle remove`](bench_xitdb.odin#L1020-L1039) ([Zig](bench_xitdb.zig#L1045-L1066) · [🔍 84p](slices/24_linked_array_list_b_tree_middle_remove.md)) | **5.89x** | **338** | 1,990 | `101.2` ★ | 342 ± 8.2 | 2.4% | 353 | 1,980 ± 35.3 | 1.8% | 2,015 |
-| 25 | [`Linked_Array_List (B-Tree) concat + slice`](bench_xitdb.odin#L1041-L1066) ([Zig](bench_xitdb.zig#L1068-L1091) · [🔍 89p](slices/25_linked_array_list_b_tree_concat_slice.md)) | **22.38x** | **845** | 18,912 | `97.0` ★ | 845 ± 8.3 | 1.0% | 854 | 18,801 ± 414 | 2.2% | 19,193 |
-| 26 | [`Linked_Array_List (B-Tree) in-place put`](bench_xitdb.odin#L1068-L1085) ([Zig](bench_xitdb.zig#L1093-L1112) · [🔍 75p](slices/26_linked_array_list_b_tree_in_place_put.md)) | **7.37x** | **169** | 1,246 | `121.4` ★ | 169 ± 1.5 | 0.9% | 170 | 1,243 ± 19.7 | 1.6% | 1,267 |
-| 27 | [`Linked_Array_List (B-Tree) index-seek page(10)`](bench_xitdb.odin#L1087-L1101) ([Zig](bench_xitdb.zig#L1114-L1127) · [🔍 20p](slices/27_linked_array_list_b_tree_index_seek_page_10.md)) | **5.22x** | **411** | 2,147 | `272.1` ★ | 410 ± 4.8 | 1.2% | 415 | 2,155 ± 13.5 | 0.6% | 2,171 |
+| 20 | [`Linked_Array_List (B-Tree) append`](bench_xitdb.odin#L921-L954) ([Zig](bench_xitdb.zig#L956-L985) · [🔍 94p](slices/20_linked_array_list_b_tree_append.md)) | **6.97x** | **234** | 1,632 | `150.8` ★ | 232 ± 4.1 | 1.8% | 235 | 1,641 ± 20.5 | 1.2% | 1,663 |
+| 23 | [`Linked_Array_List (B-Tree) middle insert`](bench_xitdb.odin#L992-L1018) ([Zig](bench_xitdb.zig#L1020-L1043) · [🔍 83p](slices/23_linked_array_list_b_tree_middle_insert.md)) | **7.44x** | **268** | 1,993 | `100.7` ★ | 268 ± 7.5 | 2.8% | 275 | 1,974 ± 37.1 | 1.9% | 2,007 |
+| 24 | [`Linked_Array_List (B-Tree) middle remove`](bench_xitdb.odin#L1020-L1039) ([Zig](bench_xitdb.zig#L1045-L1066) · [🔍 84p](slices/24_linked_array_list_b_tree_middle_remove.md)) | **5.84x** | **341** | 1,990 | `102.6` ★ | 340 ± 6.0 | 1.8% | 345 | 1,980 ± 35.3 | 1.8% | 2,015 |
+| 25 | [`Linked_Array_List (B-Tree) concat + slice`](bench_xitdb.odin#L1041-L1066) ([Zig](bench_xitdb.zig#L1068-L1091) · [🔍 89p](slices/25_linked_array_list_b_tree_concat_slice.md)) | **21.54x** | **878** | 18,912 | `94.6` ★ | 916 ± 84.7 | 9.2% | 1,030 | 18,801 ± 414 | 2.2% | 19,193 |
+| 26 | [`Linked_Array_List (B-Tree) in-place put`](bench_xitdb.odin#L1068-L1085) ([Zig](bench_xitdb.zig#L1093-L1112) · [🔍 75p](slices/26_linked_array_list_b_tree_in_place_put.md)) | **7.33x** | **170** | 1,246 | `120.9` ★ | 170 ± 2.0 | 1.2% | 172 | 1,243 ± 19.7 | 1.6% | 1,267 |
+| 27 | [`Linked_Array_List (B-Tree) index-seek page(10)`](bench_xitdb.odin#L1087-L1101) ([Zig](bench_xitdb.zig#L1114-L1127) · [🔍 20p](slices/27_linked_array_list_b_tree_index_seek_page_10.md)) | **5.20x** | **413** | 2,147 | `184.1` ★ | 417 ± 16.2 | 3.9% | 438 | 2,155 ± 13.5 | 0.6% | 2,171 |
 | 28 | [`Sorted_Map (B+Tree) out-of-order put`](bench_xitdb.odin#L1110-L1148) ([Zig](bench_xitdb.zig#L1136-L1174) · [🔍 112p](slices/28_sorted_map_b_tree_out_of_order_put.md)) | **7.62x** | **377** | 2,872 | `214.8` ★ | 376 ± 1.9 | 0.5% | 379 | 2,870 ± 25.9 | 0.9% | 2,896 |
 | 29 | [`Sorted_Map (B+Tree) key lookup`](bench_xitdb.odin#L1150-L1165) ([Zig](bench_xitdb.zig#L1176-L1191) · [🔍 37p](slices/29_sorted_map_b_tree_key_lookup.md)) | **12.59x** | **162** | 2,039 | `280.6` ★ | 163 ± 1.5 | 0.9% | 165 | 2,031 ± 14.8 | 0.7% | 2,043 |
 | 30 | [`Sorted_Map (B+Tree) rank query`](bench_xitdb.odin#L1167-L1178) ([Zig](bench_xitdb.zig#L1193-L1204) · [🔍 22p](slices/30_sorted_map_b_tree_rank_query.md)) | **15.63x** | **128** | 2,000 | `179.7` ★ | 128 ± 1.1 | 0.9% | 130 | 1,988 ± 23.1 | 1.2% | 2,006 |
 | 32 | [`Sorted_Map (B+Tree) lower-bound page(10)`](bench_xitdb.odin#L1197-L1212) ([Zig](bench_xitdb.zig#L1221-L1235) · [🔍 29p](slices/32_sorted_map_b_tree_lower_bound_page_10.md)) | **6.59x** | **466** | 3,071 | `251.0` ★ | 466 ± 1.9 | 0.4% | 468 | 3,060 ± 23.0 | 0.8% | 3,075 |
 | 33 | [`Sorted_Map (B+Tree) remove & rebalance`](bench_xitdb.odin#L1214-L1240) ([Zig](bench_xitdb.zig#L1237-L1259) · [🔍 84p](slices/33_sorted_map_b_tree_remove_rebalance.md)) | **12.76x** | **242** | 3,089 | `202.3` ★ | 243 ± 2.3 | 1.0% | 246 | 3,097 ± 31.5 | 1.0% | 3,139 |
-| 35 | [`Sorted_Map (B+Tree) index-seek page(10)`](bench_xitdb.odin#L1256-L1271) ([Zig](bench_xitdb.zig#L1275-L1289) · [🔍 21p](slices/35_sorted_map_b_tree_index_seek_page_10.md)) | **6.41x** | **414** | 2,653 | `76.6` ★ | 414 ± 1.7 | 0.4% | 415 | 2,662 ± 65.6 | 2.5% | 2,738 |
+| 35 | [`Sorted_Map (B+Tree) index-seek page(10)`](bench_xitdb.odin#L1256-L1271) ([Zig](bench_xitdb.zig#L1275-L1289) · [🔍 21p](slices/35_sorted_map_b_tree_index_seek_page_10.md)) | **6.14x** | **432** | 2,653 | `75.9` ★ | 430 ± 3.8 | 0.9% | 434 | 2,662 ± 65.6 | 2.5% | 2,738 |
 | 36 | [`Sorted_Map (B+Tree) in-place overwrite`](bench_xitdb.odin#L1273-L1291) ([Zig](bench_xitdb.zig#L1291-L1311) · [🔍 95p](slices/36_sorted_map_b_tree_in_place_overwrite.md)) | **6.64x** | **368** | 2,442 | `180.5` ★ | 368 ± 0.5 | 0.1% | 368 | 2,457 ± 25.9 | 1.1% | 2,486 |
 | 37 | [`Sorted_Set (B+Tree) key-only put (1 tx)`](bench_xitdb.odin#L1293-L1314) ([Zig](bench_xitdb.zig#L1313-L1336) · [🔍 95p](slices/37_sorted_set_b_tree_key_only_put_1_tx.md)) | **7.55x** | **347** | 2,619 | `180.8` ★ | 348 ± 2.4 | 0.7% | 351 | 2,605 ± 27.8 | 1.1% | 2,631 |
 | 38 | [`Sorted_Set (B+Tree) contains lookup`](bench_xitdb.odin#L1316-L1330) ([Zig](bench_xitdb.zig#L1338-L1352) · [🔍 36p](slices/38_sorted_set_b_tree_contains_lookup.md)) | **12.57x** | **149** | 1,873 | `210.6` ★ | 148 ± 1.6 | 1.1% | 150 | 1,877 ± 18.3 | 1.0% | 1,900 |
@@ -437,20 +385,20 @@ To regenerate the reference tables below from `benchmarks/odin.jsonl` and `bench
 | 45 | [`Hasher: SHA-1 (20B) HAMT put`](bench_xitdb.odin#L1578-L1599) ([Zig](bench_xitdb.zig#L1656-L1686) · [🔍 99p](slices/45_hasher_sha_1_20b_hamt_put.md)) | **3.59x** | **211** | 758 | `474.1` ★ | 210 ± 2.3 | 1.1% | 212 | 759 ± 1.1 | 0.1% | 760 |
 | 46 | [`Hasher: SHA-256 (32B) HAMT put`](bench_xitdb.odin#L1578-L1599) ([Zig](bench_xitdb.zig#L1689-L1718) · [🔍 102p](slices/46_hasher_sha_256_32b_hamt_put.md)) | **3.94x** | **219** | 862 | `197.8` ★ | 219 ± 0.5 | 0.2% | 220 | 860 ± 7.2 | 0.8% | 867 |
 | 51 | [`Stream: Cursor_Writer (256 x 4KB = 1MB)`](bench_xitdb.odin#L1670-L1707) ([Zig](bench_xitdb.zig#L1801-L1836) · [🔍 67p](slices/51_stream_cursor_writer_256_x_4kb_1mb.md)) | **6.08x** | **264** | 1,605 | `41.0` ★ | 264 ± 14.2 | 5.4% | 282 | 1,566 ± 69.5 | 4.4% | 1,622 |
-| 55 | [`Path: 4-level nested cursor_write_path`](bench_xitdb.odin#L1777-L1830) ([Zig](bench_xitdb.zig#L1903-L1949) · [🔍 62p](slices/55_path_4_level_nested_cursor_write_path.md)) | **4.54x** | **244** | 1,108 | `190.8` ★ | 241 ± 8.5 | 3.5% | 249 | 1,110 ± 5.6 | 0.5% | 1,117 |
-| 56 | [`Path: 4-level nested cursor_read_path`](bench_xitdb.odin#L1832-L1853) ([Zig](bench_xitdb.zig#L1951-L1972) · [🔍 18p](slices/56_path_4_level_nested_cursor_read_path.md)) | **5.11x** | **142** | 726 | `74.3` ★ | 142 ± 1.5 | 1.0% | 144 | 735 ± 17.8 | 2.4% | 758 |
+| 55 | [`Path: 4-level nested cursor_write_path`](bench_xitdb.odin#L1777-L1830) ([Zig](bench_xitdb.zig#L1903-L1949) · [🔍 62p](slices/55_path_4_level_nested_cursor_write_path.md)) | **4.69x** | **236** | 1,108 | `315.3` ★ | 237 ± 2.6 | 1.1% | 241 | 1,110 ± 5.6 | 0.5% | 1,117 |
+| 56 | [`Path: 4-level nested cursor_read_path`](bench_xitdb.odin#L1832-L1853) ([Zig](bench_xitdb.zig#L1951-L1972) · [🔍 18p](slices/56_path_4_level_nested_cursor_read_path.md)) | **4.91x** | **148** | 726 | `63.4` ★ | 153 ± 10.3 | 6.7% | 167 | 735 ± 17.8 | 2.4% | 758 |
 | 62 | [`Tx: Aborted transaction rollback truncate`](bench_xitdb.odin#L2064-L2085) ([Zig](bench_xitdb.zig#L2233-L2263) · [🔍 77p](slices/62_tx_aborted_transaction_rollback_truncate.md)) | **2.91x** | **654** | 1,903 | `27.8` ★ | 655 ± 2.2 | 0.3% | 658 | 1,943 ± 104 | 5.3% | 2,084 |
 
 #### 4.3 Multi-Microsecond Transactions & Compaction (`µs`, 8 tests)
 
 | # | Benchmark | Speedup | Odin Med (`µs`) | Zig Med (`µs`) | Welch $z$ | Odin Mean ± σ | Odin CV | Odin `p95` | Zig Mean ± σ | Zig CV | Zig `p95` |
 | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 41 | [`Compaction (Memory_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1419-L1437) ([Zig](bench_xitdb.zig#L1440-L1458) · [🔍 90p](slices/41_compaction_memory_offset_map_200_1.md)) | **3.43x** | **1.99** | 6.83 | `5.0` ★ | 2.06 ± 0.20 | 9.8% | 2.33 | 7.25 ± 2.33 | 32.2% | 10.4 |
-| 42 | [`Compaction (File_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1439-L1460) ([Zig](bench_xitdb.zig#L1460-L1514) · [🔍 89p](slices/42_compaction_file_offset_map_200_1.md)) | **1.20x** | **9.43** | 11.3 | `3.3` ★ | 9.55 ± 0.43 | 4.5% | 10.1 | 12.2 ± 1.72 | 14.1% | 14.5 |
-| 43 | [`Compaction (Heterogeneous DAG + dedup)`](bench_xitdb.odin#L1462-L1521) ([Zig](bench_xitdb.zig#L1516-L1603) · [🔍 154p](slices/43_compaction_heterogeneous_dag_dedup.md)) | **3.22x** | **32.8** | 105.7 | `16.4` ★ | 33.1 ± 2.08 | 6.3% | 35.7 | 108.3 ± 10.0 | 9.2% | 119.3 |
-| 44 | [`Replication (Post-compaction resync)`](bench_xitdb.odin#L1523-L1548) ([Zig](bench_xitdb.zig#L1605-L1635) · [🔍 43p](slices/44_replication_post_compaction_resync.md)) | **1.14x** | **1.46** | 1.67 | `9.1` ★ | 1.46 ± 0.02 | 1.2% | 1.48 | 1.67 ± 0.05 | 2.7% | 1.71 |
+| 41 | [`Compaction (Memory_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1419-L1437) ([Zig](bench_xitdb.zig#L1440-L1458) · [🔍 90p](slices/41_compaction_memory_offset_map_200_1.md)) | **2.97x** | **2.30** | 6.83 | `4.7` ★ | 2.36 ± 0.19 | 8.2% | 2.62 | 7.25 ± 2.33 | 32.2% | 10.4 |
+| 42 | [`Compaction (File_Offset_Map, 200 -> 1)`](bench_xitdb.odin#L1439-L1460) ([Zig](bench_xitdb.zig#L1460-L1514) · [🔍 89p](slices/42_compaction_file_offset_map_200_1.md)) | **1.18x** | **9.63** | 11.3 | `3.1` ★ | 9.76 ± 0.40 | 4.1% | 10.3 | 12.2 ± 1.72 | 14.1% | 14.5 |
+| 43 | [`Compaction (Heterogeneous DAG + dedup)`](bench_xitdb.odin#L1462-L1521) ([Zig](bench_xitdb.zig#L1516-L1603) · [🔍 154p](slices/43_compaction_heterogeneous_dag_dedup.md)) | **3.23x** | **32.8** | 105.7 | `16.5` ★ | 33.4 ± 1.67 | 5.0% | 35.7 | 108.3 ± 10.0 | 9.2% | 119.3 |
+| 44 | [`Replication (Post-compaction resync)`](bench_xitdb.odin#L1523-L1548) ([Zig](bench_xitdb.zig#L1605-L1635) · [🔍 43p](slices/44_replication_post_compaction_resync.md)) | **1.09x** | **1.53** | 1.67 | `4.2` ★ | 1.55 ± 0.04 | 2.7% | 1.60 | 1.67 ± 0.05 | 2.7% | 1.71 |
 | 58 | [`Backend: Core_Memory commits`](bench_xitdb.odin#L1912-L1939) ([Zig](bench_xitdb.zig#L2030-L2069) · [🔍 101p](slices/58_backend_core_memory_commits.md)) | **2.26x** | **1.09** | 2.45 | `54.0` ★ | 1.08 ± 0.01 | 0.6% | 1.09 | 2.45 ± 0.06 | 2.3% | 2.51 |
-| 59 | [`Backend: Core_Buffered_File commits`](bench_xitdb.odin#L1942-L1981) ([Zig](bench_xitdb.zig#L2072-L2126) · [🔍 102p](slices/59_backend_core_buffered_file_commits.md)) | **1.07x** | **16.7** | 17.9 | `6.1` ★ | 16.7 ± 0.15 | 0.9% | 16.9 | 17.9 ± 0.40 | 2.2% | 18.3 |
+| 59 | [`Backend: Core_Buffered_File commits`](bench_xitdb.odin#L1942-L1981) ([Zig](bench_xitdb.zig#L2072-L2126) · [🔍 102p](slices/59_backend_core_buffered_file_commits.md)) | **1.05x** | **17.0** | 17.9 | `5.1` ★ | 17.0 ± 0.08 | 0.4% | 17.0 | 17.9 ± 0.40 | 2.2% | 18.3 |
 | 60 | [`Backend: Core_File (unbuffered) commits`](bench_xitdb.odin#L1984-L2018) ([Zig](bench_xitdb.zig#L2129-L2178) · [🔍 101p](slices/60_backend_core_file_unbuffered_commits.md)) | **1.05x** | **44.6** | 46.7 | `3.9` ★ | 44.7 ± 0.35 | 0.8% | 45.1 | 47.4 ± 1.50 | 3.2% | 49.4 |
 | 61 | [`Tx: Mid-tx database_freeze + CoW clone`](bench_xitdb.odin#L2021-L2062) ([Zig](bench_xitdb.zig#L2181-L2231) · [🔍 96p](slices/61_tx_mid_tx_database_freeze_cow_clone.md)) | **1.91x** | **1.03** | 1.96 | `21.1` ★ | 1.03 ± 0.01 | 0.8% | 1.04 | 1.93 ± 0.10 | 4.9% | 2.01 |
 

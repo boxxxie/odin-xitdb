@@ -44,11 +44,11 @@ This directory is a practical, peer-engineering reference prepared for [`xitdb`]
 
 ---
 
-## Empirical Validation (Applied to `reference/xitdb-zig/src/lib.zig`)
+## Empirical Validation (`reference/xitdb-zig-patched` via `-Dpatched=true`)
 
-All 6 adjustments were applied directly to [`reference/xitdb-zig/src/lib.zig`](../../reference/xitdb-zig/src/lib.zig) and verified against:
-1. **100% of upstream `xitdb-zig` unit & corruption tests** (`zig build test` — 11/11 test suites passing).
-2. **All 63 `ReleaseFast` benchmarks** (`zig build bench -Doptimize=ReleaseFast -Dcpu=native -- --runs 5 --warmup 2`), with **0 byte-footprint mismatches** across every database workload.
+All 6 adjustments are maintained in [`reference/xitdb-zig-patched`](../../reference/xitdb-zig-patched) (and [`zig_optimizations.patch`](zig_optimizations.patch)) and verified against:
+1. **100% of upstream `xitdb-zig` unit & corruption tests** (`zig build test -Dpatched=true` — 11/11 test suites passing).
+2. **All 63 `ReleaseFast` benchmarks** (`zig build bench -Doptimize=ReleaseFast -Dcpu=native -Dpatched=true -- --runs 5 --warmup 2`), with **0 byte-footprint mismatches** across every database workload.
 
 Across all 63 benchmarks, the geometric-mean Zig speedup is **2.22x**, cutting the overall Zig-vs-Odin ratio from **5.12x down to 2.30x** (and expanding Zig's lead on `#43 Compaction (Heterogeneous DAG + dedup)` to **1.51x faster than Odin** and `#53 Stream: Cursor_Reader random seek + 64B read` to **1.22x faster than Odin**):
 
