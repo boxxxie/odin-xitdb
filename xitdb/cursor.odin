@@ -383,6 +383,31 @@ cursor_read_kv_pair :: proc(c: Read_Cursor, allocator := context.temp_allocator)
 	}, nil
 }
 
+// Zero-allocation KV pair reader that decodes only the key and value slots on the stack without allocating the hash.
+cursor_read_kv_pair_slots :: proc(c: Read_Cursor) -> (key_cursor: Read_Cursor, value_cursor: Read_Cursor, err: Error) {
+	slot_ptr := cursor_resolved(c) or_return
+	if is_key_only_entry(slot_ptr.slot) {
+		return Read_Cursor{slot_ptr = Slot_Pointer{position = nil, slot = slot_ptr.slot}, db = c.db, frozen_at = c.frozen_at},
+			Read_Cursor{slot_ptr = Slot_Pointer{position = nil, slot = Slot{}}, db = c.db, frozen_at = c.frozen_at},
+			nil
+	}
+	if slot_ptr.slot.tag != .KV_Pair && slot_ptr.slot.tag != .Sorted_KV_Pair {
+		return {}, {}, .Unexpected_Tag
+	}
+	key_pos := slot_ptr.slot.value + database_kv_key_offset(c.db, slot_ptr.slot.tag)
+	val_pos := key_pos + SLOT_LENGTH
+	core_seek_to(c.db.core, key_pos) or_return
+	b: [SLOT_LENGTH * 2]u8 = ---
+	core_read_exact(c.db.core, b[:]) or_return
+	key_slot := slot_from_slice_raw(b[0:SLOT_LENGTH])
+	tag_validate(key_slot.tag) or_return
+	val_slot := slot_from_slice_raw(b[SLOT_LENGTH : SLOT_LENGTH * 2])
+	tag_validate(val_slot.tag) or_return
+	return Read_Cursor{slot_ptr = Slot_Pointer{position = key_pos, slot = key_slot}, db = c.db, frozen_at = c.frozen_at},
+		Read_Cursor{slot_ptr = Slot_Pointer{position = val_pos, slot = val_slot}, db = c.db, frozen_at = c.frozen_at},
+		nil
+}
+
 cursor_write_kv_pair :: proc(c: Write_Cursor, allocator := context.temp_allocator) -> (res: Write_KV_Pair_Cursor, err: Error) {
 	rkv := cursor_read_kv_pair(c.read_cursor, allocator) or_return
 	return Write_KV_Pair_Cursor{

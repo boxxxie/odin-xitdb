@@ -892,7 +892,7 @@ _execute_tx_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 	return nil
 }
 
-@(private = "file")
+@(private)
 _op_kind_to_string :: proc(k: Tx_Op_Kind) -> string {
 	switch k {
 	case .Put:
@@ -1290,7 +1290,7 @@ _parse_script_literal :: proc(lit: string) -> (res: Writeable_Data, err: Error) 
 // Layer 3A: Odin Struct Reflection (`marshal` / `unmarshal`)
 // ============================================================================
 
-@(private = "file")
+@(private)
 _Field_Tag_Spec :: struct {
 	name:       string,
 	skip:       bool,
@@ -1298,21 +1298,20 @@ _Field_Tag_Spec :: struct {
 	format_tag: string,
 }
 
-@(private = "file")
-_parse_field_tag :: proc(field_name: string, tag: reflect.Struct_Tag) -> _Field_Tag_Spec {
+@(private)
+_parse_raw_tag_val :: proc(field_name: string, val: string) -> _Field_Tag_Spec {
 	spec := _Field_Tag_Spec{name = field_name}
-	val, ok := reflect.struct_tag_lookup(tag, "xitdb")
-	if !ok || len(val) == 0 {
+	if len(val) == 0 {
 		return spec
 	}
 	if val == "-" {
 		spec.skip = true
 		return spec
 	}
-	parts := strings.split(string(val), ",", context.temp_allocator)
-	if len(parts) > 0 && len(parts[0]) > 0 {
-		raw_name := parts[0]
-		if strings.has_prefix(raw_name, "[[") && strings.has_suffix(raw_name, "]]") {
+	comma_idx := strings.index_byte(val, ',')
+	raw_name := val if comma_idx < 0 else val[:comma_idx]
+	if len(raw_name) > 0 {
+		if len(raw_name) > 4 && raw_name[0] == '[' && raw_name[1] == '[' && raw_name[len(raw_name) - 2] == ']' && raw_name[len(raw_name) - 1] == ']' {
 			spec.col_prefix = '['
 			spec.name = raw_name[2 : len(raw_name) - 2]
 		} else if raw_name[0] == '$' || raw_name[0] == '#' || raw_name[0] == '%' || raw_name[0] == '^' {
@@ -1322,23 +1321,41 @@ _parse_field_tag :: proc(field_name: string, tag: reflect.Struct_Tag) -> _Field_
 			spec.name = raw_name
 		}
 	}
-	for i in 1 ..< len(parts) {
-		opt := strings.trim_space(parts[i])
-		if strings.has_prefix(opt, "tag=") {
-			spec.format_tag = opt[4:]
-		} else if opt == "sorted_map" {
-			spec.col_prefix = '$'
-		} else if opt == "counted_map" {
-			spec.col_prefix = '#'
-		} else if opt == "linked_list" {
-			spec.col_prefix = '['
-		} else if opt == "hash_set" {
-			spec.col_prefix = '%'
-		} else if opt == "sorted_set" {
-			spec.col_prefix = '^'
+	if comma_idx >= 0 {
+		rem := val[comma_idx + 1:]
+		for len(rem) > 0 {
+			next_c := strings.index_byte(rem, ',')
+			part := rem if next_c < 0 else rem[:next_c]
+			opt := strings.trim_space(part)
+			if strings.has_prefix(opt, "tag=") {
+				spec.format_tag = opt[4:]
+			} else if opt == "sorted_map" {
+				spec.col_prefix = '$'
+			} else if opt == "counted_map" {
+				spec.col_prefix = '#'
+			} else if opt == "linked_list" {
+				spec.col_prefix = '['
+			} else if opt == "hash_set" {
+				spec.col_prefix = '%'
+			} else if opt == "sorted_set" {
+				spec.col_prefix = '^'
+			}
+			if next_c < 0 {
+				break
+			}
+			rem = rem[next_c + 1:]
 		}
 	}
 	return spec
+}
+
+@(private)
+_parse_field_tag :: proc(field_name: string, tag: reflect.Struct_Tag) -> _Field_Tag_Spec {
+	val, ok := reflect.struct_tag_lookup(tag, "xitdb")
+	if !ok || len(val) == 0 {
+		return _Field_Tag_Spec{name = field_name}
+	}
+	return _parse_raw_tag_val(field_name, string(val))
 }
 
 // Marshal any Odin struct, map, slice, or primitive into `cursor`.
@@ -1683,7 +1700,7 @@ Pull_Value :: union {
 	Pull_Map,
 }
 
-@(private = "file")
+@(private)
 _is_collection_tag :: proc(tag: Tag) -> bool {
 	#partial switch tag {
 	case .Array_List, .Linked_Array_List, .Hash_Map, .Counted_Hash_Map,
