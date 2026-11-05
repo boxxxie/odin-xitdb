@@ -5,6 +5,7 @@ import "core:io"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import lua "../../xitdb/luajit"
 import xitdb "../../xitdb"
 
 main :: proc() {
@@ -30,7 +31,7 @@ main :: proc() {
 	// Subcommand mode vs. `xit <db_path>` interactive REPL mode
 	cmd := args[0]
 	switch cmd {
-	case "status", "moments", "get", "pull", "query", "tx", "diff", "history", "compact":
+	case "status", "moments", "get", "pull", "query", "tx", "diff", "history", "compact", "lua":
 		if len(args) < 2 {
 			fmt.eprintf("Missing database file path for '%s'\n", cmd)
 			print_usage()
@@ -69,12 +70,19 @@ open_and_run_repl :: proc(db_path: string) {
 }
 
 run_subcommand :: proc(cmd: string, db_path: string, rest: []string) {
-	core, open_err := xitdb.core_buffered_file_open(db_path)
-	if open_err != nil {
-		fmt.eprintf("Failed to open %s: %v\n", db_path, open_err)
-		os.exit(1)
+	core: xitdb.Core
+	is_mem := db_path == "--memory" || db_path == "-m" || db_path == ":memory:"
+	if is_mem {
+		core = xitdb.core_memory_init()
+	} else {
+		open_err: xitdb.Error
+		core, open_err = xitdb.core_buffered_file_open(db_path)
+		if open_err != nil {
+			fmt.eprintf("Failed to open %s: %v\n", db_path, open_err)
+			os.exit(1)
+		}
 	}
-	defer xitdb.core_destroy(&core, close_file = true)
+	defer xitdb.core_destroy(&core, close_file = !is_mem)
 
 	db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
 	if init_err != nil {
@@ -144,6 +152,19 @@ run_subcommand :: proc(cmd: string, db_path: string, rest: []string) {
 			os.exit(1)
 		}
 		exec_compact(&db, rest[0])
+
+	case "lua":
+		if len(rest) < 1 {
+			fmt.eprintln("Usage: xit lua <db.xit|--memory> <script.lua|-e 'code'>")
+			os.exit(1)
+		}
+		code: string
+		if rest[0] == "-e" && len(rest) >= 2 {
+			code = rest[1]
+		} else {
+			code = load_script_or_inline(rest[0])
+		}
+		exec_lua(&db, code)
 	}
 }
 
@@ -231,6 +252,11 @@ eval_repl_input :: proc(db: ^xitdb.Database, label: string, input: string) {
 	if strings.has_prefix(s, ".compact ") {
 		target := strings.trim_space(strings.trim_prefix(s, ".compact "))
 		exec_compact(db, target)
+		return
+	}
+	if strings.has_prefix(s, ".lua ") || strings.has_prefix(s, "lua ") {
+		code := strings.trim_space(strings.trim_prefix(strings.trim_prefix(s, "."), "lua "))
+		exec_lua(db, code)
 		return
 	}
 	if strings.has_prefix(s, "diff ") {
@@ -458,6 +484,20 @@ exec_compact :: proc(db: ^xitdb.Database, target_path: string) {
 	fmt.printf("Compacted into %s: %d bytes -> %d bytes\n", target_path, before_size, after_size)
 }
 
+exec_lua :: proc(db: ^xitdb.Database, code: string) {
+	L := xitdb.lua_new_state(db)
+	if L == nil {
+		fmt.eprintln("Failed to initialize Lua 5.4 state")
+		return
+	}
+	defer lua.close(L)
+
+	ok, err_msg := xitdb.lua_exec_string(L, code, "xit_cli")
+	if !ok {
+		fmt.eprintf("Lua error: %s\n", err_msg)
+	}
+}
+
 // ============================================================================
 // Formatting & Input Helpers
 // ============================================================================
@@ -663,7 +703,8 @@ Usage:
   odin run cmd/xit -- tx      <db.xit> '<script|file>' Commit a transaction script block
   odin run cmd/xit -- diff    <db.xit> <m_a> <m_b>     Show O(1) structural diff between two moments
   odin run cmd/xit -- history <db.xit> '<path>'        Show mutation lineage of a path across moments
-  odin run cmd/xit -- compact <src.xit> <dst.xit>      Compact database into a fresh file`)
+  odin run cmd/xit -- compact <src.xit> <dst.xit>      Compact database into a fresh file
+  odin run cmd/xit -- lua     <db.xit> <script|-e ..>  Execute Lua 5.4 script with global db & xitdb bound`)
 }
 
 print_repl_help :: proc() {
@@ -671,6 +712,7 @@ print_repl_help :: proc() {
   .status                        Show database header, size, and moment count
   .moments                       List all historical moments with __tx metadata
   .compact <dst.xit>             Compact database into <dst.xit>
+  .lua <code>                    Execute inline Lua 5.4 code against db
   .quit / .exit                  Exit the shell
 
 DSL Expressions:
