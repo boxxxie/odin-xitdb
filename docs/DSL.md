@@ -1,6 +1,8 @@
 # xitdb 5-Layer DSL & Datalog Reference
 
-The [`xitdb/dsl.odin`](xitdb/dsl.odin) module layers a zero-dependency query, transaction, reflection, and Datalog engine on top of `xitdb`'s persistent structural trees. Every DSL operation compiles down to `read_slot_pointer` and `[]Path_Part` without altering the v1 wire format.
+The [`xitdb/dsl.odin`](../xitdb/dsl.odin) module layers a zero-dependency query, transaction, reflection, and Datalog engine on top of `xitdb`'s persistent structural trees. Every DSL operation compiles down to `read_slot_pointer` and `[]Path_Part` without altering the v1 wire format.
+
+> For the embedded LuaJIT 2.1 bindings to this 5-layer DSL, see [`LUAJIT.md`](LUAJIT.md). For low-level storage cores, cursors, and collection APIs, see [`CORE_API.md`](CORE_API.md).
 
 ---
 
@@ -138,6 +140,8 @@ Strings without null bytes up to 8 bytes (or up to 6 bytes when paired with a 2-
 | `xitdb:"[[todos]]"` or `xitdb:"todos,linked_list"` | `Linked_Array_List` | `[]T` |
 | `xitdb:"%roles"` or `xitdb:"roles,hash_set"` | `Hash_Set` | `[]string` |
 | `xitdb:"^tags"` or `xitdb:"tags,sorted_set"` | `Sorted_Set` (unmarshals in ascending order) | `[]string` |
+| `xitdb:"$catalog"` or `xitdb:"catalog,sorted_map"` | `Sorted_Map` | `map[string]V` |
+| `xitdb:"#metrics"` or `xitdb:"metrics,counted_map"` | `Counted_Hash_Map` | `map[string]V` |
 
 ```odin
 User_Profile :: struct {
@@ -249,3 +253,6 @@ odin build cmd/xit -out:xit -o:speed
 | `./xit diff <db.xit> <m_a> <m_b>` | Print the Layer 4 structural diff between two moments |
 | `./xit history <db.xit> '<path>'` | Print the Layer 4 mutation lineage of a path across history |
 | `./xit compact <src.xit> <dst.xit>` | Compact `<src.xit>` into a new file `<dst.xit>` |
+| `./xit lua-eval <db.xit> '<code>'` | Execute inline LuaJIT code with `db` bound to `<db.xit>` |
+| `./xit lua-run <db.xit> <file.lua>` | Execute a LuaJIT script file with `db` bound to `<db.xit>` |
+| `./xit lua-compile <db.xit> <file.lua> <path>` | Compile `<file.lua>` to stripped `\x1bLJ` bytecode and store at `<path>` |

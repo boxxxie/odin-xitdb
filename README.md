@@ -248,7 +248,7 @@ compacted_db, _   := xitdb.database_compact(&db, &compacted_core)
 
 ## 5-Layer DSL & Datalog Engine (`xitdb/dsl.odin`)
 
-On top of the low-level cursor API, `xitdb` includes a zero-dependency 5-layer DSL that compiles down to `read_slot_pointer` and `[]Path_Part`. See [`DSL.md`](DSL.md) for the complete reference guide.
+On top of the low-level cursor API, `xitdb` includes a zero-dependency 5-layer DSL that compiles down to `read_slot_pointer` and `[]Path_Part`. See [`docs/DSL.md`](docs/DSL.md) for the complete reference guide.
 
 ### Layer 1: String Path Selectors & Combinators (`select_cursor`, `get_uint`, `read_steps_cursor`)
 
@@ -424,7 +424,7 @@ defer xitdb.datalog_result_destroy(&reach_res)
 
 ## Embedded LuaJIT 2.1 Client & Bytecode Workflows (`xitdb/lua.odin`)
 
-`xitdb` includes native LuaJIT 2.1 (`system:luajit-5.1`) userdata bindings so Lua scripts can directly open or attach to `xitdb.Database` instances, traverse cursors and collections, run Datomic-style transactions and Datalog queries, and compile/execute `\x1bLJ` LuaJIT bytecode stored inside `xitdb` slots:
+`xitdb` includes native LuaJIT 2.1 (`system:luajit-5.1`) userdata bindings so Lua scripts can directly open or attach to `xitdb.Database` instances, traverse cursors and collections, run Datomic-style transactions and Datalog queries, and compile/execute `\x1bLJ` LuaJIT bytecode stored inside `xitdb` slots. See [`docs/LUAJIT.md`](docs/LUAJIT.md) for the full Odin host and Lua userdata API reference.
 
 ```odin
 import "xitdb"
@@ -554,7 +554,11 @@ branch none {
 │       └── luajit.odin         # LuaJIT 2.1 C-API foreign bindings (system:luajit-5.1)
 ├── cmd/xit/
 │   └── main.odin               # Standalone CLI & interactive REPL for xitdb
-├── DSL.md                      # 5-Layer DSL, Datalog & CLI/REPL reference guide
+├── docs/
+│   ├── README.md               # Documentation index & architectural overview
+│   ├── CORE_API.md             # Storage cores, wire format, cursors, collections, compaction & replication
+│   ├── DSL.md                  # 5-Layer DSL, Datalog & CLI/REPL reference guide
+│   └── LUAJIT.md               # Embedded LuaJIT 2.1 host & Lua userdata API reference
 ├── tests/                      # 3-layer ATDD executable specification & unit test suite
 ├── benchmarks/                 # Throughput, latency & memory allocation benchmark suite (Odin, Zig, LuaJIT)
 └── reference/xitdb-zig/        # Upstream Zig reference submodule for feature parity & 1v1 benchmarks
@@ -566,4 +570,4 @@ branch none {
 odin test tests
 ```
 
-See [`DSL.md`](DSL.md), [`tests/README.md`](tests/README.md), and [`benchmarks/README.md`](benchmarks/README.md) for details on the DSL/Datalog reference, test architecture, and benchmark suite.
+See [`docs/README.md`](docs/README.md), [`docs/CORE_API.md`](docs/CORE_API.md), [`docs/DSL.md`](docs/DSL.md), [`docs/LUAJIT.md`](docs/LUAJIT.md), [`tests/README.md`](tests/README.md), and [`benchmarks/README.md`](benchmarks/README.md) for complete documentation on the core library, DSL/Datalog engine, LuaJIT client, test architecture, and benchmark suite.
