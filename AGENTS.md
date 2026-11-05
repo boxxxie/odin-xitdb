@@ -15,6 +15,7 @@ This document provides repository architecture, build/test commands, and develop
   * **`hamt.odin` & `btree.odin`**: 16-way HAMT, 16-way Radix Trie, count-augmented B-Tree, and B+Tree implementations.
   * **`compact_replicate.odin`**: Garbage-collecting compactor (`Memory_Offset_Map` / `File_Offset_Map`) and incremental byte-range replication.
   * **`dsl.odin`**: 5-layer DSL (Selectors, Datomic `Tx` & `transact_script`, `marshal`/`unmarshal`/`pull`, `diff_moments`/`history_of`, and Datalog engine).
+  * **`lua.odin` & `luajit/luajit.odin`**: Embedded LuaJIT 2.1 (`system:luajit-5.1`) userdata bindings, 5-layer DSL Lua bridge, and `\x1bLJ` bytecode compilation/storage.
 * **`cmd/xit/main.odin`** — Standalone CLI and interactive REPL binary.
 * **`tests/`** — 3-layer ATDD executable specification and unit test suite (`package xitdb_tests`).
 

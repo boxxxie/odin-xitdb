@@ -15,6 +15,7 @@ Unlike flat key-value stores that force you to serialize objects into opaque blo
 ## Why xitdb?
 
 * **Built-In 5-Layer DSL & Datalog Engine**: Query and mutate nested collections using string path selectors (`@-1.users["101"].age`), Datomic-style transactions with reified `__tx` metadata and change tracking, native Odin struct `marshal`/`unmarshal` tags, Datomic `pull` projections, $O(1)$ structural diffs (`diff_moments`, `history_of`), and a Datalog engine with automatic B+Tree prefix pushdown, grouped aggregations (`count`, `sum`, `min`, `max`), and cycle-safe transitive `reach`.
+* **Embedded LuaJIT 2.1 Client & Bytecode Workflows**: Full LuaJIT 2.1 userdata bindings (`xitdb/lua.odin` + `xitdb/luajit/luajit.odin`) expose databases, cursors, all 8 collection types, streaming `Cursor_Reader`/`Cursor_Writer`, compaction/replication, all 5 DSL layers, and `\x1bLJ` bytecode compilation/storage directly inside `xitdb`.
 * **True Time-Travel & Branching History**: Database state is modeled as an append-only list of immutable moments. Mutating a collection in a new transaction shares unchanged subtrees with prior moments and only writes modified paths.
 * **Fast Intra-Transaction In-Place Writes**: While historical moments are strictly immutable, nodes allocated *within* the active transaction are mutated in place until the transaction commits or is explicitly frozen.
 * **Rich Composable Collections**: Nest `Hash_Map`, `Counted_Hash_Map`, `Sorted_Map`, `Array_List`, `Linked_Array_List`, `Hash_Set`, `Counted_Hash_Set`, and `Sorted_Set` to arbitrary depth without manual serialization.
@@ -421,9 +422,67 @@ defer xitdb.datalog_result_destroy(&reach_res)
 
 ---
 
+## Embedded LuaJIT 2.1 Client & Bytecode Workflows (`xitdb/lua.odin`)
+
+`xitdb` includes native LuaJIT 2.1 (`system:luajit-5.1`) userdata bindings so Lua scripts can directly open or attach to `xitdb.Database` instances, traverse cursors and collections, run Datomic-style transactions and Datalog queries, and compile/execute `\x1bLJ` LuaJIT bytecode stored inside `xitdb` slots:
+
+```odin
+import "xitdb"
+import lua "xitdb/luajit"
+
+// 1. Create a LuaJIT 2.1 VM preloaded with `xitdb`, `jit`, `bit`, and `ffi`:
+L := xitdb.lua_new_state()
+defer lua.close(L)
+
+// 2. Bind an existing Odin Database as a Lua global (`db`) and execute Lua code:
+xitdb.lua_push_database(L, &db)
+lua.setglobal(L, "db")
+
+ok, err_msg := xitdb.lua_exec_string(L, `
+    -- Layer 2: Programmatic Tx with automatic B+Tree secondary index
+    local tx = db:tx_init(nil, true)
+    tx:doc("Seed users from LuaJIT")
+    tx:index_on("users", "username", "username->id")
+    tx:put('.users["u1"].username', "alice")
+    tx:put('.users["u1"].age', 31)
+    tx:commit()
+
+    -- Layer 3: Marshal & unmarshal Lua tables with sigil keys
+    local tx2 = db:tx_init(-1, false)
+    tx2:with_cursor(function(cursor)
+        local m = xitdb.write_hash_map(cursor)
+        m:put_cursor("profile"):marshal({
+            username = "alice",
+            ["bio,tag=md"] = "# Systems Engineer",
+            ["[[todos]]"]  = {"Ship LuaJIT bindings", "Run benchmarks"},
+            ["^tags"]      = {"odin", "xitdb", "luajit"},
+        })
+    end)
+    tx2:commit()
+
+    -- Layer 5: Datalog query with B+Tree prefix pushdown
+    local res = db:query_datalog([[
+        find ?id, ?name, ?age
+        where
+            $username->id[?name] = ?id
+            starts_with(?name, "al")
+            .users[?id].age = ?age
+    ]])
+    assert(#res.rows == 1 and res.rows[1]["?age"] == 31)
+
+    -- Compile Lua function to stripped LuaJIT (\x1bLJ) bytecode & store in xitdb
+    local bc = xitdb.compile_bytecode(function(x, y) return x * y + 7 end, true)
+    local fn = xitdb.load_bytecode(bc, "workflow_step")
+    assert(fn(5, 7) == 42)
+`)
+assert(ok, err_msg)
+```
+
+---
+
 ## CLI & Interactive REPL (`cmd/xit/main.odin`)
 
-`xitdb` ships with a standalone CLI and interactive REPL (`cmd/xit`) that exposes all 5 layers of the DSL plus database inspection and compaction:
+`xitdb` ships with a standalone CLI and interactive REPL (`cmd/xit`) that exposes all 5 layers of the DSL, LuaJIT execution/bytecode compilation, and database inspection and compaction:
 
 ```bash
 # Build the standalone binary
@@ -446,11 +505,16 @@ branch none {
 # 2. Run a Datalog aggregation query from the CLI
 ./xit query app.xit 'find ?dept, count(?id), sum(?age) where .users[?id].dept = ?dept .users[?id].age = ?age'
 
-# 3. Inspect moments, path selectors, pull projections, diffs, or launch the REPL
+# 3. Evaluate inline LuaJIT code, run a .lua script, or compile stripped LuaJIT bytecode into a slot
+./xit lua-eval    app.xit 'print(db:get_uint("@-1.users[\"101\"].age"))'
+./xit lua-run     app.xit workflow.lua
+./xit lua-compile app.xit workflow.lua '.workflows["wf_main"]'
+
+# 4. Inspect moments, path selectors, pull projections, diffs, or launch the REPL
 ./xit moments app.xit
 ./xit get     app.xit '@-1.users["101"].age'
 ./xit pull    app.xit '{users}'
-./xit app.xit          # or `./xit --memory` for an in-memory REPL
+./xit app.xit          # or `./xit --memory` for an in-memory REPL (supports `lua <code>` and `lua-load <file.lua>`)
 ```
 
 ---
@@ -484,12 +548,15 @@ branch none {
 │   ├── hamt.odin               # 16-way HAMT & Radix Trie implementation
 │   ├── btree.odin              # Count-augmented B-Tree & B+Tree implementation
 │   ├── compact_replicate.odin  # Garbage-collecting compactor & incremental log replication
-│   └── dsl.odin                # 5-layer DSL: Path selectors, Datomic Tx, marshal/pull, diff & Datalog
+│   ├── dsl.odin                # 5-layer DSL: Path selectors, Datomic Tx, marshal/pull, diff & Datalog
+│   ├── lua.odin                # Embedded LuaJIT 2.1 userdata client, DSL bridge & bytecode loader
+│   └── luajit/
+│       └── luajit.odin         # LuaJIT 2.1 C-API foreign bindings (system:luajit-5.1)
 ├── cmd/xit/
 │   └── main.odin               # Standalone CLI & interactive REPL for xitdb
 ├── DSL.md                      # 5-Layer DSL, Datalog & CLI/REPL reference guide
 ├── tests/                      # 3-layer ATDD executable specification & unit test suite
-├── benchmarks/                 # Throughput, latency & memory allocation benchmark suite
+├── benchmarks/                 # Throughput, latency & memory allocation benchmark suite (Odin, Zig, LuaJIT)
 └── reference/xitdb-zig/        # Upstream Zig reference submodule for feature parity & 1v1 benchmarks
 ```
 
