@@ -1223,6 +1223,22 @@ spec_corrupt_slot_tags_inflated_branch_counts_and_truncated_btree_nodes_are_reje
 	then_corrupt_slot_tags_inflated_branch_counts_and_truncated_btree_nodes_are_rejected(&ctx)
 }
 
+// ----------------------------------------------------------------------------
+// Scenario 36: Compactor & Buffered-File `max_size` / Out-of-Memory Allocation Guards
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_compactor_and_buffered_file_enforce_max_size_and_allocation_failure_guards :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
+
+	// THEN database_compact into a capped Core_Memory target, offset_map_put under a failing allocator,
+	// and Core_Buffered_File tail-buffer writes under max_size / allocation failure return deterministic
+	// errors instead of out-of-bounds panics or silent cap violations
+	then_compactor_and_buffered_file_enforce_max_size_and_allocation_failure_guards(&ctx)
+}
+
+
 
 
 

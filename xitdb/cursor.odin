@@ -813,6 +813,9 @@ cursor_iterator_sorted_from_index :: proc(unresolved_cursor: Read_Cursor, start_
 		level := &res.stack[res.stack_len]
 		if BTree_Node_Kind(kind_int) == .Leaf {
 			r := int(rem)
+			if r < 0 || r >= num {
+				return {}, .Invalid_BTree_Node
+			}
 			_fill_slot_block_from(cursor, position, r, num, level) or_return
 			res.stack_len += 1
 			break
@@ -1005,6 +1008,9 @@ cursor_iterator_linked_array_list_from_index :: proc(unresolved_cursor: Read_Cur
 		level := &res.stack[res.stack_len]
 		if BTree_Node_Kind(kind_int) == .Leaf {
 			r := int(rem)
+			if r < 0 || r >= num {
+				return {}, .Invalid_BTree_Node
+			}
 			_fill_slot_block_from(cursor, position, r, num, level) or_return
 			res.stack_len += 1
 			break

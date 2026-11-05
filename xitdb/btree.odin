@@ -202,8 +202,11 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (res: BTr
 			return {}, .Invalid_BTree_Node
 		}
 		if BTree_Node_Kind(kind_int) == .Leaf {
+			r := int(rank)
+			if r < 0 || r > num {
+				return {}, .Invalid_BTree_Node
+			}
 			if num < BTREE_SLOT_COUNT {
-				r := int(rank)
 				total := num + 1
 				val_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(r) * SLOT_LENGTH
 				empty_slot_bytes := slot_to_bytes(Slot{value = 0, tag = .None, full = true})
@@ -318,6 +321,9 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (res: BTr
 	switch node.kind {
 	case .Leaf:
 		r := int(rank)
+		if r < 0 || r > node.num {
+			return {}, .Invalid_BTree_Node
+		}
 		vals: [BTREE_SLOT_COUNT + 1]Slot
 		copy(vals[:r], node.values[:r])
 		vals[r] = Slot{value = 0, tag = .None, full = true}
@@ -451,6 +457,9 @@ btree_get_for_write :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (r
 	}
 	reusable := btree_reusable(db, node_ptr, frozen_at)
 	if BTree_Node_Kind(kind_int) == .Leaf {
+		if rank < 0 || rank >= i64(num) {
+			return {}, .Invalid_BTree_Node
+		}
 		if reusable {
 			val_pos := node_ptr + BTREE_NODE_HEADER_SIZE + rank * SLOT_LENGTH
 			core_seek_to(db.core, val_pos) or_return
@@ -536,6 +545,9 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		if BTree_Node_Kind(kind_int) == .Leaf {
 			r := int(rank)
+			if r < 0 || r >= num {
+				return {}, .Invalid_BTree_Node
+			}
 			total := num - 1
 			if is_root || total >= BTREE_SPLIT_COUNT {
 				entry_pos := position + i64(r) * SLOT_LENGTH
@@ -665,6 +677,9 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 	switch node.kind {
 	case .Leaf:
 		r := int(rank)
+		if r < 0 || r >= node.num {
+			return {}, .Invalid_BTree_Node
+		}
 		copy(node.values[r : node.num - 1], node.values[r + 1 : node.num])
 		node.num -= 1
 		node.values[node.num] = Slot{}
@@ -941,6 +956,9 @@ btree_split_right :: proc(db: ^Database, root_ptr, rank: i64) -> (res: i64, err:
 	node := read_btree_node(db, root_ptr) or_return
 	if node.kind == .Leaf {
 		r := int(rank)
+		if r < 0 || r > node.num {
+			return 0, .Invalid_BTree_Node
+		}
 		right := BTree_Node{kind = .Leaf, num = node.num - r}
 		copy(right.values[: node.num - r], node.values[r:node.num])
 		return write_btree_node(db, right)
@@ -970,6 +988,9 @@ btree_split_left :: proc(db: ^Database, root_ptr, rank: i64) -> (res: i64, err: 
 	node := read_btree_node(db, root_ptr) or_return
 	if node.kind == .Leaf {
 		r := int(rank)
+		if r < 0 || r > node.num {
+			return 0, .Invalid_BTree_Node
+		}
 		if r == node.num {
 			return root_ptr, nil
 		}
@@ -1002,6 +1023,9 @@ btree_split :: proc(db: ^Database, root_ptr, rank: i64) -> (res: BTree_Split_Res
 	node := read_btree_node(db, root_ptr) or_return
 	if node.kind == .Leaf {
 		r := int(rank)
+		if r < 0 || r > node.num {
+			return {}, .Invalid_BTree_Node
+		}
 		left := BTree_Node{kind = .Leaf, num = r}
 		copy(left.values[:r], node.values[:r])
 		right := BTree_Node{kind = .Leaf, num = node.num - r}

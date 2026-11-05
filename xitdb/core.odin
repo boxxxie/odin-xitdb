@@ -403,20 +403,24 @@ core_write_all :: proc(c: ^Core, p: []u8) -> Error {
 			_buffered_flush(&v) or_return
 			v.memory_pos = v.pos
 		}
-		if v.file_len == nil {
-			fl := os.file_size(v.file.file) or_return
-			v.file_len = fl
-		}
 		if v.pos >= v.memory_pos && v.pos - v.memory_pos + n <= v.memory_max_size {
+			fl: i64
+			if existing_fl, ok := v.file_len.?; ok {
+				fl = existing_fl
+			} else {
+				fl = os.file_size(v.file.file) or_return
+			}
 			rel_off := int(v.pos - v.memory_pos)
 			end_off := rel_off + len(p)
-			if end_off > len(v.memory.buf) {
-				resize(&v.memory.buf, end_off)
-			}
+			_memory_resize(&v.memory, end_off) or_return
+			v.file_len = fl
 			copy(v.memory.buf[rel_off:end_off], p)
 		} else {
 			if v.pos < v.memory_pos + i64(len(v.memory.buf)) && v.pos + n > v.memory_pos {
 				_buffered_flush(&v) or_return
+			}
+			if _, ok := v.file_len.?; !ok {
+				v.file_len = os.file_size(v.file.file) or_return
 			}
 			_buffered_write_to_file(&v, v.pos, p) or_return
 		}

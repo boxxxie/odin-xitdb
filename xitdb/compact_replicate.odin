@@ -41,11 +41,14 @@ memory_offset_map_destroy :: proc(m: ^Memory_Offset_Map) {
 }
 
 @(private)
-_memory_offset_map_grow :: proc(m: ^Memory_Offset_Map) {
+_memory_offset_map_grow :: proc(m: ^Memory_Offset_Map) -> Error {
 	old_entries := m.entries
 	new_cap := 128 if len(old_entries) == 0 else len(old_entries) * 2
 	alloc := m.allocator if m.allocator.procedure != nil else context.allocator
-	new_entries := make([]Memory_Offset_Entry, new_cap, alloc)
+	new_entries, alloc_err := make([]Memory_Offset_Entry, new_cap, alloc)
+	if alloc_err != nil {
+		return Xitdb_Error.Write_Failed
+	}
 	mask := new_cap - 1
 	#no_bounds_check for e in old_entries {
 		if e.key_plus_one != 0 {
@@ -61,6 +64,7 @@ _memory_offset_map_grow :: proc(m: ^Memory_Offset_Map) {
 		delete(old_entries, alloc)
 	}
 	m.entries = new_entries
+	return nil
 }
 
 file_offset_map_init :: proc(cursor: Write_Cursor) -> (res: File_Offset_Map, err: Error) {
@@ -137,7 +141,7 @@ offset_map_put :: #force_inline proc(om: ^Offset_Map, source_offset, target_offs
 	switch &m in om {
 	case Memory_Offset_Map:
 		if (m.count + 1) * 10 > len(m.entries) * 7 {
-			_memory_offset_map_grow(&m)
+			_memory_offset_map_grow(&m) or_return
 		}
 		kp1 := source_offset + 1
 		mask := len(m.entries) - 1
@@ -190,10 +194,17 @@ _compactor_reserve_block :: #force_inline proc(c: ^_Compactor, size: int) -> (re
 	case Core_Memory:
 		offset := i64(len(dst.buf))
 		new_len := int(offset) + size
-		if new_len > cap(dst.buf) {
-			reserve(&dst.buf, max(new_len, cap(dst.buf) * 2 + 4096))
+		if max_sz, ok := dst.max_size.?; ok && i64(new_len) > max_sz {
+			return 0, Xitdb_Error.Write_Failed
 		}
-		non_zero_resize(&dst.buf, new_len)
+		if new_len > cap(dst.buf) {
+			if alloc_err := reserve(&dst.buf, max(new_len, cap(dst.buf) * 2 + 4096)); alloc_err != nil {
+				return 0, Xitdb_Error.Write_Failed
+			}
+		}
+		if alloc_err := non_zero_resize(&dst.buf, new_len); alloc_err != nil {
+			return 0, Xitdb_Error.Write_Failed
+		}
 		dst.pos = i64(new_len)
 		return offset, nil
 	}
@@ -757,8 +768,11 @@ database_compact :: proc(db: ^Database, target_core: ^Core, offset_map: ^Offset_
 				want_cap = min(int(src_len), 65536)
 			}
 		}
+		if max_sz, ok := dst.max_size.?; ok && i64(want_cap) > max_sz {
+			want_cap = int(max(max_sz, 0))
+		}
 		if cap(dst.buf) < want_cap {
-			reserve(&dst.buf, want_cap)
+			_ = reserve(&dst.buf, want_cap)
 		}
 	}
 

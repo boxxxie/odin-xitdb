@@ -1,6 +1,8 @@
 package xitdb_tests
 
+import "base:runtime"
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import "core:slice"
 import "core:strings"
@@ -2569,6 +2571,16 @@ driver_verify_buffered_file_multi_handle_alternating_commits :: proc(ctx: ^Suite
 		pre_vals := read_all_on_handle(ctx.t, writer_db)
 		driver_assert_string_slice(ctx.t, pre_vals, commit_values[:idx])
 
+		// If `idx == 1`, simulate a failed first write on `reader_db` (`db1`) before `writer_db` (`db2`) commits,
+		// ensuring a failed buffered resize on `db1` never leaves a stale cached `file_len` that causes `.Truncated_Database`
+		if idx == 1 {
+			bf1 := &(&c1).(xitdb.Core_Buffered_File)
+			bf1.memory.max_size = 0
+			fail_st := Append_State{val = "should_fail"}
+			testing.expect_value(ctx.t, xitdb.database_run_context(&db1, append_cb, &fail_st), xitdb.Xitdb_Error.Write_Failed)
+			bf1.memory.max_size = nil
+		}
+
 		st := Append_State{val = val}
 		testing.expect_value(ctx.t, xitdb.database_run_context(writer_db, append_cb, &st), nil)
 
@@ -2668,13 +2680,42 @@ driver_verify_fast_path_corruption_and_truncation_guards :: proc(ctx: ^Suite_Ctx
 
 		_, ll_rem_err := xitdb.linked_array_list_get_cursor(ll, 10)
 		testing.expect_value(ctx.t, ll_rem_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
+		_, ll_iter_from_err := xitdb.linked_array_list_iterator_from(ll, 10)
+		testing.expect_value(ctx.t, ll_iter_from_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
+
+		LL_Write_Guard_State :: struct {
+			op: int,
+		}
+		ll_guard_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+			s := (^LL_Write_Guard_State)(user_data)
+			m := xitdb.write_hash_map_init(cursor^) or_return
+			wll_cur := xitdb.hash_map_put_cursor(&m, "ll") or_return
+			wll := xitdb.write_linked_array_list_init(wll_cur) or_return
+			switch s.op {
+			case 0:
+				return xitdb.linked_array_list_put(&wll, 10, "bad")
+			case 1:
+				return xitdb.linked_array_list_remove(&wll, 10)
+			case 2:
+				return xitdb.linked_array_list_insert(&wll, 10, "bad")
+			case 3:
+				return xitdb.linked_array_list_slice(&wll, 0, 10)
+			case 4:
+				return xitdb.linked_array_list_slice(&wll, 10, 5)
+			}
+			return nil
+		}
+		for op in 0 ..< 5 {
+			st_op := LL_Write_Guard_State{op = op}
+			testing.expect_value(ctx.t, xitdb.database_run_context(&db, ll_guard_cb, &st_op), xitdb.Xitdb_Error.Invalid_BTree_Node)
+		}
 
 		// Restore `ll` `counts[0]`
 		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, ll_counts0_pos), nil)
 		testing.expect_value(ctx.t, xitdb.core_write_i64(&core, orig_ll_cnt0), nil)
 
 		// 2. Corrupt `sm` branch `counts[0]` from 8 to 15 so `rank = 10` routes to child 0 (`num = 8`) with `rem = 10 >= num`:
-		// Verify `sorted_map_get_index_cursor(sm, 10)` returns `.Invalid_BTree_Node`
+		// Verify `sorted_map_get_index_cursor(sm, 10)` and `sorted_map_iterator_from_index(sm, 10)` return `.Invalid_BTree_Node`
 		sm_counts0_pos := sm_root_ptr + xitdb.BTREE_NODE_HEADER_SIZE + xitdb.SLOT_LENGTH * 2 * xitdb.BTREE_SLOT_COUNT
 		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, sm_counts0_pos), nil)
 		orig_sm_cnt0, _ := xitdb.core_read_i64(&core)
@@ -2683,6 +2724,8 @@ driver_verify_fast_path_corruption_and_truncation_guards :: proc(ctx: ^Suite_Ctx
 
 		_, sm_rem_err := xitdb.sorted_map_get_index_kv_pair(sm, 10)
 		testing.expect_value(ctx.t, sm_rem_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
+		_, sm_iter_from_err := xitdb.sorted_map_iterator_from_index(sm, 10)
+		testing.expect_value(ctx.t, sm_iter_from_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
 
 		// Restore `sm` `counts[0]`
 		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, sm_counts0_pos), nil)
@@ -2789,6 +2832,115 @@ driver_verify_fast_path_corruption_and_truncation_guards :: proc(ctx: ^Suite_Ctx
 		testing.expect_value(ctx.t, sm_trunc_err, xitdb.Xitdb_Error.Unexpected_EOF)
 	}
 }
+
+driver_verify_compactor_and_buffered_file_max_size_and_allocation_guards :: proc(ctx: ^Suite_Ctx) {
+	// 1. Seed an in-memory source database with a Hash_Map so `database_compact` reserves index/KV blocks
+	src_core: xitdb.Core = xitdb.core_memory_init()
+	defer _ = xitdb.core_destroy(&src_core)
+
+	src_db, init_err := xitdb.database_init(&src_core, xitdb.sha1_hasher())
+	testing.expect_value(ctx.t, init_err, nil)
+
+	Seed_State :: struct {}
+	seed_st := Seed_State{}
+	seed_cb :: proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		m := xitdb.write_hash_map_init(cursor^) or_return
+		for i in 0 ..< 16 {
+			k := fmt.tprintf("key_%02d", i)
+			v := fmt.tprintf("value_payload_%02d", i)
+			xitdb.hash_map_put(&m, k, v) or_return
+		}
+		return nil
+	}
+	testing.expect_value(ctx.t, xitdb.database_run_context(&src_db, seed_cb, &seed_st), nil)
+
+	// 1a. Target `Core_Memory` with `max_size` large enough for header + root_header (37B),
+	// but smaller than the compacted root `INDEX_BLOCK_SIZE` (144B):
+	// `_compactor_reserve_block` must enforce `max_size` and return `.Write_Failed`
+	dst_core: xitdb.Core = xitdb.core_memory_init()
+	defer _ = xitdb.core_destroy(&dst_core)
+	(&dst_core.(xitdb.Core_Memory)).max_size = 100
+
+	_, compact_max_err := xitdb.database_compact(&src_db, &dst_core)
+	testing.expect_value(ctx.t, compact_max_err, xitdb.Xitdb_Error.Write_Failed)
+	testing.expect(
+		ctx.t,
+		i64(len((&dst_core.(xitdb.Core_Memory)).buf)) <= 100,
+		"Expected target Core_Memory.buf length not to exceed max_size (100B)",
+	)
+
+	// 1b. Target `Core_Memory` backed by a tiny fixed `mem.Arena` (128B) that fails to allocate
+	// the compacted blocks in `_compactor_reserve_block`: must return `.Write_Failed` without panic
+	tiny_backing: [128]u8
+	tiny_arena: mem.Arena
+	mem.arena_init(&tiny_arena, tiny_backing[:])
+	tiny_alloc := mem.arena_allocator(&tiny_arena)
+
+	arena_dst_core: xitdb.Core = xitdb. Core_Memory{
+		buf       = make([dynamic]u8, 0, 64, tiny_alloc),
+		pos       = 0,
+		allocator = tiny_alloc,
+	}
+	_, compact_oom_err := xitdb.database_compact(&src_db, &arena_dst_core)
+	testing.expect_value(ctx.t, compact_oom_err, xitdb.Xitdb_Error.Write_Failed)
+
+	// 2. `Memory_Offset_Map` initialized with a failing allocator (`runtime.nil_allocator()`):
+	// `offset_map_put` must return `.Write_Failed` instead of dereferencing a nil `entries` slice
+	om: xitdb.Offset_Map = xitdb.memory_offset_map_init(runtime.nil_allocator())
+	defer xitdb.offset_map_destroy(&om)
+
+	om_err := xitdb.offset_map_put(&om, 64, 128)
+	testing.expect_value(ctx.t, om_err, xitdb.Xitdb_Error.Write_Failed)
+
+	// Also verify `offset_map_put` when initial allocation (128 entries = 2048B) succeeds,
+	// but the first 2x grow (256 entries = 4096B) fails on `Out_Of_Memory`
+	grow_backing: [2560]u8
+	grow_arena: mem.Arena
+	mem.arena_init(&grow_arena, grow_backing[:])
+	grow_om: xitdb.Offset_Map = xitdb.memory_offset_map_init(mem.arena_allocator(&grow_arena))
+	defer xitdb.offset_map_destroy(&grow_om)
+
+	grow_err: xitdb.Error
+	for i in 0 ..< 100 {
+		grow_err = xitdb.offset_map_put(&grow_om, i64(i * 16), i64(i * 16))
+		if grow_err != nil {
+			break
+		}
+	}
+	testing.expect_value(ctx.t, grow_err, xitdb.Xitdb_Error.Write_Failed)
+
+	// 3. `Core_Buffered_File` whose inner `memory` has a failing allocator / `max_size`:
+	// `core_write_all` into the tail buffer must return `.Write_Failed` instead of panicking on `copy`
+	bf_path := driver_temp_path(ctx.t, "bf_alloc_guard.xit")
+	defer _ = os.remove(bf_path)
+
+	bf_f, bf_open_err := os.open(bf_path, {.Read, .Write, .Create, .Trunc}, os.Permissions_Default_File)
+	testing.expect_value(ctx.t, bf_open_err, nil)
+
+	bf_backing: [64]u8
+	bf_arena: mem.Arena
+	mem.arena_init(&bf_arena, bf_backing[:])
+	bf_alloc := mem.arena_allocator(&bf_arena)
+
+	bf_core: xitdb.Core = xitdb.Core_Buffered_File{
+		memory = xitdb.Core_Memory{
+			buf       = make([dynamic]u8, 0, 16, bf_alloc),
+			pos       = 0,
+			allocator = bf_alloc,
+		},
+		memory_max_size = 4096,
+		memory_pos      = 0,
+		pos             = 0,
+		file            = xitdb.Core_File{file = bf_f, fsync = false},
+		file_len        = 0,
+	}
+	defer _ = os.close(bf_f)
+
+	large_write: [256]u8
+	bf_write_err := xitdb.core_write_all(&bf_core, large_write[:])
+	testing.expect_value(ctx.t, bf_write_err, xitdb.Xitdb_Error.Write_Failed)
+}
+
 
 
 

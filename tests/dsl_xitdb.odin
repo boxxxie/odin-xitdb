@@ -321,6 +321,11 @@ then_corrupt_slot_tags_inflated_branch_counts_and_truncated_btree_nodes_are_reje
 	driver_verify_fast_path_corruption_and_truncation_guards(ctx)
 }
 
+then_compactor_and_buffered_file_enforce_max_size_and_allocation_failure_guards :: proc(ctx: ^Suite_Ctx) {
+	driver_verify_compactor_and_buffered_file_max_size_and_allocation_guards(ctx)
+}
+
+
 
 
 
