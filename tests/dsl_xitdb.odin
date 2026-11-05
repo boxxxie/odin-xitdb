@@ -325,6 +325,33 @@ then_compactor_and_buffered_file_enforce_max_size_and_allocation_failure_guards 
 	driver_verify_compactor_and_buffered_file_max_size_and_allocation_guards(ctx)
 }
 
+// ----------------------------------------------------------------------------
+// Lua 5.4 Domain Steps
+// ----------------------------------------------------------------------------
+
+upon_executing_lua_script :: proc(ctx: ^Suite_Ctx, script: string) {
+	driver_exec_lua(ctx, script)
+}
+
+upon_compiling_and_storing_lua_bytecode :: proc(
+	ctx: ^Suite_Ctx,
+	base_moment: i64,
+	key: string,
+	lua_src: string,
+	strip_debug: bool = false,
+) {
+	driver_compile_and_store_lua_bytecode(ctx, base_moment, key, lua_src, strip_debug)
+}
+
+upon_executing_stored_lua_bytecode :: proc(ctx: ^Suite_Ctx, selector: string) {
+	driver_load_and_exec_stored_lua_bytecode(ctx, selector)
+}
+
+then_lua_assertion_passes :: proc(ctx: ^Suite_Ctx, script: string) {
+	driver_exec_lua(ctx, script)
+}
+
+
 
 
 

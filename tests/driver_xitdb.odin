@@ -7,6 +7,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:testing"
+import lua "../xitdb/luajit"
 import xitdb "../xitdb"
 
 // ============================================================================
@@ -31,6 +32,7 @@ Suite_Ctx :: struct {
 	compacted_core:  xitdb.Core,
 	compacted_db:    xitdb.Database,
 	has_compacted:   bool,
+	lua_state:       ^lua.State,
 	last_err:        xitdb.Error,
 	last_sync_start: i64,
 }
@@ -75,6 +77,10 @@ driver_init_ctx :: proc(t: ^testing.T, backend: Backend_Kind = .Memory) -> Suite
 }
 
 driver_destroy_ctx :: proc(ctx: ^Suite_Ctx) {
+	if ctx.lua_state != nil {
+		lua.close(ctx.lua_state)
+		ctx.lua_state = nil
+	}
 	if ctx.has_compacted {
 		_ = xitdb.core_destroy(&ctx.compacted_core, true)
 		ctx.has_compacted = false
@@ -2940,6 +2946,82 @@ driver_verify_compactor_and_buffered_file_max_size_and_allocation_guards :: proc
 	bf_write_err := xitdb.core_write_all(&bf_core, large_write[:])
 	testing.expect_value(ctx.t, bf_write_err, xitdb.Xitdb_Error.Write_Failed)
 }
+
+// ----------------------------------------------------------------------------
+// Lua 5.4 Runtime Driver Operations
+// ----------------------------------------------------------------------------
+
+driver_ensure_lua :: proc(ctx: ^Suite_Ctx) -> ^lua.State {
+	if ctx.lua_state == nil {
+		ctx.lua_state = xitdb.lua_new_state(&ctx.primary_db)
+		testing.expect(ctx.t, ctx.lua_state != nil, "Expected Lua 5.4 state to initialize")
+	}
+	return ctx.lua_state
+}
+
+driver_exec_lua :: proc(ctx: ^Suite_Ctx, script: string) {
+	L := driver_ensure_lua(ctx)
+	ok, err_msg := xitdb.lua_exec_string(L, script, "spec_lua")
+	if !ok {
+		testing.expectf(ctx.t, false, "Lua script execution failed: %s", err_msg)
+	}
+}
+
+driver_compile_and_store_lua_bytecode :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	map_key: string,
+	lua_src: string,
+	strip_debug: bool = false,
+) {
+	L := driver_ensure_lua(ctx)
+	bc, err_msg, ok := xitdb.lua_compile_bytecode(L, lua_src, map_key, strip_debug, context.temp_allocator)
+	if !ok {
+		testing.expectf(ctx.t, false, "Failed to compile Lua bytecode: %s", err_msg)
+		return
+	}
+	testing.expect(ctx.t, len(bc) > 3 && bc[0] == 0x1b && bc[1] == 'L' && bc[2] == 'J', "Expected valid LuaJIT 2.1 binary bytecode header (\\x1bLJ)")
+
+	base: Maybe(i64) = nil
+	if moment_idx >= 0 {
+		base = moment_idx
+	}
+	tx := xitdb.tx_init(&ctx.primary_db, base, false, context.allocator)
+	defer xitdb.tx_destroy(&tx)
+	p_err := xitdb.tx_put(&tx, fmt.tprintf(".%s", map_key), xitdb.new_tagged_bytes(bc, transmute([]u8)string("lu")))
+	testing.expect_value(ctx.t, p_err, nil)
+	rep, c_err := xitdb.tx_commit(&tx)
+	defer xitdb.tx_report_destroy(&rep, context.allocator)
+	testing.expect_value(ctx.t, c_err, nil)
+}
+
+driver_load_and_exec_stored_lua_bytecode :: proc(
+	ctx: ^Suite_Ctx,
+	selector: string,
+) {
+	L := driver_ensure_lua(ctx)
+	cur_maybe, s_err := xitdb.select_cursor(&ctx.primary_db, selector)
+	testing.expect_value(ctx.t, s_err, nil)
+	cur, has_cur := cur_maybe.?
+	testing.expect(ctx.t, has_cur, "Expected stored bytecode slot to exist")
+	if !has_cur do return
+
+	obj, r_err := xitdb.cursor_read_bytes_object(cur, 0, context.temp_allocator)
+	testing.expect_value(ctx.t, r_err, nil)
+	testing.expect_value(ctx.t, string(obj.format_tag), "lu")
+
+	err_msg, ok := xitdb.lua_load_bytecode(L, obj.value, selector)
+	if !ok {
+		testing.expectf(ctx.t, false, "Failed to load stored Lua bytecode: %s", err_msg)
+		return
+	}
+	if lua.Status(lua.pcall(L, 0, 0, 0)) != .OK {
+		l_err := lua.tostring(L, -1)
+		testing.expectf(ctx.t, false, "Stored Lua bytecode execution failed: %s", l_err)
+		lua.pop(L, 1)
+	}
+}
+
 
 
 
