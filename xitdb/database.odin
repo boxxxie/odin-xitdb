@@ -269,8 +269,7 @@ database_digest_string_buf :: proc(db: ^Database, s: string, buf: []u8) -> []u8 
 }
 
 database_read_and_validate_header :: proc(db: ^Database) -> (res: Header, err: Error) {
-	core_seek_to(db.core, 0) or_return
-	header := header_read(db.core) or_return
+	header := header_read_at(db.core, 0) or_return
 	header_validate(header) or_return
 	if db.hasher.hash_size != 0 && header.hash_size != db.hasher.hash_size {
 		return {}, .Invalid_Hash_Size
@@ -367,9 +366,8 @@ database_truncate :: proc(db: ^Database) -> Error {
 }
 
 database_read_root_header :: proc(db: ^Database) -> (res: Root_Header, err: Error) {
-	core_seek_to(db.core, ROOT_HEADER_START) or_return
 	b: [ROOT_HEADER_LENGTH]u8
-	core_read_exact(db.core, b[:]) or_return
+	core_read_exact_at(db.core, ROOT_HEADER_START, b[:]) or_return
 	header := root_header_from_bytes(b)
 	tag_validate(header.root.tag) or_return
 	return header, nil
@@ -385,9 +383,8 @@ database_read_root_trailer :: proc(db: ^Database, end: i64) -> (res: Root_Traile
 		return {}, .Invalid_Database
 	}
 	trailer_pos := end - ROOT_TRAILER_LENGTH
-	core_seek_to(db.core, trailer_pos) or_return
 	b: [ROOT_TRAILER_LENGTH]u8
-	core_read_exact(db.core, b[:]) or_return
+	core_read_exact_at(db.core, trailer_pos, b[:]) or_return
 	trailer := root_trailer_from_bytes(b)
 	if trailer.checksum != compute_root_trailer_checksum(db.header.file_id, trailer_pos, trailer.root, trailer.commit_id) {
 		return {}, .Invalid_Database
@@ -409,7 +406,8 @@ database_write_root_header :: proc(db: ^Database, root: Slot) -> Error {
 	file_size := core_length(db.core) or_return
 	core_seek_to(db.core, ROOT_HEADER_START) or_return
 	header := root_header_to_bytes(Root_Header{file_size = file_size, root = root})
-	return core_write_all(db.core, header[:])
+	core_write_all(db.core, header[:]) or_return
+	return core_flush(db.core)
 }
 
 is_root :: proc(slot_ptr: Slot_Pointer) -> bool {
@@ -472,8 +470,7 @@ database_copy_index_block_if_old :: proc(db: ^Database, ptr, frozen_at: i64) -> 
 		return ptr, nil
 	}
 	index_block: [INDEX_BLOCK_SIZE]u8
-	core_seek_to(db.core, ptr) or_return
-	core_read_exact(db.core, index_block[:]) or_return
+	core_read_exact_at(db.core, ptr, index_block[:]) or_return
 	next_ptr := core_length(db.core) or_return
 	core_seek_to(db.core, next_ptr) or_return
 	core_write_all(db.core, index_block[:]) or_return
@@ -603,8 +600,7 @@ read_slot_pointer :: proc(
 
 		result := read_slot_pointer(db, write_mode, path, path_i, root_ptr, frozen_at) or_return
 
-		core_seek_to(db.core, scratch_pos) or_return
-		next_root := core_read_slot_raw(db.core) or_return
+		next_root := core_read_slot_raw_at(db.core, scratch_pos) or_return
 		commit_id := _random_u64()
 		database_commit_root(db, next_root, commit_id) or_return
 
@@ -659,13 +655,11 @@ _exec_path_part :: proc(
 			array_list_start := slot_ptr.slot.value
 			old := database_is_old(db, array_list_start, frozen_at) or_return
 			if old {
-				core_seek_to(db.core, array_list_start) or_return
 				hb: [ARRAY_LIST_HEADER_LENGTH]u8
-				core_read_exact(db.core, hb[:]) or_return
+				core_read_exact_at(db.core, array_list_start, hb[:]) or_return
 				header := array_list_header_from_bytes(hb) or_return
-				core_seek_to(db.core, header.ptr) or_return
 				idx_block: [INDEX_BLOCK_SIZE]u8
-				core_read_exact(db.core, idx_block[:]) or_return
+				core_read_exact_at(db.core, header.ptr, idx_block[:]) or_return
 				new_start := core_length(db.core) or_return
 				core_seek_to(db.core, new_start) or_return
 				next_ptr := new_start + ARRAY_LIST_HEADER_LENGTH
@@ -700,9 +694,8 @@ _exec_path_part :: proc(
 		}
 		next_array_list_start := slot_ptr.slot.value
 		index := p.index
-		core_seek_to(db.core, next_array_list_start) or_return
 		hb: [ARRAY_LIST_HEADER_LENGTH]u8
-		core_read_exact(db.core, hb[:]) or_return
+		core_read_exact_at(db.core, next_array_list_start, hb[:]) or_return
 		header := array_list_header_from_bytes(hb) or_return
 		if index >= header.size || index < -header.size {
 			return {}, .Key_Not_Found
@@ -721,9 +714,8 @@ _exec_path_part :: proc(
 		}
 		slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Array_List_Init{}, frozen_at) or_return
 		next_array_list_start := slot_ptr.slot.value
-		core_seek_to(db.core, next_array_list_start) or_return
 		hb: [ARRAY_LIST_HEADER_LENGTH]u8
-		core_read_exact(db.core, hb[:]) or_return
+		core_read_exact_at(db.core, next_array_list_start, hb[:]) or_return
 		orig_header := array_list_header_from_bytes(hb) or_return
 		append_res := read_array_list_slot_append(db, orig_header, write_mode, frozen_at) or_return
 		core_seek_to(db.core, next_array_list_start) or_return
@@ -743,9 +735,8 @@ _exec_path_part :: proc(
 		}
 		slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Array_List_Init{}, frozen_at) or_return
 		next_array_list_start := slot_ptr.slot.value
-		core_seek_to(db.core, next_array_list_start) or_return
 		hb: [ARRAY_LIST_HEADER_LENGTH]u8
-		core_read_exact(db.core, hb[:]) or_return
+		core_read_exact_at(db.core, next_array_list_start, hb[:]) or_return
 		orig_header := array_list_header_from_bytes(hb) or_return
 		slice_header := read_array_list_slice(db, orig_header, p.size, frozen_at) or_return
 		core_seek_to(db.core, next_array_list_start) or_return
@@ -780,9 +771,8 @@ _exec_path_part :: proc(
 			header_ptr := slot_ptr.slot.value
 			old := database_is_old(db, header_ptr, frozen_at) or_return
 			if old {
-				core_seek_to(db.core, header_ptr) or_return
 				hb: [BTREE_HEADER_LENGTH]u8
-				core_read_exact(db.core, hb[:]) or_return
+				core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 				new_ptr := core_length(db.core) or_return
 				core_seek_to(db.core, new_ptr) or_return
 				core_write_all(db.core, hb[:]) or_return
@@ -813,9 +803,8 @@ _exec_path_part :: proc(
 			slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Linked_Array_List_Init{}, frozen_at) or_return
 		}
 		header_ptr := slot_ptr.slot.value
-		core_seek_to(db.core, header_ptr) or_return
 		hb: [BTREE_HEADER_LENGTH]u8
-		core_read_exact(db.core, hb[:]) or_return
+		core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
 		if index >= header.size || index < -header.size {
 			return {}, .Key_Not_Found
@@ -842,9 +831,8 @@ _exec_path_part :: proc(
 		}
 		slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Linked_Array_List_Init{}, frozen_at) or_return
 		header_ptr := slot_ptr.slot.value
-		core_seek_to(db.core, header_ptr) or_return
 		hb: [BTREE_HEADER_LENGTH]u8
-		core_read_exact(db.core, hb[:]) or_return
+		core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
 		res := btree_insert(db, header.root_ptr, header.size, frozen_at) or_return
 		new_root_ptr := btree_grow_root(db, res) or_return
@@ -862,9 +850,8 @@ _exec_path_part :: proc(
 		}
 		slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Linked_Array_List_Init{}, frozen_at) or_return
 		header_ptr := slot_ptr.slot.value
-		core_seek_to(db.core, header_ptr) or_return
 		hb: [BTREE_HEADER_LENGTH]u8
-		core_read_exact(db.core, hb[:]) or_return
+		core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
 		if p.offset < 0 || p.size < 0 || p.offset > header.size || p.size > header.size - p.offset {
 			return {}, .Key_Not_Found
@@ -894,14 +881,12 @@ _exec_path_part :: proc(
 		}
 		slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Linked_Array_List_Init{}, frozen_at) or_return
 		header_ptr := slot_ptr.slot.value
-		core_seek_to(db.core, header_ptr) or_return
 		hba: [BTREE_HEADER_LENGTH]u8
-		core_read_exact(db.core, hba[:]) or_return
+		core_read_exact_at(db.core, header_ptr, hba[:]) or_return
 		header_a := btree_header_from_bytes(hba) or_return
 
-		core_seek_to(db.core, p.list.value) or_return
 		hbb: [BTREE_HEADER_LENGTH]u8
-		core_read_exact(db.core, hbb[:]) or_return
+		core_read_exact_at(db.core, p.list.value, hbb[:]) or_return
 		header_b := btree_header_from_bytes(hbb) or_return
 
 		tx_s := core_length(db.core) or_return
@@ -921,9 +906,8 @@ _exec_path_part :: proc(
 		}
 		slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Linked_Array_List_Init{}, frozen_at) or_return
 		header_ptr := slot_ptr.slot.value
-		core_seek_to(db.core, header_ptr) or_return
 		hb: [BTREE_HEADER_LENGTH]u8
-		core_read_exact(db.core, hb[:]) or_return
+		core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
 		index := p.index
 		if index >= header.size || index < -header.size {
@@ -946,9 +930,8 @@ _exec_path_part :: proc(
 		}
 		slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Linked_Array_List_Init{}, frozen_at) or_return
 		header_ptr := slot_ptr.slot.value
-		core_seek_to(db.core, header_ptr) or_return
 		hb: [BTREE_HEADER_LENGTH]u8
-		core_read_exact(db.core, hb[:]) or_return
+		core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
 		index := p.index
 		if index >= header.size || index < -header.size {
@@ -1028,13 +1011,14 @@ _exec_path_part :: proc(
 			map_start := slot_ptr.slot.value
 			old := database_is_old(db, map_start, frozen_at) or_return
 			if old {
-				core_seek_to(db.core, map_start) or_return
 				map_count: i64 = 0
+				block_pos := map_start
 				if p.counted {
-					map_count = core_read_long(db.core) or_return
+					map_count = core_read_long_at(db.core, map_start) or_return
+					block_pos += 8
 				}
 				idx_block: [INDEX_BLOCK_SIZE]u8
-				core_read_exact(db.core, idx_block[:]) or_return
+				core_read_exact_at(db.core, block_pos, idx_block[:]) or_return
 				new_start := core_length(db.core) or_return
 				core_seek_to(db.core, new_start) or_return
 				if p.counted {
@@ -1074,8 +1058,7 @@ _exec_path_part :: proc(
 		key_hash := database_check_hash_target(db, p.target) or_return
 		res := read_map_slot(db, index_pos, key_hash, 0, write_mode, p.target, frozen_at) or_return
 		if write_mode == .Read_Write && counted && res.is_empty {
-			core_seek_to(db.core, slot_ptr.slot.value) or_return
-			map_count := core_read_long(db.core) or_return
+			map_count := core_read_long_at(db.core, slot_ptr.slot.value) or_return
 			core_seek_to(db.core, slot_ptr.slot.value) or_return
 			core_write_long(db.core, map_count + 1) or_return
 		}
@@ -1113,8 +1096,7 @@ _exec_path_part :: proc(
 			}
 		}
 		if write_mode == .Read_Write && counted && key_found {
-			core_seek_to(db.core, slot_ptr.slot.value) or_return
-			map_count := core_read_long(db.core) or_return
+			map_count := core_read_long_at(db.core, slot_ptr.slot.value) or_return
 			core_seek_to(db.core, slot_ptr.slot.value) or_return
 			core_write_long(db.core, map_count - 1) or_return
 		}
@@ -1151,9 +1133,8 @@ _exec_path_part :: proc(
 			header_ptr := slot_ptr.slot.value
 			old := database_is_old(db, header_ptr, frozen_at) or_return
 			if old {
-				core_seek_to(db.core, header_ptr) or_return
 				hb: [BTREE_HEADER_LENGTH]u8
-				core_read_exact(db.core, hb[:]) or_return
+				core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 				new_ptr := core_length(db.core) or_return
 				core_seek_to(db.core, new_ptr) or_return
 				core_write_all(db.core, hb[:]) or_return
@@ -1192,9 +1173,8 @@ _exec_path_part :: proc(
 			slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Sorted_Map_Init{set = slot_ptr.slot.tag == .Sorted_Set}, frozen_at) or_return
 		}
 		header_ptr := slot_ptr.slot.value
-		core_seek_to(db.core, header_ptr) or_return
 		hb: [BTREE_HEADER_LENGTH]u8
-		core_read_exact(db.core, hb[:]) or_return
+		core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
 
 		if write_mode == .Read_Only {
@@ -1242,9 +1222,8 @@ _exec_path_part :: proc(
 			return {}, .Unexpected_Tag
 		}
 		header_ptr := slot_ptr.slot.value
-		core_seek_to(db.core, header_ptr) or_return
 		hb: [BTREE_HEADER_LENGTH]u8
-		core_read_exact(db.core, hb[:]) or_return
+		core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
 		index := p.index
 		if index >= header.size || index < -header.size {
@@ -1268,9 +1247,8 @@ _exec_path_part :: proc(
 		}
 		slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Sorted_Map_Init{set = slot_ptr.slot.tag == .Sorted_Set}, frozen_at) or_return
 		header_ptr := slot_ptr.slot.value
-		core_seek_to(db.core, header_ptr) or_return
 		hb: [BTREE_HEADER_LENGTH]u8
-		core_read_exact(db.core, hb[:]) or_return
+		core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
 		res := sorted_remove(db, header.root_ptr, p.key, frozen_at) or_return
 		if !res.found {

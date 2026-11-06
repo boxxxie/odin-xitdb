@@ -22,7 +22,9 @@ Unlike flat key-value stores that force you to serialize objects into opaque blo
 * **Crash-Safe Without a WAL**: Transactions commit by writing a `Root_Trailer` (verified by a `CRC-64/XZ` checksum over the file ID, offset, root slot, and commit ID) followed by updating the `Root_Header`. Unfinished writes from a power loss or crash are ignored on open and automatically truncated on the next write.
 * **Incremental Log Replication**: Sync a primary database to replicas by streaming only the committed byte range since the replica's last verified trailer checksum.
 * **Garbage-Collecting Compaction**: Prune old moments and compact the database into a fresh file or memory buffer using an in-memory or disk-backed offset map. Shared subtrees (DAGs) and even cyclic references are preserved.
-* **Performance-Tuned Odin Implementation**:
+* **Performance-Tuned & Lock-Free Odin Implementation**:
+  * **Stateless Positional Reads (`core_read_at`)**: All read cursors, iterators, `Cursor_Reader` streams, Datalog queries, and compactor/replication readers use stateless positional I/O (`os.read_at` / `pread` on files, direct slice indexing in memory) without mutating shared seek positions—allowing any number of worker threads or actors to read a shared `^Database` and pause/resume `{moment_slot, cursor_slot}` or B+Tree keys in parallel.
+  * **Stable Virtual Memory Backing (`vmem.reserve`)**: `Core_Memory` reserves a contiguous virtual address range (`1 GiB` on 64-bit via `core:mem/virtual`) and commits physical pages on demand as the database grows, guaranteeing `raw_data(buf)` never moves while concurrent readers access committed snapshots during writer appends.
   * Automatic x86 SHA-NI hardware acceleration for SHA-1 and SHA-256 (with runtime CPUID detection and pure-Odin fallback).
   * Zero-allocation tree traversal via stack-allocated `Cursor_Iterator` and caller-supplied buffer reads (`cursor_read_bytes_buf`).
   * Inline `Short_Bytes` slot encoding—strings and byte slices $\le 8$ bytes (or $\le 6$ bytes with a 2-byte format tag) are stored directly inside the 9-byte `Slot` with zero heap/disk indirection.
@@ -523,9 +525,9 @@ branch none {
 
 ### Storage Cores (`xitdb/core.odin`)
 
-* **`Core_Memory`**: Dynamic in-memory byte buffer (`core_memory_init`, `core_memory_from_bytes`). Ideal for tests, caches, or embedded snapshots.
-* **`Core_Buffered_File`**: OS file handle paired with a contiguous in-memory tail write buffer (`core_buffered_file_open`, default $2\text{ MiB}$). Minimizes syscalls during deep tree updates while writing header commits directly.
-* **`Core_File`**: Direct unbuffered OS file I/O (`core_file_open`). Multiple independent read-only handles can safely read from the same file concurrently.
+* **`Core_Memory`**: Virtual-memory-backed in-memory byte buffer (`core_memory_init`, `core_memory_init_from_bytes`). Reserves a fixed virtual address range (`DEFAULT_VMEM_RESERVE_SIZE`, 1 GiB on 64-bit) via `vmem.reserve` and commits pages on demand so `raw_data(buf)` never moves across growth, enabling lock-free concurrent readers alongside a writer.
+* **`Core_Buffered_File`**: OS file handle paired with a contiguous in-memory tail write buffer (`core_buffered_file_open`, default $2\text{ MiB}$). Flushes on root commit so all committed moments are served via stateless `os.read_at`.
+* **`Core_File`**: Direct unbuffered OS file I/O (`core_file_open`). Uses stateless `os.read_at` (`pread`) so multiple threads can safely share a single `^Database` handle concurrently.
 
 ### Hashers (`xitdb/types.odin`)
 

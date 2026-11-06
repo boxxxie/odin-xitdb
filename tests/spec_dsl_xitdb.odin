@@ -492,3 +492,82 @@ spec_dsl_error_guards_savepoint_survival_and_counted_collections :: proc(t: ^tes
 	testing.expect_value(t, reparsed[2].kind, xitdb.Step_Kind.Counted_Hash_Map_Key)
 	testing.expect_value(t, reparsed[3].index, i64(2))
 }
+
+@(test)
+spec_concurrent_dsl_selectors_pull_diff_and_datalog_queries :: proc(t: ^testing.T) {
+	for backend in Backend_Kind {
+		ctx := driver_init_ctx(t)
+		defer driver_destroy_ctx(&ctx)
+
+		// GIVEN a database on Memory, File, or Buffered_File with 2 moments committed via `transact_script`
+		given_database_initialized_with(&ctx, backend)
+		upon_transacting_dsl_script(&ctx, `
+			branch none {
+				doc "Moment 0 seed"
+				meta "author" = "alice"
+				put .users["u1"].name = "Alice"
+				put .users["u1"].dept = "eng"
+				put .users["u1"].age  = 30u
+				put .users["u2"].name = "Bob"
+				put .users["u2"].dept = "eng"
+				put .users["u2"].age  = 25u
+				put .users["u3"].name = "Carol"
+				put .users["u3"].dept = "design"
+				put .users["u3"].age  = 28u
+				put $catalog["item-a"] = "Alpha"
+				put $catalog["item-b"] = "Beta"
+				put #counters["reqs"] = 100u
+				put .org["Bob"].manager = "Alice"
+				put .org["Carol"].manager = "Bob"
+			}
+		`)
+		upon_transacting_dsl_script(&ctx, `
+			branch @-1 {
+				doc "Moment 1 update"
+				meta "author" = "bob"
+				put .users["u1"].age  = 31u
+				put .users["u2"].age  = 26u
+				put $catalog["item-c"] = "Gamma"
+				put #counters["reqs"] = 250u
+			}
+		`)
+
+		// THEN 8 worker threads can simultaneously execute selector lookups, diff_moments / history_of
+		// temporal queries, and Datalog joins/aggregations/reach queries across moments without seek interference
+		then_concurrent_dsl_workers_observe_consistent_snapshots(
+			&ctx,
+			worker_count = 8,
+			expect = DSL_Concurrent_Expectations{
+				uint_selectors = []Key_Uint{
+					{`@0.users["u1"].age`, 30},
+					{`@1.users["u1"].age`, 31},
+					{`@1#counters["reqs"]`, 250},
+				},
+				string_selectors = []Key_Value{
+					{`@0.__tx.author`, "alice"},
+					{`@1.__tx.author`, "bob"},
+					{`@1$catalog["item-b"]`, "Beta"},
+					{`@1$catalog["item-c"]`, "Gamma"},
+				},
+				expected_min_diffs       = 2,
+				history_path             = `.users["u1"].age`,
+				expected_history_moments = 2,
+				datalog_agg_query = `
+					find ?dept, count(?u), sum(?age)
+					where
+						@1.users[?u].dept = ?dept
+						@1.users[?u].age = ?age
+				`,
+				expected_agg_rows = 2,
+				datalog_reach_query = `
+					find ?mgr, ?hops
+					where
+						?emp == "Carol"
+						reach(?emp, ?mgr, ?hops, @1.org[?emp].manager = ?mgr)
+				`,
+				expected_reach_ancestors = []string{"Bob", "Alice"},
+			},
+			sentinel_pos = 999999,
+		)
+	}
+}

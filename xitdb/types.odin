@@ -977,6 +977,12 @@ header_read :: proc(r: ^Core) -> (h: Header, err: Error) {
 	return header_from_bytes(buf), nil
 }
 
+header_read_at :: proc(r: ^Core, pos: i64 = 0) -> (h: Header, err: Error) {
+	buf: [HEADER_LENGTH]u8
+	core_read_exact_at(r, pos, buf[:]) or_return
+	return header_from_bytes(buf), nil
+}
+
 header_write :: proc(h: Header, w: ^Core) -> Error {
 	buf := header_to_bytes(h)
 	return core_write_all(w, buf[:])
@@ -1195,6 +1201,56 @@ kv_pair_read_buf :: proc(c: ^Core, hash_buf: []u8) -> (kv: Key_Value_Pair, err: 
 	stack_buf: [128]u8 = ---
 	b := stack_buf[:kv_len] if kv_len <= len(stack_buf) else make([]u8, kv_len, context.temp_allocator)
 	core_read_exact(c, b) or_return
+	copy(hash_buf, b[:hash_size])
+	key_slot := slot_from_slice_raw(b[hash_size : hash_size + SLOT_LENGTH])
+	tag_validate(key_slot.tag) or_return
+	val_slot := slot_from_slice_raw(b[hash_size + SLOT_LENGTH : hash_size + SLOT_LENGTH * 2])
+	tag_validate(val_slot.tag) or_return
+	return Key_Value_Pair{value_slot = val_slot, key_slot = key_slot, hash = hash_buf}, nil
+}
+
+decode_kv_pair_at :: proc(c: ^Core, pos: i64, tag: Tag, hash_size: int, allocator := context.allocator) -> (kv: Key_Value_Pair, err: Error) {
+	#partial switch tag {
+	case .KV_Pair:
+		kv_len := kv_pair_length(hash_size)
+		if kv_len <= 128 {
+			stack_buf: [128]u8 = ---
+			b := stack_buf[:kv_len]
+			core_read_exact_at(c, pos, b) or_return
+			kv = kv_pair_from_bytes(b, hash_size, allocator)
+		} else {
+			b := make([]u8, kv_len, context.temp_allocator)
+			core_read_exact_at(c, pos, b) or_return
+			kv = kv_pair_from_bytes(b, hash_size, allocator)
+		}
+	case .Sorted_KV_Pair:
+		b: [SORTED_KEY_VALUE_LEN]u8 = ---
+		core_read_exact_at(c, pos, b[:]) or_return
+		kv = kv_pair_from_bytes(b[:], 0, allocator)
+	case:
+		return {}, .Unexpected_Tag
+	}
+	if err := tag_validate(kv.key_slot.tag); err != nil {
+		if kv.hash != nil {
+			delete(kv.hash, allocator)
+		}
+		return {}, err
+	}
+	if err := tag_validate(kv.value_slot.tag); err != nil {
+		if kv.hash != nil {
+			delete(kv.hash, allocator)
+		}
+		return {}, err
+	}
+	return kv, nil
+}
+
+kv_pair_read_buf_at :: proc(c: ^Core, pos: i64, hash_buf: []u8) -> (kv: Key_Value_Pair, err: Error) {
+	hash_size := len(hash_buf)
+	kv_len := kv_pair_length(hash_size)
+	stack_buf: [128]u8 = ---
+	b := stack_buf[:kv_len] if kv_len <= len(stack_buf) else make([]u8, kv_len, context.temp_allocator)
+	core_read_exact_at(c, pos, b) or_return
 	copy(hash_buf, b[:hash_size])
 	key_slot := slot_from_slice_raw(b[hash_size : hash_size + SLOT_LENGTH])
 	tag_validate(key_slot.tag) or_return

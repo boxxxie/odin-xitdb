@@ -32,8 +32,7 @@ read_map_slot :: proc(
 
 		i := hamt_nibble(key_hash, key_offset)
 		slot_pos := index_pos + i64(SLOT_LENGTH * i)
-		core_seek_to(db.core, slot_pos) or_return
-		slot := core_read_slot_raw(db.core) or_return
+		slot := core_read_slot_raw_at(db.core, slot_pos) or_return
 		ptr := slot.value
 
 		#partial switch slot.tag {
@@ -115,9 +114,8 @@ read_map_slot :: proc(
 				copy(hash_buf, kv_slice[:hash_size])
 				kv_pair = Key_Value_Pair{value_slot = val_slot, key_slot = key_slot, hash = hash_buf}
 			} else {
-				core_seek_to(db.core, ptr) or_return
 				hash_buf := stack_hash[:hash_size] if hash_size <= len(stack_hash) else make([]u8, hash_size, context.temp_allocator)
-				kv_pair = kv_pair_read_buf(db.core, hash_buf) or_return
+				kv_pair = kv_pair_read_buf_at(db.core, ptr, hash_buf) or_return
 				hash_matches = bytes.equal(kv_pair.hash, key_hash)
 			}
 
@@ -252,8 +250,7 @@ remove_map_slot :: proc(
 
 	i := hamt_nibble(key_hash, key_offset)
 	slot_pos := index_pos + i64(SLOT_LENGTH * i)
-	core_seek_to(db.core, slot_pos) or_return
-	slot := core_read_slot_raw(db.core) or_return
+	slot := core_read_slot_raw_at(db.core, slot_pos) or_return
 
 	next_slot: Slot
 	#partial switch slot.tag {
@@ -274,10 +271,9 @@ remove_map_slot :: proc(
 				return {}, .Key_Not_Found
 			}
 		} else {
-			core_seek_to(db.core, slot.value) or_return
 			stack_hash: [64]u8 = ---
 			hash_buf := stack_hash[:hash_size] if hash_size <= len(stack_hash) else make([]u8, hash_size, context.temp_allocator)
-			kv_pair := kv_pair_read_buf(db.core, hash_buf) or_return
+			kv_pair := kv_pair_read_buf_at(db.core, slot.value, hash_buf) or_return
 			if !bytes.equal(kv_pair.hash, key_hash) {
 				return {}, .Key_Not_Found
 			}
@@ -303,9 +299,8 @@ remove_map_slot :: proc(
 	}
 
 	// Otherwise, read the index block to check if it can collapse into a single KV_Pair or None
-	core_seek_to(db.core, index_pos) or_return
 	index_block: [INDEX_BLOCK_SIZE]u8 = ---
-	core_read_exact(db.core, index_block[:]) or_return
+	core_read_exact_at(db.core, index_pos, index_block[:]) or_return
 
 	slot_to_return: Maybe(Slot) = Slot{}
 	for j in 0 ..< SLOT_COUNT {
@@ -402,8 +397,7 @@ read_array_list_slot :: proc(
 	for {
 		i := (key >> (u64(shift) * BIT_COUNT)) & i64(MASK)
 		slot_pos := index_pos + i64(SLOT_LENGTH) * i
-		core_seek_to(db.core, slot_pos) or_return
-		slot := core_read_slot(db.core) or_return
+		slot := core_read_slot_at(db.core, slot_pos) or_return
 
 		if shift == 0 {
 			return Slot_Pointer{position = slot_pos, slot = slot}, nil
@@ -474,8 +468,7 @@ read_array_list_slice :: proc(
 	shift := prev_shift
 	index_pos := header.ptr
 	for shift > next_shift {
-		core_seek_to(db.core, index_pos) or_return
-		slot := core_read_slot(db.core) or_return
+		slot := core_read_slot_at(db.core, index_pos) or_return
 		shift -= 1
 		index_pos = slot.value
 	}

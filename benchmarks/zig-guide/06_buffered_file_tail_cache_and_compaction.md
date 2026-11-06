@@ -27,10 +27,11 @@
 >    - Handle 1's `readRootHeader()` reads offset `20..37` from its own **stale `memory.buffer`** (seeing Transaction 1's root instead of Transaction 2's root!).
 >    - Handle 1's `core.length()` returns its stale cached `file_len = L1` (or truncates the file back to `L1`!), **overwriting Transaction 2 at `L1`** so a fresh open sees `1 3` instead of `1 2 3`!
 >
-> **Required Invariant (Enforced in Both Upstream Zig and Odin [`xitdb/core.odin#L144-L152`](../../xitdb/core.odin#L144-L152)):**
+> **Required Invariant (Enforced in Both Upstream Zig and Odin [`xitdb/core.odin#L186-L195`](../../xitdb/core.odin#L186-L195)):**
 > - `flush()` **must** clear `self.file_len = null` and `self.memory.buffer.clearRetainingCapacity()`.
 > - `length()` and `setLength()` must never cache `file_len` outside an active write window (`file_len` is only cached while buffering uncommitted writes in `Writer.drain` / `core_write_all` and cleared on `flush()`).
-> - Tested in [`spec_buffered_file_multi_handle_alternating_commits_preserve_all_moments`](../../tests/spec_xitdb.odin#L1197-L1210).
+> - `writeRootHeader` **must** call `self.core.flush()` (`database_write_root_header` in Odin) so the 17-byte `RootHeader` (`[20..37)`) is flushed to the underlying file descriptor at commit time rather than remaining dirty in `CoreBufferedFile.memory`, ensuring stateless positional `pread` / `os.read_at` readers and multi-handle readers with `fsync = false` always observe committed moments.
+> - Tested in [`spec_buffered_file_multi_handle_alternating_commits_preserve_all_moments`](../../tests/spec_xitdb.odin#L1197-L1210) and [`spec_concurrent_compaction_and_replication_with_parallel_readers`](../../tests/spec_xitdb.odin#L1318-L1334).
 
 
 ---

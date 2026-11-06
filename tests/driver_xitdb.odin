@@ -1,5 +1,6 @@
 package xitdb_tests
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
@@ -7,6 +8,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:testing"
+import "core:thread"
 import lua "../xitdb/luajit"
 import xitdb "../xitdb"
 
@@ -35,6 +37,8 @@ Suite_Ctx :: struct {
 	lua_state:       ^lua.State,
 	last_err:        xitdb.Error,
 	last_sync_start: i64,
+	vmem_base_ptr:   rawptr,
+	sentinel_pos:    i64,
 }
 
 Backend_Kind :: enum {
@@ -3020,6 +3024,896 @@ driver_load_and_exec_stored_lua_bytecode :: proc(
 		testing.expectf(ctx.t, false, "Stored Lua bytecode execution failed: %s", l_err)
 		lua.pop(L, 1)
 	}
+}
+
+@(private)
+_Concurrent_Populate_State :: struct {
+	item_count:  int,
+	moment_id:   int,
+	big_payload: []u8,
+}
+
+@(private)
+_concurrent_populate_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+	st := (^_Concurrent_Populate_State)(user_data)
+	root := xitdb.write_hash_map_init(cursor^) or_return
+
+	hm_cur := xitdb.hash_map_put_cursor(&root, "hm") or_return
+	hm := xitdb.write_counted_hash_map_init(hm_cur) or_return
+
+	al_cur := xitdb.hash_map_put_cursor(&root, "al") or_return
+	al := xitdb.write_array_list_init(al_cur) or_return
+
+	ll_cur := xitdb.hash_map_put_cursor(&root, "ll") or_return
+	ll := xitdb.write_linked_array_list_init(ll_cur) or_return
+
+	sm_cur := xitdb.hash_map_put_cursor(&root, "sm") or_return
+	sm := xitdb.write_sorted_map_init(sm_cur) or_return
+
+	for i in 0 ..< st.item_count {
+		k := fmt.tprintf("key-%04d", i)
+		v := fmt.tprintf("val-m%d-%04d", st.moment_id, i)
+		xitdb.hash_map_put(&hm, k, v) or_return
+		xitdb.array_list_append(&al, v) or_return
+		xitdb.linked_array_list_append(&ll, v) or_return
+		xitdb.sorted_map_put(&sm, k, v) or_return
+	}
+
+	xitdb.hash_map_put(&root, "stream", xitdb.new_bytes(st.big_payload)) or_return
+	return nil
+}
+
+driver_populate_concurrent_read_fixture :: proc(ctx: ^Suite_Ctx, item_count: int) {
+	big_payload := make([]u8, 8192, context.temp_allocator)
+	for i in 0 ..< len(big_payload) {
+		big_payload[i] = u8((i * 31 + 17) & 0xFF)
+	}
+	st := _Concurrent_Populate_State{
+		item_count  = item_count,
+		moment_id   = 0,
+		big_payload = big_payload,
+	}
+
+	rc := xitdb.database_root_cursor(&ctx.primary_db)
+	history, h_err := xitdb.write_array_list_init(rc)
+	testing.expect_value(ctx.t, h_err, nil)
+	testing.expect_value(ctx.t, xitdb.array_list_append_context(&history, xitdb.Slot{}, _concurrent_populate_cb, &st), nil)
+}
+
+@(private)
+_Concurrent_Reader_Task :: struct {
+	db:              ^xitdb.Database,
+	moment_slot:     xitdb.Slot,
+	hm_slot:         xitdb.Slot,
+	al_slot:         xitdb.Slot,
+	ll_slot:         xitdb.Slot,
+	sm_slot:         xitdb.Slot,
+	stream_slot:     xitdb.Slot,
+	resume_sm_key:   string,
+	resume_al_idx:   i64,
+	item_count:      int,
+	worker_id:       int,
+	expected_stream: []u8,
+	failed:          bool,
+	err_msg:         string,
+}
+
+@(private)
+_concurrent_reader_worker :: proc(t_handle: ^thread.Thread) {
+	defer free_all(context.temp_allocator)
+	task := (^_Concurrent_Reader_Task)(t_handle.data)
+
+	for round in 0 ..< 12 {
+		free_all(context.temp_allocator)
+
+		// 1. Reconstruct read cursors purely from value-type {db, Slot}
+		hm, hm_err := xitdb.read_counted_hash_map_init(xitdb.Read_Cursor{db = task.db, slot_ptr = xitdb.Slot_Pointer{slot = task.hm_slot}})
+		if hm_err != nil {
+			task.failed = true
+			return
+		}
+		al, al_err := xitdb.read_array_list_init(xitdb.Read_Cursor{db = task.db, slot_ptr = xitdb.Slot_Pointer{slot = task.al_slot}})
+		if al_err != nil {
+			task.failed = true
+			return
+		}
+		ll, ll_err := xitdb.read_linked_array_list_init(xitdb.Read_Cursor{db = task.db, slot_ptr = xitdb.Slot_Pointer{slot = task.ll_slot}})
+		if ll_err != nil {
+			task.failed = true
+			return
+		}
+		sm, sm_err := xitdb.read_sorted_map_init(xitdb.Read_Cursor{db = task.db, slot_ptr = xitdb.Slot_Pointer{slot = task.sm_slot}})
+		if sm_err != nil {
+			task.failed = true
+			return
+		}
+
+		// 2. Point lookups across HAMT, Radix Trie, B-Tree, and B+Tree in worker-specific order
+		for step in 0 ..< task.item_count {
+			idx := (step * 7 + task.worker_id * 13 + round * 5) % task.item_count
+			k := fmt.tprintf("key-%04d", idx)
+			expected_v := fmt.tprintf("val-m0-%04d", idx)
+
+			hm_c_maybe, e1 := xitdb.hash_map_get_cursor(hm, k)
+			if e1 != nil {
+				task.failed = true
+				return
+			}
+			hm_c, ok1 := hm_c_maybe.?
+			if !ok1 {
+				task.failed = true
+				return
+			}
+			v1, e1b := xitdb.cursor_read_bytes(hm_c, 0, context.temp_allocator)
+			if e1b != nil || string(v1) != expected_v {
+				task.failed = true
+				return
+			}
+
+			al_c_maybe, e2 := xitdb.array_list_get_cursor(al, i64(idx))
+			if e2 != nil {
+				task.failed = true
+				return
+			}
+			al_c, ok2 := al_c_maybe.?
+			if !ok2 {
+				task.failed = true
+				return
+			}
+			v2, e2b := xitdb.cursor_read_bytes(al_c, 0, context.temp_allocator)
+			if e2b != nil || string(v2) != expected_v {
+				task.failed = true
+				return
+			}
+
+			ll_c_maybe, e3 := xitdb.linked_array_list_get_cursor(ll, i64(idx))
+			if e3 != nil {
+				task.failed = true
+				return
+			}
+			ll_c, ok3 := ll_c_maybe.?
+			if !ok3 {
+				task.failed = true
+				return
+			}
+			v3, e3b := xitdb.cursor_read_bytes(ll_c, 0, context.temp_allocator)
+			if e3b != nil || string(v3) != expected_v {
+				task.failed = true
+				return
+			}
+
+			sm_c_maybe, e4 := xitdb.sorted_map_get_cursor(sm, k)
+			if e4 != nil {
+				task.failed = true
+				return
+			}
+			sm_c, ok4 := sm_c_maybe.?
+			if !ok4 {
+				task.failed = true
+				return
+			}
+			v4, e4b := xitdb.cursor_read_bytes(sm_c, 0, context.temp_allocator)
+			if e4b != nil || string(v4) != expected_v {
+				task.failed = true
+				return
+			}
+		}
+
+		// 3. Resume B+Tree Sorted_Map iterator from a serialized key paused on the main thread
+		sm_iter, sm_it_err := xitdb.sorted_map_iterator_from_string(sm, task.resume_sm_key)
+		if sm_it_err != nil {
+			task.failed = true
+			return
+		}
+		resumed_sm_count := 0
+		for {
+			elem_maybe, n_err := xitdb.cursor_iterator_next(&sm_iter)
+			if n_err != nil {
+				task.failed = true
+				return
+			}
+			elem, has_elem := elem_maybe.?
+			if !has_elem {
+				break
+			}
+			key_cur, _, kv_err := xitdb.cursor_read_kv_pair_slots(elem)
+			if kv_err != nil {
+				task.failed = true
+				return
+			}
+			k_bytes, k_err := xitdb.cursor_read_bytes(key_cur, 0, context.temp_allocator)
+			if k_err != nil || string(k_bytes) < task.resume_sm_key {
+				task.failed = true
+				return
+			}
+			resumed_sm_count += 1
+		}
+		expected_rem := task.item_count - int(task.resume_al_idx)
+		if resumed_sm_count != expected_rem {
+			task.failed = true
+			return
+		}
+
+		// 4. Resume Array_List and Linked_Array_List iterators from a paused index
+		al_iter, al_it_err := xitdb.array_list_iterator_from(al, task.resume_al_idx)
+		if al_it_err != nil {
+			task.failed = true
+			return
+		}
+		al_rem := 0
+		for {
+			elem_maybe, n_err := xitdb.cursor_iterator_next(&al_iter)
+			if n_err != nil {
+				task.failed = true
+				return
+			}
+			if _, ok := elem_maybe.?; !ok {
+				break
+			}
+			al_rem += 1
+		}
+		if al_rem != expected_rem {
+			task.failed = true
+			return
+		}
+
+		// 5. Stream bytes via Cursor_Reader in small chunks concurrently
+		stream_cur := xitdb.Read_Cursor{db = task.db, slot_ptr = xitdb.Slot_Pointer{slot = task.stream_slot}}
+		reader, r_err := xitdb.cursor_reader(stream_cur)
+		if r_err != nil {
+			task.failed = true
+			return
+		}
+		chunk: [257]u8
+		read_total := 0
+		for read_total < len(task.expected_stream) {
+			n, c_err := xitdb.cursor_reader_read(&reader, chunk[:])
+			if c_err != nil || n <= 0 {
+				task.failed = true
+				return
+			}
+			if !slice.equal(chunk[:n], task.expected_stream[read_total : read_total + n]) {
+				task.failed = true
+				return
+			}
+			read_total += n
+		}
+	}
+}
+
+driver_set_core_sentinel_pos :: proc(ctx: ^Suite_Ctx, sentinel_pos: i64) {
+	ctx.sentinel_pos = sentinel_pos
+	testing.expect_value(ctx.t, xitdb.core_seek_to(&ctx.primary_core, sentinel_pos), nil)
+}
+
+driver_assert_core_sentinel_pos_unchanged :: proc(ctx: ^Suite_Ctx, expected_pos: i64) {
+	#partial switch &v in ctx.primary_core {
+	case xitdb.Core_Memory:
+		testing.expect_value(ctx.t, v.pos, expected_pos)
+	case xitdb.Core_Buffered_File:
+		testing.expect_value(ctx.t, v.pos, expected_pos)
+	}
+}
+
+driver_record_vmem_base_pointer :: proc(ctx: ^Suite_Ctx) {
+	mem_core := &ctx.primary_core.(xitdb.Core_Memory)
+	testing.expect(ctx.t, mem_core.vmem_reserved > 0, "Expected Core_Memory to have positive vmem_reserved")
+	base_ptr := raw_data(mem_core.buf)
+	testing.expect(ctx.t, base_ptr != nil, "Expected non-nil vmem base pointer")
+	ctx.vmem_base_ptr = base_ptr
+}
+
+driver_assert_vmem_base_pointer_unchanged :: proc(ctx: ^Suite_Ctx) {
+	mem_core := &ctx.primary_core.(xitdb.Core_Memory)
+	testing.expect_value(ctx.t, rawptr(raw_data(mem_core.buf)), ctx.vmem_base_ptr)
+}
+
+driver_verify_concurrent_readers_and_resumable_cursors :: proc(
+	ctx: ^Suite_Ctx,
+	worker_count: int,
+	item_count: int,
+	pause_at_key: string,
+	expected_remaining_keys: int,
+	pause_at_index: i64,
+	expected_remaining_items: int,
+) {
+	rc := xitdb.database_root_cursor(&ctx.primary_db)
+	history, h_err := xitdb.read_array_list_init(rc.read_cursor)
+	testing.expect_value(ctx.t, h_err, nil)
+
+	m0_cur_maybe, m0_err := xitdb.array_list_get_cursor(history, 0)
+	testing.expect_value(ctx.t, m0_err, nil)
+	m0_cur, has_m0 := m0_cur_maybe.?
+	testing.expect(ctx.t, has_m0, "Expected moment 0 cursor")
+	if !has_m0 do return
+
+	m0_slot, _ := xitdb.cursor_slot(m0_cur)
+	m0_map, _ := xitdb.read_hash_map_init(m0_cur)
+	hm_slot_maybe, _ := xitdb.hash_map_get_slot(m0_map, "hm")
+	al_slot_maybe, _ := xitdb.hash_map_get_slot(m0_map, "al")
+	ll_slot_maybe, _ := xitdb.hash_map_get_slot(m0_map, "ll")
+	sm_slot_maybe, _ := xitdb.hash_map_get_slot(m0_map, "sm")
+	stream_slot_maybe, _ := xitdb.hash_map_get_slot(m0_map, "stream")
+
+	// Start a B+Tree Sorted_Map iterator on the main thread, advance to `pause_at_index`, and verify its key matches `pause_at_key`
+	// so worker threads can resume from that serialized key in parallel.
+	sm_cur := xitdb.Read_Cursor{db = &ctx.primary_db, slot_ptr = xitdb.Slot_Pointer{slot = sm_slot_maybe.?}}
+	sm, _ := xitdb.read_sorted_map_init(sm_cur)
+	sm_it, _ := xitdb.sorted_map_iterator(sm)
+	paused_key: string
+	for i in 0 ..= int(pause_at_index) {
+		elem_maybe, _ := xitdb.cursor_iterator_next(&sm_it)
+		elem := elem_maybe.?
+		if i == int(pause_at_index) {
+			key_cur, _, _ := xitdb.cursor_read_kv_pair_slots(elem)
+			k_bytes, _ := xitdb.cursor_read_bytes(key_cur, 0, context.temp_allocator)
+			paused_key = strings.clone(string(k_bytes), context.temp_allocator)
+		}
+	}
+	testing.expect_value(ctx.t, paused_key, pause_at_key)
+	testing.expect_value(ctx.t, item_count - int(pause_at_index), expected_remaining_keys)
+	testing.expect_value(ctx.t, item_count - int(pause_at_index), expected_remaining_items)
+
+	expected_stream := make([]u8, 8192, context.temp_allocator)
+	for i in 0 ..< len(expected_stream) {
+		expected_stream[i] = u8((i * 31 + 17) & 0xFF)
+	}
+
+	tasks := make([]_Concurrent_Reader_Task, worker_count, context.temp_allocator)
+	threads := make([]^thread.Thread, worker_count, context.temp_allocator)
+
+	for w in 0 ..< worker_count {
+		tasks[w] = _Concurrent_Reader_Task{
+			db              = &ctx.primary_db,
+			moment_slot     = m0_slot,
+			hm_slot         = hm_slot_maybe.?,
+			al_slot         = al_slot_maybe.?,
+			ll_slot         = ll_slot_maybe.?,
+			sm_slot         = sm_slot_maybe.?,
+			stream_slot     = stream_slot_maybe.?,
+			resume_sm_key   = paused_key,
+			resume_al_idx   = pause_at_index,
+			item_count      = item_count,
+			worker_id       = w,
+			expected_stream = expected_stream,
+		}
+		threads[w] = thread.create(_concurrent_reader_worker)
+		threads[w].data = &tasks[w]
+		thread.start(threads[w])
+	}
+
+	for w in 0 ..< worker_count {
+		thread.join(threads[w])
+		thread.destroy(threads[w])
+		testing.expectf(ctx.t, !tasks[w].failed, "Concurrent reader worker %d failed on backend %v", w, ctx.backend_kind)
+	}
+}
+
+@(private)
+_Vmem_Shared_State :: struct {
+	db:               ^xitdb.Database,
+	item_count:       int,
+	latest_moment_id: int,
+	latest_slot_val:  i64,
+	latest_slot_tag:  u8,
+	latest_slot_full: bool,
+	writer_done:      bool,
+}
+
+@(private)
+_Vmem_Reader_Worker :: struct {
+	shared:    ^_Vmem_Shared_State,
+	worker_id: int,
+	reads_ok:  int,
+	failed:    bool,
+}
+
+@(private)
+_vmem_concurrent_reader_proc :: proc(t_handle: ^thread.Thread) {
+	defer free_all(context.temp_allocator)
+	w := (^_Vmem_Reader_Worker)(t_handle.data)
+	shared := w.shared
+
+	for {
+		done := intrinsics.atomic_load(&shared.writer_done)
+		m_id := intrinsics.atomic_load(&shared.latest_moment_id)
+		s_val := intrinsics.atomic_load(&shared.latest_slot_val)
+		s_tag := intrinsics.atomic_load(&shared.latest_slot_tag)
+		s_full := intrinsics.atomic_load(&shared.latest_slot_full)
+
+		if s_val > 0 {
+			free_all(context.temp_allocator)
+			m_slot := xitdb.Slot{
+				value = s_val,
+				tag   = xitdb.Tag(s_tag),
+				full  = s_full,
+			}
+			m_cur := xitdb.Read_Cursor{db = shared.db, slot_ptr = xitdb.Slot_Pointer{slot = m_slot}}
+			m_map, err1 := xitdb.read_hash_map_init(m_cur)
+			if err1 != nil {
+				w.failed = true
+				return
+			}
+			hm_cur_maybe, err2 := xitdb.hash_map_get_cursor(m_map, "hm")
+			if err2 != nil {
+				w.failed = true
+				return
+			}
+			hm_cur, has_hm := hm_cur_maybe.?
+			if !has_hm {
+				w.failed = true
+				return
+			}
+			hm, err3 := xitdb.read_counted_hash_map_init(hm_cur)
+			if err3 != nil {
+				w.failed = true
+				return
+			}
+
+			// Verify several keys from this snapshot
+			for step in 0 ..< 8 {
+				idx := (step * 5 + w.worker_id * 3 + w.reads_ok) % shared.item_count
+				k := fmt.tprintf("key-%04d", idx)
+				val_cur_maybe, err4 := xitdb.hash_map_get_cursor(hm, k)
+				if err4 != nil {
+					w.failed = true
+					return
+				}
+				val_cur, has_val := val_cur_maybe.?
+				if !has_val {
+					w.failed = true
+					return
+				}
+				val_bytes, err5 := xitdb.cursor_read_bytes(val_cur, 0, context.temp_allocator)
+				if err5 != nil {
+					w.failed = true
+					return
+				}
+				// Value must start with "val-m" and end with "-%04d"
+				expected_suffix := fmt.tprintf("-%04d", idx)
+				if !strings.has_prefix(string(val_bytes), "val-m") || !strings.has_suffix(string(val_bytes), expected_suffix) {
+					w.failed = true
+					return
+				}
+			}
+			w.reads_ok += 1
+		}
+
+		if done && w.reads_ok > 0 {
+			break
+		}
+	}
+}
+
+driver_verify_vmem_base_pointer_stability_under_concurrent_appends :: proc(ctx: ^Suite_Ctx, reader_count: int, append_moments: int, item_count: int) {
+	initial_bytes := xitdb.core_memory_bytes(&ctx.primary_core)
+	initial_base_ptr := raw_data(initial_bytes)
+	initial_len := len(initial_bytes)
+	testing.expect(ctx.t, initial_base_ptr != nil, "Expected non-nil vmem base pointer")
+
+	mem_core := &ctx.primary_core.(xitdb.Core_Memory)
+	testing.expect(ctx.t, mem_core.vmem_reserved >= xitdb.DEFAULT_VMEM_RESERVE_SIZE, "Expected Core_Memory to have vmem_reserved >= DEFAULT_VMEM_RESERVE_SIZE")
+
+	rc := xitdb.database_root_cursor(&ctx.primary_db)
+	r_history, _ := xitdb.read_array_list_init(rc.read_cursor)
+	m0_slot_maybe, _ := xitdb.array_list_get_slot(r_history, 0)
+	m0_slot := m0_slot_maybe.?
+
+	shared := _Vmem_Shared_State{
+		db               = &ctx.primary_db,
+		item_count       = item_count,
+		latest_moment_id = 0,
+		latest_slot_val  = m0_slot.value,
+		latest_slot_tag  = u8(m0_slot.tag),
+		latest_slot_full = m0_slot.full,
+		writer_done      = false,
+	}
+
+	workers := make([]_Vmem_Reader_Worker, reader_count, context.temp_allocator)
+	threads := make([]^thread.Thread, reader_count, context.temp_allocator)
+	for r in 0 ..< reader_count {
+		workers[r] = _Vmem_Reader_Worker{
+			shared    = &shared,
+			worker_id = r,
+		}
+		threads[r] = thread.create(_vmem_concurrent_reader_proc)
+		threads[r].data = &workers[r]
+		thread.start(threads[r])
+	}
+
+	// Writer loop on main thread: append `append_moments` moments with 32 KiB payloads to force multiple page commits
+	big_payload := make([]u8, 32768, context.temp_allocator)
+	for i in 0 ..< len(big_payload) {
+		big_payload[i] = u8((i * 19 + 7) & 0xFF)
+	}
+
+	for m in 1 ..= append_moments {
+		st := _Concurrent_Populate_State{
+			item_count  = item_count,
+			moment_id   = m,
+			big_payload = big_payload,
+		}
+		w_rc := xitdb.database_root_cursor(&ctx.primary_db)
+		w_history, w_err := xitdb.write_array_list_init(w_rc)
+		testing.expect_value(ctx.t, w_err, nil)
+		testing.expect_value(ctx.t, xitdb.array_list_append_context(&w_history, xitdb.Slot{}, _concurrent_populate_cb, &st), nil)
+
+		// Verify base pointer never moved after growth
+		cur_bytes := xitdb.core_memory_bytes(&ctx.primary_core)
+		testing.expect_value(ctx.t, raw_data(cur_bytes), initial_base_ptr)
+
+		// Publish the newly committed moment slot to concurrent readers
+		latest_slot_maybe, _ := xitdb.array_list_get_slot(w_history.read_array_list, -1)
+		if latest_slot, ok := latest_slot_maybe.?; ok {
+			intrinsics.atomic_store(&shared.latest_slot_tag, u8(latest_slot.tag))
+			intrinsics.atomic_store(&shared.latest_slot_full, latest_slot.full)
+			intrinsics.atomic_store(&shared.latest_slot_val, latest_slot.value)
+			intrinsics.atomic_store(&shared.latest_moment_id, m)
+		}
+	}
+
+	intrinsics.atomic_store(&shared.writer_done, true)
+
+	for r in 0 ..< reader_count {
+		thread.join(threads[r])
+		thread.destroy(threads[r])
+		testing.expectf(ctx.t, !workers[r].failed, "Concurrent vmem reader %d failed during writer appends", r)
+		testing.expect(ctx.t, workers[r].reads_ok > 0, "Expected concurrent vmem reader to complete at least 1 read cycle")
+	}
+
+	final_bytes := xitdb.core_memory_bytes(&ctx.primary_core)
+	testing.expect_value(ctx.t, raw_data(final_bytes), initial_base_ptr)
+	testing.expect(ctx.t, len(final_bytes) > initial_len + append_moments * 32768, "Expected database size to grow across multiple megabytes")
+}
+
+@(private)
+_Compaction_Worker_Task :: struct {
+	db:          ^xitdb.Database,
+	item_count:  int,
+	worker_kind: int, // 0 = compactor, 1 = replicator
+	failed:      bool,
+}
+
+@(private)
+_compaction_or_replication_worker :: proc(t_handle: ^thread.Thread) {
+	defer free_all(context.temp_allocator)
+	task := (^_Compaction_Worker_Task)(t_handle.data)
+
+	for round in 0 ..< 4 {
+		free_all(context.temp_allocator)
+		if task.worker_kind == 0 {
+			// Run database_compact into a fresh Core_Memory target
+			dst_core := xitdb.core_memory_init()
+			defer _ = xitdb.core_destroy(&dst_core)
+
+			compacted_db, c_err := xitdb.database_compact(task.db, &dst_core)
+			if c_err != nil {
+				task.failed = true
+				return
+			}
+			// Verify compacted database has all expected items
+			rc := xitdb.database_root_cursor(&compacted_db)
+			hist, e1 := xitdb.read_array_list_init(rc.read_cursor)
+			if e1 != nil {
+				task.failed = true
+				return
+			}
+			m_cur_maybe, e2 := xitdb.array_list_get_cursor(hist, -1)
+			if e2 != nil {
+				task.failed = true
+				return
+			}
+			m_cur, ok := m_cur_maybe.?
+			if !ok {
+				task.failed = true
+				return
+			}
+			m_map, e3 := xitdb.read_hash_map_init(m_cur)
+			if e3 != nil {
+				task.failed = true
+				return
+			}
+			sm_cur_maybe, e4 := xitdb.hash_map_get_cursor(m_map, "sm")
+			if e4 != nil {
+				task.failed = true
+				return
+			}
+			sm, e5 := xitdb.read_sorted_map_init(sm_cur_maybe.?)
+			if e5 != nil {
+				task.failed = true
+				return
+			}
+			cnt, e6 := xitdb.sorted_map_count(sm)
+			if e6 != nil || cnt != i64(task.item_count) {
+				task.failed = true
+				return
+			}
+		} else {
+			// Run database_read_committed_bytes and database_apply_replicated into a replica Core_Memory
+			committed_sz, sz_err := xitdb.database_committed_size(task.db)
+			if sz_err != nil || committed_sz <= 0 {
+				task.failed = true
+				return
+			}
+			raw_bytes, r_err := xitdb.database_read_committed_bytes(task.db, 0, committed_sz, context.temp_allocator)
+			if r_err != nil || i64(len(raw_bytes)) != committed_sz {
+				task.failed = true
+				return
+			}
+			src_core := xitdb.core_memory_init_from_bytes(raw_bytes)
+			defer _ = xitdb.core_destroy(&src_core)
+
+			rep_core := xitdb.core_memory_init()
+			defer _ = xitdb.core_destroy(&rep_core)
+			rep_db, init_err := xitdb.database_init(&rep_core, xitdb.sha1_hasher())
+			if init_err != nil {
+				task.failed = true
+				return
+			}
+			if app_err := xitdb.database_apply_replicated(&rep_db, 0, &src_core, committed_sz); app_err != nil {
+				task.failed = true
+				return
+			}
+			rc := xitdb.database_root_cursor(&rep_db)
+			hist, e1 := xitdb.read_array_list_init(rc.read_cursor)
+			if e1 != nil {
+				task.failed = true
+				return
+			}
+			cnt, e2 := xitdb.array_list_count(hist)
+			if e2 != nil || cnt < 2 {
+				task.failed = true
+				return
+			}
+		}
+	}
+}
+
+driver_verify_concurrent_compaction_and_replication_with_readers :: proc(ctx: ^Suite_Ctx, reader_count: int, item_count: int) {
+	// Append a second moment so compaction and replication exercise multi-moment histories
+	big_payload := make([]u8, 8192, context.temp_allocator)
+	for i in 0 ..< len(big_payload) {
+		big_payload[i] = u8((i * 31 + 17) & 0xFF)
+	}
+	st1 := _Concurrent_Populate_State{
+		item_count  = item_count,
+		moment_id   = 1,
+		big_payload = big_payload,
+	}
+	rc := xitdb.database_root_cursor(&ctx.primary_db)
+	w_hist, _ := xitdb.write_array_list_init(rc)
+	testing.expect_value(ctx.t, xitdb.array_list_append_context(&w_hist, xitdb.Slot{}, _concurrent_populate_cb, &st1), nil)
+
+	// Prepare reader tasks on moment 0 while compaction + replication threads run concurrently
+	history, _ := xitdb.read_array_list_init(w_hist.read_array_list.cursor)
+	m0_cur_maybe, _ := xitdb.array_list_get_cursor(history, 0)
+	m0_cur := m0_cur_maybe.?
+	m0_slot, _ := xitdb.cursor_slot(m0_cur)
+	m0_map, _ := xitdb.read_hash_map_init(m0_cur)
+	hm_slot_maybe, _ := xitdb.hash_map_get_slot(m0_map, "hm")
+	al_slot_maybe, _ := xitdb.hash_map_get_slot(m0_map, "al")
+	ll_slot_maybe, _ := xitdb.hash_map_get_slot(m0_map, "ll")
+	sm_slot_maybe, _ := xitdb.hash_map_get_slot(m0_map, "sm")
+	stream_slot_maybe, _ := xitdb.hash_map_get_slot(m0_map, "stream")
+
+	pause_idx := item_count / 2
+	paused_key := fmt.tprintf("key-%04d", pause_idx)
+
+	reader_tasks := make([]_Concurrent_Reader_Task, reader_count, context.temp_allocator)
+	reader_threads := make([]^thread.Thread, reader_count, context.temp_allocator)
+	for w in 0 ..< reader_count {
+		reader_tasks[w] = _Concurrent_Reader_Task{
+			db              = &ctx.primary_db,
+			moment_slot     = m0_slot,
+			hm_slot         = hm_slot_maybe.?,
+			al_slot         = al_slot_maybe.?,
+			ll_slot         = ll_slot_maybe.?,
+			sm_slot         = sm_slot_maybe.?,
+			stream_slot     = stream_slot_maybe.?,
+			resume_sm_key   = paused_key,
+			resume_al_idx   = i64(pause_idx),
+			item_count      = item_count,
+			worker_id       = w,
+			expected_stream = big_payload,
+		}
+		reader_threads[w] = thread.create(_concurrent_reader_worker)
+		reader_threads[w].data = &reader_tasks[w]
+		thread.start(reader_threads[w])
+	}
+
+	bg_tasks: [2]_Compaction_Worker_Task
+	bg_threads: [2]^thread.Thread
+	for k in 0 ..< 2 {
+		bg_tasks[k] = _Compaction_Worker_Task{
+			db          = &ctx.primary_db,
+			item_count  = item_count,
+			worker_kind = k,
+		}
+		bg_threads[k] = thread.create(_compaction_or_replication_worker)
+		bg_threads[k].data = &bg_tasks[k]
+		thread.start(bg_threads[k])
+	}
+
+	for w in 0 ..< reader_count {
+		thread.join(reader_threads[w])
+		thread.destroy(reader_threads[w])
+		testing.expectf(ctx.t, !reader_tasks[w].failed, "Reader worker %d failed during concurrent compaction/replication on %v", w, ctx.backend_kind)
+	}
+	for k in 0 ..< 2 {
+		thread.join(bg_threads[k])
+		thread.destroy(bg_threads[k])
+		testing.expectf(ctx.t, !bg_tasks[k].failed, "Background compactor/replicator %d failed on %v", k, ctx.backend_kind)
+	}
+}
+
+DSL_Concurrent_Expectations :: struct {
+	uint_selectors:           []Key_Uint,
+	string_selectors:         []Key_Value,
+	expected_min_diffs:       int,
+	history_path:             string,
+	expected_history_moments: int,
+	datalog_agg_query:        string,
+	expected_agg_rows:        int,
+	datalog_reach_query:      string,
+	expected_reach_ancestors: []string,
+}
+
+driver_transact_dsl_script :: proc(ctx: ^Suite_Ctx, script: string) {
+	_, err := xitdb.transact_script(&ctx.primary_db, script)
+	testing.expect_value(ctx.t, err, nil)
+}
+
+@(private)
+_DSL_Worker_Task :: struct {
+	db:        ^xitdb.Database,
+	expect:    ^DSL_Concurrent_Expectations,
+	worker_id: int,
+	failed:    bool,
+}
+
+@(private)
+_concurrent_dsl_worker :: proc(t_handle: ^thread.Thread) {
+	defer free_all(context.temp_allocator)
+	task := (^_DSL_Worker_Task)(t_handle.data)
+	exp := task.expect
+
+	for round in 0 ..< 8 {
+		free_all(context.temp_allocator)
+
+		// 1. Selector queries across moments
+		for chk in exp.uint_selectors {
+			actual_u, u_err := xitdb.get_uint(task.db, chk.key)
+			if u_err != nil || actual_u != chk.val {
+				task.failed = true
+				return
+			}
+		}
+		for chk in exp.string_selectors {
+			actual_s, s_err := xitdb.get_string(task.db, chk.key, context.temp_allocator)
+			if s_err != nil || actual_s != chk.val {
+				task.failed = true
+				return
+			}
+		}
+
+		// 2. diff_moments & history_of
+		diffs, d_err := xitdb.diff_moments(task.db, 0, 1, false, context.temp_allocator)
+		if d_err != nil || len(diffs) < exp.expected_min_diffs {
+			task.failed = true
+			return
+		}
+		hist, h_err := xitdb.history_of(task.db, exp.history_path, context.temp_allocator)
+		if h_err != nil || len(hist) != exp.expected_history_moments {
+			task.failed = true
+			return
+		}
+
+		// 3. Datalog join + aggregation + transitive reach
+		q_res, q_err := xitdb.query_datalog(task.db, exp.datalog_agg_query, -1, context.temp_allocator)
+		if q_err != nil || len(q_res.rows) != exp.expected_agg_rows {
+			task.failed = true
+			return
+		}
+
+		reach_res, r_err := xitdb.query_datalog(task.db, exp.datalog_reach_query, -1, context.temp_allocator)
+		if r_err != nil || len(reach_res.rows) != len(exp.expected_reach_ancestors) {
+			task.failed = true
+			return
+		}
+		ancestors := xitdb.datalog_column_strings(reach_res, "?mgr", context.temp_allocator)
+		if len(ancestors) != len(exp.expected_reach_ancestors) {
+			task.failed = true
+			return
+		}
+		for i in 0 ..< len(ancestors) {
+			if ancestors[i] != exp.expected_reach_ancestors[i] {
+				task.failed = true
+				return
+			}
+		}
+	}
+}
+
+driver_verify_concurrent_dsl_queries :: proc(ctx: ^Suite_Ctx, worker_count: int, expect: DSL_Concurrent_Expectations) {
+	exp := expect
+	tasks := make([]_DSL_Worker_Task, worker_count, context.temp_allocator)
+	threads := make([]^thread.Thread, worker_count, context.temp_allocator)
+
+	for w in 0 ..< worker_count {
+		tasks[w] = _DSL_Worker_Task{
+			db        = &ctx.primary_db,
+			expect    = &exp,
+			worker_id = w,
+		}
+		threads[w] = thread.create(_concurrent_dsl_worker)
+		threads[w].data = &tasks[w]
+		thread.start(threads[w])
+	}
+
+	for w in 0 ..< worker_count {
+		thread.join(threads[w])
+		thread.destroy(threads[w])
+		testing.expectf(ctx.t, !tasks[w].failed, "Concurrent DSL worker %d failed on backend %v", w, ctx.backend_kind)
+	}
+}
+
+driver_init_vmem_core_with_reservation :: proc(ctx: ^Suite_Ctx, reserve_bytes: int) {
+	if ctx.has_primary {
+		_ = xitdb.core_destroy(&ctx.primary_core, true)
+	}
+	ctx.backend_kind = .Memory
+	ctx.primary_core = xitdb.core_memory_init(context.allocator, reserve_bytes)
+	ctx.has_primary = true
+	driver_record_vmem_base_pointer(ctx)
+}
+
+driver_write_shrink_and_regrow_vmem_core :: proc(ctx: ^Suite_Ctx, initial_write_bytes: int, shrink_to_bytes: i64, regrow_write_bytes: int) {
+	chunk := make([]u8, initial_write_bytes, context.temp_allocator)
+	for i in 0 ..< len(chunk) {
+		chunk[i] = u8((i * 11 + 3) & 0xFF)
+	}
+	testing.expect_value(ctx.t, xitdb.core_write_all(&ctx.primary_core, chunk), nil)
+	driver_assert_vmem_base_pointer_unchanged(ctx)
+
+	testing.expect_value(ctx.t, xitdb.core_set_length(&ctx.primary_core, shrink_to_bytes), nil)
+	driver_assert_vmem_base_pointer_unchanged(ctx)
+
+	regrow_chunk := make([]u8, regrow_write_bytes, context.temp_allocator)
+	for i in 0 ..< len(regrow_chunk) {
+		regrow_chunk[i] = u8((i * 17 + 5) & 0xFF)
+	}
+	testing.expect_value(ctx.t, xitdb.core_seek_to(&ctx.primary_core, shrink_to_bytes), nil)
+	testing.expect_value(ctx.t, xitdb.core_write_all(&ctx.primary_core, regrow_chunk), nil)
+	driver_assert_vmem_base_pointer_unchanged(ctx)
+
+	// Verify prefix before `shrink_to_bytes` and regrown suffix via stateless `core_read_exact_at`
+	prefix_back := make([]u8, int(shrink_to_bytes), context.temp_allocator)
+	testing.expect_value(ctx.t, xitdb.core_read_exact_at(&ctx.primary_core, 0, prefix_back), nil)
+	testing.expect(ctx.t, slice.equal(prefix_back, chunk[:int(shrink_to_bytes)]), "Expected prefix before shrink_to_bytes to remain intact")
+
+	suffix_back := make([]u8, regrow_write_bytes, context.temp_allocator)
+	testing.expect_value(ctx.t, xitdb.core_read_exact_at(&ctx.primary_core, shrink_to_bytes, suffix_back), nil)
+	testing.expect(ctx.t, slice.equal(suffix_back, regrow_chunk), "Expected regrown suffix to match")
+}
+
+driver_assert_vmem_write_overflow_and_init_from_bytes :: proc(ctx: ^Suite_Ctx, expected_length: int, expected_overflow_err: xitdb.Xitdb_Error) {
+	m := &ctx.primary_core.(xitdb.Core_Memory)
+	testing.expect_value(ctx.t, len(m.buf), expected_length)
+	driver_assert_vmem_base_pointer_unchanged(ctx)
+
+	oversized := make([]u8, m.vmem_reserved, context.temp_allocator)
+	testing.expect_value(ctx.t, xitdb.core_write_all(&ctx.primary_core, oversized), expected_overflow_err)
+	driver_assert_vmem_base_pointer_unchanged(ctx)
+
+	// Verify core_memory_init_from_bytes uses vmem reservation and preserves exact bytes
+	snapshot := m.buf[:expected_length]
+	c_from_bytes := xitdb.core_memory_init_from_bytes(snapshot)
+	defer _ = xitdb.core_destroy(&c_from_bytes)
+	m_fb := &c_from_bytes.(xitdb.Core_Memory)
+	testing.expect(ctx.t, m_fb.vmem_reserved >= xitdb.DEFAULT_VMEM_RESERVE_SIZE, "Expected core_memory_init_from_bytes to reserve virtual memory")
+	read_back := make([]u8, expected_length, context.temp_allocator)
+	testing.expect_value(ctx.t, xitdb.core_read_exact_at(&c_from_bytes, 0, read_back), nil)
+	testing.expect(ctx.t, slice.equal(read_back, snapshot), "Expected core_memory_init_from_bytes contents to match")
 }
 
 

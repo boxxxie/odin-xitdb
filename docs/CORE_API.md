@@ -10,16 +10,18 @@ This guide documents the low-level Odin core storage backends, wire format primi
 
 ### Storage Cores
 
-`xitdb` abstracts storage through the `Core` union (`Core_Memory | Core_File | Core_Buffered_File`):
+`xitdb` abstracts storage through the `Core` union (`Core_Memory | Core_File | Core_Buffered_File`). All read paths across `xitdb` use **stateless positional reads** (`core_read_at`, `core_read_exact_at`, `core_read_slot_at`, etc.) that never mutate `core.pos` or the OS file descriptor's seek offset:
 
-* **`core_memory_init(allocator := context.allocator, initial_cap := 4096, max_size: Maybe(i64) = nil) -> Core`**
-  In-memory dynamic byte buffer. Ideal for tests, caches, or ephemeral databases.
-* **`core_file_open(path: string, flags := os.File_Flags{.Read, .Write, .Create}, fsync := false) -> (Core, os.Error)`**
-  Unbuffered OS file I/O. Multiple independent read-only handles can safely read from the same file concurrently.
-* **`core_buffered_file_open(path: string, buffer_capacity: i64 = 2 * 1024 * 1024, flags := os.File_Flags{.Read, .Write, .Create}, fsync := false, allocator := context.allocator) -> (Core, os.Error)`**
-  Pairs an OS file handle with an in-memory tail write buffer. Intra-transaction node allocations and mutations occur in memory before flushing on commit.
-* **`core_destroy(c: ^Core, close_file := true) -> os.Error`**
-  Frees buffers and optionally closes the underlying file handle.
+* **`core_memory_init(allocator := context.allocator, reserve_size: int = DEFAULT_VMEM_RESERVE_SIZE) -> Core`**
+  In-memory byte buffer backed by a fixed virtual address reservation (`1 GiB` on 64-bit via `core:mem/virtual`, committing physical pages on demand). Because `raw_data(buf)` never moves across appends, multiple reader threads can concurrently read committed snapshots while a writer appends new moments at the tail. Pass `reserve_size = 0` to fall back to a standard heap/arena `[dynamic]u8`.
+* **`core_memory_init_from_bytes(data: []u8, allocator := context.allocator, reserve_size: int = DEFAULT_VMEM_RESERVE_SIZE) -> Core`**
+  Initializes a `vmem`-backed `Core_Memory` populated with a copy of `data`.
+* **`core_file_open(path: string, flags := os.File_Flags{.Read, .Write, .Create}, fsync := true) -> (Core, Error)`**
+  Unbuffered OS file I/O using `os.read_at` (`pread` on Linux) for lock-free concurrent reads on a shared `^Database`.
+* **`core_buffered_file_open(path: string, buffer_size: i64 = DEFAULT_BUFFER_SIZE, flags := os.File_Flags{.Read, .Write, .Create}, fsync := true, allocator := context.allocator) -> (Core, Error)`**
+  Pairs an OS file handle with an in-memory tail write buffer (`2 MiB` default). Flushes on root commit (`database_commit_root`) so all committed moments are served via stateless `os.read_at`.
+* **`core_destroy(c: ^Core, close_file := false) -> Error`**
+  Releases virtual or heap memory buffers (`vmem.release` / `delete`) and optionally closes the underlying file handle.
 
 ### Hashers
 

@@ -6,3 +6,9 @@ This file tracks all major tracks for the `xitdb-odin` project. Each track has i
 
 - [x] **Track: Full v1 Odin Implementation of `xitdb` (HAMT, Radix-Trie, Count-Augmented B-Tree/B+Tree, Compaction, Replication, and Storage Backends)**
   *Link: [./tracks/xitdb_v1_odin_20261101/](./tracks/xitdb_v1_odin_20261101/)*
+
+---
+
+- [x] **Track: Lock-Free Stateless Cursors & Virtual Memory Core (`core_read_at` & `vmem.reserve`)**
+  *Link: [./tracks/lock_free_cursors_vmem_20261106/](./tracks/lock_free_cursors_vmem_20261106/)*
+
