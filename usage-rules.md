@@ -10,7 +10,8 @@ This guide provides prescriptive rules, API selection criteria, canonical recipe
 * **Intra-Transaction Mutability**: Committed moments are immutable, but nodes allocated after `db.tx_start` within an active transaction are mutated in place until committed or frozen.
 * **Zero-Copy Cloning Requires Freezing**: Copying a `Slot` to another key inside the same transaction shares the mutable root node. Always call `cursor_freeze(&clone_cursor)` or `tx_fork(&tx, from, to)` before mutating the clone.
 * **Inline Short Bytes**: Payloads without null bytes up to 8 bytes (or up to 6 bytes with a 2-byte `format_tag`) are stored inline inside the 9-byte `Slot` as `Tag.Short_Bytes` with zero heap indirection.
-* **Crash-Safe Commits**: Every root transaction appends a 25-byte `Root_Trailer` verified by a CRC-64/XZ checksum before updating the 17-byte `Root_Header`. Unfinished trailing bytes are truncated on the next write.
+* **Crash-Safe Commits**: Every root transaction appends a 25-byte `Root_Trailer` verified by a CRC-64/XZ checksum before updating and flushing the 17-byte `Root_Header`. Unfinished trailing bytes are truncated on the next write.
+* **Lock-Free Concurrent Reads (`core_read_at` & `vmem.reserve`)**: All read and traversal paths use stateless positional `core_read_*_at` (`os.read_at` / `pread` on `Core_File` and direct offset slicing on `Core_Memory` / `Core_Buffered_File`) without mutating `core.pos`. In addition, `core_memory_init` reserves a contiguous virtual address space (`DEFAULT_VMEM_RESERVE_SIZE`, 1 GiB on 64-bit) via `vmem.reserve` and commits physical pages on demand so `raw_data(m.buf)` never moves across appends. Multiple reader threads/actors can concurrently read any committed `Moment` or resume serialized `{moment_slot, cursor_slot}` / B+Tree keys on a shared `^Database` while a single writer appends new moments at the tail.
 
 ---
 
