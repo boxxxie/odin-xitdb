@@ -22,7 +22,7 @@ This guide provides prescriptive rules, API selection criteria, canonical recipe
 * **Layer 3 (`marshal` / `unmarshal` / `pull`)**: Use `marshal` and `unmarshal` to map Odin structs via `xitdb:"..."` tags, and `pull` to extract nested subtrees or list slices (`todos[0..3]`) into a `Pull_Value` union.
 * **Layer 4 (`diff_moments`, `history_of`, `query_prefix`, `query_page`, `query_count_range`)**: Use for $O(1)$ unchanged-subtree structural diffs, path audit lineage, and $O(\log N)$ B+Tree prefix/rank queries.
 * **Layer 5 (`query_datalog` / `parse_datalog`)**: Use for multi-collection joins, cross-moment temporal queries (`@?m`), negated set checks (`not`), grouped aggregations (`count`, `sum`, `min`, `max`), and BFS graph closure (`reach`).
-* **Low-Level Cursors (`array_list_append_context`, `Write_Cursor`, `Cursor_Writer`, `Cursor_Iterator`)**: Use for zero-allocation hot loops, streaming large blobs, custom hashers, or non-`Array_List` database roots.
+* **Low-Level Cursors (`array_list_append_context`, `Write_Cursor`, `Cursor_Writer`, `Cursor_Iterator`)**: Use for zero-allocation hot loops, forward (`cursor_iterator_next`) or reverse/upper-bound (`cursor_iterator_prev`, `sorted_map_iterator_reverse_from_string`, `*_iterator_reverse_from*`) range scans, streaming large blobs, custom hashers, or non-`Array_List` database roots.
 * **Embedded LuaJIT 2.1 (`lua_new_state`, `lua_push_database`, `lua_exec_string`, `lua_compile_bytecode`)**: Use when exposing `xitdb` databases, cursors, collections, transactions, Datalog, or stored `\x1bLJ` bytecode workflows to LuaJIT 2.1 scripts.
 
 ---

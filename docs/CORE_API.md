@@ -103,6 +103,7 @@ root_wc := xitdb.database_root_cursor(&db)
 * `array_list_put(l, index, data)` / `array_list_put_cursor(l, index)`
 * `array_list_slice(l, size)` $\rightarrow$ truncates tail and collapses unused trie depth
 * `array_list_iterator(l)` / `array_list_iterator_from(l, start_index)`
+* `array_list_iterator_reverse(l)` / `array_list_iterator_reverse_from(l, start_index)` (step backward with `cursor_iterator_prev`)
 
 ### `Linked_Array_List` (Count-Augmented B-Tree)
 * `read_linked_array_list_init(c: Read_Cursor)` / `write_linked_array_list_init(c: Write_Cursor)`
@@ -113,6 +114,7 @@ root_wc := xitdb.database_root_cursor(&db)
 * `linked_array_list_remove(l, index)` $\rightarrow O(\log_{16} N)$ mid-list removal
 * `linked_array_list_slice(l, offset, size)` / `linked_array_list_concat(l, list_b_slot)` $\rightarrow O(\log_{16} N)$ rope split & join
 * `linked_array_list_iterator(l)` / `linked_array_list_iterator_from(l, start_index)`
+* `linked_array_list_iterator_reverse(l)` / `linked_array_list_iterator_reverse_from(l, start_index)` (step backward with `cursor_iterator_prev`)
 
 ### `Hash_Map` & `Counted_Hash_Map` (16-way HAMT)
 * `read_hash_map_init` / `write_hash_map_init` / `read_counted_hash_map_init` / `write_counted_hash_map_init`
@@ -120,7 +122,7 @@ root_wc := xitdb.database_root_cursor(&db)
 * `hash_map_get_cursor(m, key)` / `hash_map_get_cursor_by_hash(m, hash)`
 * `hash_map_put(m, key, data)` / `hash_map_put_cursor(m, key)` / `hash_map_put_key_and_value(m, hash, key, val)`
 * `hash_map_remove(m, key)` / `hash_map_remove_by_hash(m, hash)` $\rightarrow$ automatically collapses singleton branches
-* `hash_map_iterator(m)`
+* `hash_map_iterator(m)` / `hash_map_iterator_reverse(m)`
 
 ### `Sorted_Map` & `Sorted_Set` (Count-Augmented B+Tree)
 * `read_sorted_map_init` / `write_sorted_map_init` / `read_sorted_set_init` / `write_sorted_set_init`
@@ -129,10 +131,14 @@ root_wc := xitdb.database_root_cursor(&db)
 * `sorted_map_rank(m, key)` $\rightarrow O(\log_{16} N)$ count of keys strictly `< key`
 * `sorted_map_get_index_kv_pair(m, index)` $\rightarrow O(\log_{16} N)$ positional lookup by sorted rank
 * `sorted_map_iterator(m)` / `sorted_map_iterator_from_string(m, lower_bound)` / `sorted_map_iterator_from_index(m, start_index)`
+* `sorted_map_iterator_reverse(m)` / `sorted_map_iterator_reverse_from_string(m, upper_bound, inclusive := true)` / `sorted_map_iterator_reverse_from_index(m, start_index)` (step backward with `cursor_iterator_prev`)
+* `sorted_set_iterator(s)` / `sorted_set_iterator_from_string(s, lower_bound)` / `sorted_set_iterator_from_index(s, start_index)`
+* `sorted_set_iterator_reverse(s)` / `sorted_set_iterator_reverse_from_string(s, upper_bound, inclusive := true)` / `sorted_set_iterator_reverse_from_index(s, start_index)`
 
 ### `Hash_Set` & `Counted_Hash_Set` (16-way HAMT)
 * `read_hash_set_init` / `write_hash_set_init` / `read_counted_hash_set_init` / `write_counted_hash_set_init`
 * `hash_set_put(s, key)` / `hash_set_get_cursor(s, key)` / `hash_set_remove(s, key)`
+* `hash_set_iterator(s)` / `hash_set_iterator_reverse(s)`
 
 ---
 

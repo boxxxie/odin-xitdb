@@ -1,0 +1,8 @@
+{
+  "track_id": "reverse_iterators_20261106",
+  "title": "Native Reverse & Upper-Bound Range Iterators for B-Tree, B+Tree, and Radix-Trie Collections",
+  "status": "completed",
+  "created_at": "2026-11-06T09:30:00+08:00",
+  "completed_at": "2026-11-06T10:08:00+08:00",
+  "branch": "feat/reverse-iterator"
+}
