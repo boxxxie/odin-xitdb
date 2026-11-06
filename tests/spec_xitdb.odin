@@ -1238,6 +1238,118 @@ spec_compactor_and_buffered_file_enforce_max_size_and_allocation_failure_guards 
 	then_compactor_and_buffered_file_enforce_max_size_and_allocation_failure_guards(&ctx)
 }
 
+// ----------------------------------------------------------------------------
+// Scenario 37: Lock-Free Concurrent Cursors & Resumable Iterators (`core_read_at`)
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_lock_free_concurrent_cursors_and_resumable_iterators :: proc(t: ^testing.T) {
+	for backend in Backend_Kind {
+		ctx := driver_init_ctx(t)
+		defer driver_destroy_ctx(&ctx)
+
+		// GIVEN a database on Memory, File, or Buffered_File populated with 64 items across HAMT maps,
+		// Radix Trie array lists, B-Tree linked lists, B+Tree sorted maps, and an 8 KiB Bytes stream
+		given_database_initialized_with(&ctx, backend)
+		upon_populating_concurrent_read_fixture(&ctx, item_count = 64)
+
+		// THEN 8 worker threads can concurrently read random keys, iterate collections,
+		// stream Cursor_Reader chunks, and pause/serialize {moment_slot, cursor_slot} at index 32 ("key-0032")
+		// to resume the remaining 32 items on other worker threads with zero seek-offset interference
+		then_concurrent_readers_and_resumable_cursors_succeed_without_interference(
+			&ctx,
+			worker_count             = 8,
+			item_count               = 64,
+			pause_at_key             = "key-0032",
+			expected_remaining_keys  = 32,
+			pause_at_index           = 32,
+			expected_remaining_items = 32,
+			sentinel_pos             = 777777,
+		)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Scenario 38: Virtual Memory (`vmem.reserve`) Base-Pointer Stability Under Concurrent Appends
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_virtual_memory_base_pointer_stability_under_concurrent_appends :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
+
+	// GIVEN a Core_Memory-backed database with an initial committed moment of 48 items
+	given_database_initialized_with(&ctx, .Memory)
+	upon_populating_concurrent_read_fixture(&ctx, item_count = 48)
+
+	// THEN when a writer thread appends 40 new moments (growing the database across multiple megabytes)
+	// while 6 reader threads concurrently read committed moments, the base pointer raw_data(buf)
+	// never moves and all 41 moments remain intact
+	then_virtual_memory_base_pointer_remains_stable_during_concurrent_writer_appends(
+		&ctx,
+		reader_count   = 6,
+		append_moments = 40,
+		item_count     = 48,
+	)
+}
+
+// ----------------------------------------------------------------------------
+// Scenario 39: Concurrent Compaction & Incremental Replication While Readers Query Source DB
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_concurrent_compaction_and_replication_with_parallel_readers :: proc(t: ^testing.T) {
+	for backend in Backend_Kind {
+		ctx := driver_init_ctx(t)
+		defer driver_destroy_ctx(&ctx)
+
+		// GIVEN a database on Memory, File, or Buffered_File with an initial committed moment of 48 items
+		given_database_initialized_with(&ctx, backend)
+		upon_populating_concurrent_read_fixture(&ctx, item_count = 48)
+
+		// THEN while 6 parallel reader threads continuously query collections, a background compaction thread
+		// and a background replication thread can concurrently read and compact/replicate the source database
+		// with zero seek-offset interference or data corruption
+		then_concurrent_compaction_and_replication_succeed_during_parallel_reads(
+			&ctx,
+			reader_count = 6,
+			item_count   = 48,
+			sentinel_pos = 888888,
+		)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Scenario 40: Virtual Memory (`vmem.reserve`) Reservation Cap, `core_set_length` Shrink/Re-Grow & `init_from_bytes`
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_virtual_memory_reservation_cap_shrink_regrow_and_init_from_bytes :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
+
+	// GIVEN a Core_Memory initialized with a bounded 64 KiB virtual address reservation
+	given_virtual_memory_core_with_reservation(&ctx, reserve_bytes = 65536)
+
+	// UPON writing 32 KiB, shrinking via core_set_length to 4 KiB, and re-growing by 32 KiB (total 36 KiB)
+	upon_writing_shrinking_and_regrowing_virtual_memory_core(
+		&ctx,
+		initial_write_bytes = 32768,
+		shrink_to_bytes     = 4096,
+		regrow_write_bytes  = 32768,
+	)
+
+	// THEN the base pointer never moves, attempting to write beyond the 64 KiB reservation returns .Write_Failed,
+	// and core_memory_init_from_bytes clones the 36 KiB buffer into a fresh vmem-backed Core_Memory
+	then_virtual_memory_enforces_reservation_cap_and_clones_from_bytes(
+		&ctx,
+		expected_length       = 4096 + 32768,
+		expected_overflow_err = .Write_Failed,
+	)
+}
+
+
+
 
 
 

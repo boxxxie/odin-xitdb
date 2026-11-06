@@ -35,6 +35,11 @@ given_file_database :: proc(ctx: ^Suite_Ctx, hash_algo: string = "sha1") {
 	driver_open_primary(ctx, hash_algo)
 }
 
+given_database_initialized_with :: proc(ctx: ^Suite_Ctx, backend: Backend_Kind, hash_algo: string = "sha1") {
+	ctx.backend_kind = backend
+	driver_open_primary(ctx, hash_algo)
+}
+
 given_committed_moment :: proc(ctx: ^Suite_Ctx, ops: ..Moment_Mutation_Op) {
 	err := driver_commit_moment(ctx, nil, ops)
 	testing.expect_value(ctx.t, err, nil)
@@ -323,6 +328,102 @@ then_corrupt_slot_tags_inflated_branch_counts_and_truncated_btree_nodes_are_reje
 
 then_compactor_and_buffered_file_enforce_max_size_and_allocation_failure_guards :: proc(ctx: ^Suite_Ctx) {
 	driver_verify_compactor_and_buffered_file_max_size_and_allocation_guards(ctx)
+}
+
+upon_populating_concurrent_read_fixture :: proc(ctx: ^Suite_Ctx, item_count: int) {
+	driver_populate_concurrent_read_fixture(ctx, item_count)
+	// Cross-cutting invariant: verify all 4 collection kinds in Moment 0 have the exact seeded count
+	then_moment_has_counted_map_size(ctx, 0, "hm", i64(item_count))
+	then_moment_has_sorted_map_in_order(ctx, 0, "sm", expected_count = i64(item_count))
+}
+
+then_concurrent_readers_and_resumable_cursors_succeed_without_interference :: proc(
+	ctx: ^Suite_Ctx,
+	worker_count: int,
+	item_count: int,
+	pause_at_key: string,
+	expected_remaining_keys: int,
+	pause_at_index: i64,
+	expected_remaining_items: int,
+	sentinel_pos: i64 = 777777,
+) {
+	// Cross-cutting invariant: set a known seek position on the underlying Core before spawning
+	// concurrent reader threads, and verify that stateless `core_read_at` calls never mutate `pos`.
+	driver_set_core_sentinel_pos(ctx, sentinel_pos)
+	driver_verify_concurrent_readers_and_resumable_cursors(
+		ctx,
+		worker_count,
+		item_count,
+		pause_at_key,
+		expected_remaining_keys,
+		pause_at_index,
+		expected_remaining_items,
+	)
+	driver_assert_core_sentinel_pos_unchanged(ctx, sentinel_pos)
+}
+
+then_virtual_memory_base_pointer_remains_stable_during_concurrent_writer_appends :: proc(
+	ctx: ^Suite_Ctx,
+	reader_count: int,
+	append_moments: int,
+	item_count: int,
+) {
+	driver_record_vmem_base_pointer(ctx)
+	driver_verify_vmem_base_pointer_stability_under_concurrent_appends(ctx, reader_count, append_moments, item_count)
+	driver_assert_vmem_base_pointer_unchanged(ctx)
+	then_history_has_moments(ctx, i64(1 + append_moments))
+}
+
+then_concurrent_compaction_and_replication_succeed_during_parallel_reads :: proc(
+	ctx: ^Suite_Ctx,
+	reader_count: int,
+	item_count: int,
+	sentinel_pos: i64 = 888888,
+) {
+	driver_Verify_Compaction_And_Replication_With_Sentinel :: proc(ctx: ^Suite_Ctx, reader_count: int, item_count: int, sentinel_pos: i64) {
+		driver_verify_concurrent_compaction_and_replication_with_readers(ctx, reader_count, item_count)
+		driver_set_core_sentinel_pos(ctx, sentinel_pos)
+		then_history_has_moments(ctx, 2)
+		driver_assert_core_sentinel_pos_unchanged(ctx, sentinel_pos)
+	}
+	driver_Verify_Compaction_And_Replication_With_Sentinel(ctx, reader_count, item_count, sentinel_pos)
+}
+
+upon_transacting_dsl_script :: proc(ctx: ^Suite_Ctx, script: string) {
+	driver_transact_dsl_script(ctx, script)
+}
+
+then_concurrent_dsl_workers_observe_consistent_snapshots :: proc(
+	ctx: ^Suite_Ctx,
+	worker_count: int,
+	expect: DSL_Concurrent_Expectations,
+	sentinel_pos: i64 = 999999,
+) {
+	driver_set_core_sentinel_pos(ctx, sentinel_pos)
+	driver_verify_concurrent_dsl_queries(ctx, worker_count, expect)
+	driver_assert_core_sentinel_pos_unchanged(ctx, sentinel_pos)
+}
+
+given_virtual_memory_core_with_reservation :: proc(ctx: ^Suite_Ctx, reserve_bytes: int) {
+	driver_init_vmem_core_with_reservation(ctx, reserve_bytes)
+}
+
+upon_writing_shrinking_and_regrowing_virtual_memory_core :: proc(
+	ctx: ^Suite_Ctx,
+	initial_write_bytes: int,
+	shrink_to_bytes: i64,
+	regrow_write_bytes: int,
+) {
+	driver_write_shrink_and_regrow_vmem_core(ctx, initial_write_bytes, shrink_to_bytes, regrow_write_bytes)
+}
+
+then_virtual_memory_enforces_reservation_cap_and_clones_from_bytes :: proc(
+	ctx: ^Suite_Ctx,
+	expected_length: int,
+	expected_overflow_err: xitdb.Xitdb_Error,
+) {
+	driver_assert_vmem_write_overflow_and_init_from_bytes(ctx, expected_length, expected_overflow_err)
+	driver_assert_vmem_base_pointer_unchanged(ctx)
 }
 
 // ----------------------------------------------------------------------------
