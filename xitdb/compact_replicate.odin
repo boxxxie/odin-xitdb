@@ -198,13 +198,9 @@ _compactor_reserve_block :: #force_inline proc(c: ^_Compactor, size: int) -> (re
 			return 0, Xitdb_Error.Write_Failed
 		}
 		if new_len > cap(dst.buf) {
-			if alloc_err := reserve(&dst.buf, max(new_len, cap(dst.buf) * 2 + 4096)); alloc_err != nil {
-				return 0, Xitdb_Error.Write_Failed
-			}
+			_memory_reserve(&dst, max(new_len, cap(dst.buf) * 2 + 4096)) or_return
 		}
-		if alloc_err := non_zero_resize(&dst.buf, new_len); alloc_err != nil {
-			return 0, Xitdb_Error.Write_Failed
-		}
+		_memory_resize(&dst, new_len) or_return
 		dst.pos = i64(new_len)
 		return offset, nil
 	}
@@ -323,8 +319,7 @@ _compactor_remap_bytes :: proc(c: ^_Compactor, slot: Slot) -> (res: i64, err: Er
 	if found {
 		return mapped, nil
 	}
-	core_seek_to(c.source_core, slot.value) or_return
-	length := core_read_long(c.source_core) or_return
+	length := core_read_long_at(c.source_core, slot.value) or_return
 	format_tag_size: i64 = 2 if slot.full else 0
 	total_payload := length + format_tag_size
 
@@ -333,11 +328,11 @@ _compactor_remap_bytes :: proc(c: ^_Compactor, slot: Slot) -> (res: i64, err: Er
 	core_write_long(c.target_core, length) or_return
 
 	if total_payload > 0 {
+		payload_offset := slot.value + 8
 		#partial switch &src in c.source_core {
 		case Core_Memory:
-			if src.pos >= 0 && src.pos + total_payload <= i64(len(src.buf)) {
-				slice := src.buf[int(src.pos):int(src.pos + total_payload)]
-				src.pos += total_payload
+			if payload_offset >= 0 && payload_offset + total_payload <= i64(len(src.buf)) {
+				slice := src.buf[int(payload_offset):int(payload_offset + total_payload)]
 				core_write_all(c.target_core, slice) or_return
 				offset_map_put(c.offset_map, slot.value, new_offset) or_return
 				return new_offset, nil
@@ -345,10 +340,12 @@ _compactor_remap_bytes :: proc(c: ^_Compactor, slot: Slot) -> (res: i64, err: Er
 		}
 		buf: [4096]u8 = ---
 		remaining := total_payload
+		cur_offset := payload_offset
 		for remaining > 0 {
 			chunk := min(remaining, i64(len(buf)))
-			core_read_exact(c.source_core, buf[:chunk]) or_return
+			core_read_exact_at(c.source_core, cur_offset, buf[:chunk]) or_return
 			core_write_all(c.target_core, buf[:chunk]) or_return
+			cur_offset += chunk
 			remaining -= chunk
 		}
 	}
@@ -358,9 +355,8 @@ _compactor_remap_bytes :: proc(c: ^_Compactor, slot: Slot) -> (res: i64, err: Er
 
 @(private)
 _compactor_populate_index :: proc(c: ^_Compactor, source_offset, target_offset: i64) -> Error {
-	core_seek_to(c.source_core, source_offset) or_return
 	block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
-	core_read_exact(c.source_core, block_bytes[:]) or_return
+	core_read_exact_at(c.source_core, source_offset, block_bytes[:]) or_return
 
 	for i in 0 ..< SLOT_COUNT {
 		tag := Tag(block_bytes[i * SLOT_LENGTH] & 0x7F)
@@ -390,9 +386,8 @@ _compactor_remap_array_list_index :: proc(c: ^_Compactor, source_offset, size: i
 	}
 
 	target_offset := _compactor_reserve_block(c, INDEX_BLOCK_SIZE) or_return
-	core_seek_to(c.source_core, source_offset) or_return
 	block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
-	core_read_exact(c.source_core, block_bytes[:]) or_return
+	core_read_exact_at(c.source_core, source_offset, block_bytes[:]) or_return
 	remapped_block: [INDEX_BLOCK_SIZE]u8
 	remaining := size
 	for i := 0; i < SLOT_COUNT && remaining > 0; i += 1 {
@@ -420,9 +415,8 @@ _compactor_remap_array_list_index :: proc(c: ^_Compactor, source_offset, size: i
 
 @(private)
 _compactor_populate_array_list :: proc(c: ^_Compactor, source_offset, target_offset: i64) -> Error {
-	core_seek_to(c.source_core, source_offset) or_return
 	hb: [ARRAY_LIST_HEADER_LENGTH]u8 = ---
-	core_read_exact(c.source_core, hb[:]) or_return
+	core_read_exact_at(c.source_core, source_offset, hb[:]) or_return
 	header := array_list_header_from_bytes(hb) or_return
 
 	shift := radix_shift(header.size - 1)
@@ -434,9 +428,8 @@ _compactor_populate_array_list :: proc(c: ^_Compactor, source_offset, target_off
 
 @(private)
 _compactor_populate_btree :: proc(c: ^_Compactor, source_offset, target_offset: i64) -> Error {
-	core_seek_to(c.source_core, source_offset) or_return
 	hb: [BTREE_HEADER_LENGTH]u8 = ---
-	core_read_exact(c.source_core, hb[:]) or_return
+	core_read_exact_at(c.source_core, source_offset, hb[:]) or_return
 	header := btree_header_from_bytes(hb) or_return
 	remapped_root := _compactor_remap_btree_node(c, header.root_ptr) or_return
 	core_seek_to(c.target_core, target_offset) or_return
@@ -450,9 +443,8 @@ _compactor_remap_btree_node :: proc(c: ^_Compactor, node_offset: i64) -> (res: i
 	if found {
 		return mapped, nil
 	}
-	core_seek_to(c.source_core, node_offset) or_return
 	node_header: [BTREE_NODE_HEADER_SIZE]u8 = ---
-	core_read_exact(c.source_core, node_header[:]) or_return
+	core_read_exact_at(c.source_core, node_offset, node_header[:]) or_return
 	kind_int := node_header[0]
 	if kind_int > u8(BTree_Node_Kind.Branch) {
 		return 0, .Invalid_BTree_Node_Kind
@@ -480,13 +472,12 @@ _compactor_remap_btree_node :: proc(c: ^_Compactor, node_offset: i64) -> (res: i
 
 @(private)
 _compactor_populate_btree_leaf :: proc(c: ^_Compactor, source_offset, target_offset: i64, kind, num: u8) -> Error {
-	core_seek_to(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE) or_return
 	buf: [BTREE_LEAF_BLOCK_SIZE]u8 = ---
 	buf[0] = kind
 	buf[1] = num
 	body := buf[BTREE_NODE_HEADER_SIZE:]
 	active_len := int(num) * SLOT_LENGTH
-	core_read_exact(c.source_core, body[:active_len]) or_return
+	core_read_exact_at(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE, body[:active_len]) or_return
 	if active_len < len(body) {
 		intrinsics.mem_zero(raw_data(body[active_len:]), len(body) - active_len)
 	}
@@ -511,13 +502,12 @@ _compactor_populate_btree_leaf :: proc(c: ^_Compactor, source_offset, target_off
 
 @(private)
 _compactor_populate_btree_branch :: proc(c: ^_Compactor, source_offset, target_offset: i64, kind, num: u8) -> Error {
-	core_seek_to(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE) or_return
 	buf: [BTREE_BRANCH_BLOCK_SIZE]u8 = ---
 	buf[0] = kind
 	buf[1] = num
 	body := buf[BTREE_NODE_HEADER_SIZE:]
 	active_len := SLOT_LENGTH * BTREE_SLOT_COUNT + int(num) * 8
-	core_read_exact(c.source_core, body[:active_len]) or_return
+	core_read_exact_at(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE, body[:active_len]) or_return
 	if active_len < len(body) {
 		intrinsics.mem_zero(raw_data(body[active_len:]), len(body) - active_len)
 	}
@@ -540,9 +530,8 @@ _compactor_populate_btree_branch :: proc(c: ^_Compactor, source_offset, target_o
 
 @(private)
 _compactor_populate_sorted_map :: proc(c: ^_Compactor, source_offset, target_offset: i64) -> Error {
-	core_seek_to(c.source_core, source_offset) or_return
 	hb: [BTREE_HEADER_LENGTH]u8 = ---
-	core_read_exact(c.source_core, hb[:]) or_return
+	core_read_exact_at(c.source_core, source_offset, hb[:]) or_return
 	header := btree_header_from_bytes(hb) or_return
 	remapped_root := _compactor_remap_sorted_map_node(c, header.root_ptr) or_return
 	core_seek_to(c.target_core, target_offset) or_return
@@ -556,9 +545,8 @@ _compactor_remap_sorted_map_node :: proc(c: ^_Compactor, node_offset: i64) -> (r
 	if found {
 		return mapped, nil
 	}
-	core_seek_to(c.source_core, node_offset) or_return
 	node_header: [BTREE_NODE_HEADER_SIZE]u8 = ---
-	core_read_exact(c.source_core, node_header[:]) or_return
+	core_read_exact_at(c.source_core, node_offset, node_header[:]) or_return
 	kind_int := node_header[0]
 	if kind_int > u8(BTree_Node_Kind.Branch) {
 		return 0, .Invalid_BTree_Node_Kind
@@ -586,13 +574,12 @@ _compactor_remap_sorted_map_node :: proc(c: ^_Compactor, node_offset: i64) -> (r
 
 @(private)
 _compactor_populate_sorted_map_leaf :: proc(c: ^_Compactor, source_offset, target_offset: i64, kind, num: u8) -> Error {
-	core_seek_to(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE) or_return
 	buf: [SORTED_LEAF_BLOCK_SIZE]u8 = ---
 	buf[0] = kind
 	buf[1] = num
 	body := buf[BTREE_NODE_HEADER_SIZE:]
 	active_len := int(num) * SLOT_LENGTH
-	core_read_exact(c.source_core, body[:active_len]) or_return
+	core_read_exact_at(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE, body[:active_len]) or_return
 	if active_len < len(body) {
 		intrinsics.mem_zero(raw_data(body[active_len:]), len(body) - active_len)
 	}
@@ -617,13 +604,12 @@ _compactor_populate_sorted_map_leaf :: proc(c: ^_Compactor, source_offset, targe
 
 @(private)
 _compactor_populate_sorted_map_branch :: proc(c: ^_Compactor, source_offset, target_offset: i64, kind, num: u8) -> Error {
-	core_seek_to(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE) or_return
 	buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
 	buf[0] = kind
 	buf[1] = num
 	body := buf[BTREE_NODE_HEADER_SIZE:]
 	active_len := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + int(num) * 8
-	core_read_exact(c.source_core, body[:active_len]) or_return
+	core_read_exact_at(c.source_core, source_offset + BTREE_NODE_HEADER_SIZE, body[:active_len]) or_return
 	if active_len < len(body) {
 		intrinsics.mem_zero(raw_data(body[active_len:]), len(body) - active_len)
 	}
@@ -660,13 +646,14 @@ _compactor_populate_sorted_map_branch :: proc(c: ^_Compactor, source_offset, tar
 
 @(private)
 _compactor_populate_hash_map :: proc(c: ^_Compactor, source_offset, target_offset: i64, counted: bool) -> Error {
-	core_seek_to(c.source_core, source_offset) or_return
 	count_value: i64 = 0
+	block_offset := source_offset
 	if counted {
-		count_value = core_read_long(c.source_core) or_return
+		count_value = core_read_long_at(c.source_core, source_offset) or_return
+		block_offset += 8
 	}
 	block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
-	core_read_exact(c.source_core, block_bytes[:]) or_return
+	core_read_exact_at(c.source_core, block_offset, block_bytes[:]) or_return
 
 	for i in 0 ..< SLOT_COUNT {
 		tag := Tag(block_bytes[i * SLOT_LENGTH] & 0x7F)
@@ -692,12 +679,11 @@ _compactor_populate_hash_map :: proc(c: ^_Compactor, source_offset, target_offse
 
 @(private)
 _compactor_populate_kv_pair :: proc(c: ^_Compactor, source_offset, target_offset: i64, tag: Tag) -> Error {
-	core_seek_to(c.source_core, source_offset) or_return
 	hsize := int(c.hash_size) if tag == .KV_Pair else 0
 	total := hsize + SORTED_KV_PAIR_LENGTH
 	stack_buf: [128]u8 = ---
 	b := stack_buf[:total] if total <= len(stack_buf) else make([]u8, total, context.temp_allocator)
-	core_read_exact(c.source_core, b) or_return
+	core_read_exact_at(c.source_core, source_offset, b) or_return
 
 	key_slot := slot_from_slice_raw(b[hsize : hsize + SLOT_LENGTH])
 	tag_validate(key_slot.tag) or_return
@@ -772,7 +758,7 @@ database_compact :: proc(db: ^Database, target_core: ^Core, offset_map: ^Offset_
 			want_cap = int(max(max_sz, 0))
 		}
 		if cap(dst.buf) < want_cap {
-			_ = reserve(&dst.buf, want_cap)
+			_ = _memory_reserve(&dst, want_cap)
 		}
 	}
 
@@ -851,17 +837,17 @@ _stream_bytes :: proc(db: ^Database, target_core: ^Core, start, length: i64) -> 
 	#partial switch &src in db.core {
 	case Core_Memory:
 		if start >= 0 && start + length <= i64(len(src.buf)) {
-			src.pos = start + length
 			return core_write_all(target_core, src.buf[int(start):int(start + length)])
 		}
 	}
-	core_seek_to(db.core, start) or_return
 	buf: [4096]u8 = ---
 	rem := length
+	cur_offset := start
 	for rem > 0 {
 		chunk := min(rem, i64(len(buf)))
-		core_read_exact(db.core, buf[:chunk]) or_return
+		core_read_exact_at(db.core, cur_offset, buf[:chunk]) or_return
 		core_write_all(target_core, buf[:chunk]) or_return
+		cur_offset += chunk
 		rem -= chunk
 	}
 	return nil
@@ -901,16 +887,13 @@ database_read_committed_buf :: proc(db: ^Database, start, end: i64, buf: []u8) -
 	out := buf[:needed] if needed <= len(buf) else make([]u8, needed, context.temp_allocator)
 	if start == 0 {
 		trailer := database_read_root_trailer(db, end) or_return
-		core_seek_to(db.core, 0) or_return
-		core_read_exact(db.core, out[:ROOT_HEADER_START]) or_return
+		core_read_exact_at(db.core, 0, out[:ROOT_HEADER_START]) or_return
 		root_header := root_header_to_bytes(Root_Header{file_size = end, root = trailer.root})
 		copy(out[ROOT_HEADER_START:ROOT_HEADER_END], root_header[:])
-		core_seek_to(db.core, ROOT_HEADER_END) or_return
-		core_read_exact(db.core, out[ROOT_HEADER_END:]) or_return
+		core_read_exact_at(db.core, ROOT_HEADER_END, out[ROOT_HEADER_END:]) or_return
 		return out, nil
 	}
-	core_seek_to(db.core, start) or_return
-	core_read_exact(db.core, out) or_return
+	core_read_exact_at(db.core, start, out) or_return
 	return out, nil
 }
 
@@ -926,16 +909,13 @@ database_read_committed_bytes :: proc(db: ^Database, start, end: i64, allocator 
 	out := make([]u8, int(end - start), allocator)
 	if start == 0 {
 		trailer := database_read_root_trailer(db, end) or_return
-		core_seek_to(db.core, 0) or_return
-		core_read_exact(db.core, out[:ROOT_HEADER_START]) or_return
+		core_read_exact_at(db.core, 0, out[:ROOT_HEADER_START]) or_return
 		root_header := root_header_to_bytes(Root_Header{file_size = end, root = trailer.root})
 		copy(out[ROOT_HEADER_START:ROOT_HEADER_END], root_header[:])
-		core_seek_to(db.core, ROOT_HEADER_END) or_return
-		core_read_exact(db.core, out[ROOT_HEADER_END:]) or_return
+		core_read_exact_at(db.core, ROOT_HEADER_END, out[ROOT_HEADER_END:]) or_return
 		return out, nil
 	}
-	core_seek_to(db.core, start) or_return
-	core_read_exact(db.core, out) or_return
+	core_read_exact_at(db.core, start, out) or_return
 	return out, nil
 }
 

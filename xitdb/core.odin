@@ -3,16 +3,28 @@ package xitdb
 import "base:runtime"
 import "core:encoding/endian"
 import "core:io"
+import "core:mem"
+import vmem "core:mem/virtual"
 import "core:os"
 
 DEFAULT_BUFFER_SIZE :: 2 * 1024 * 1024
 
-// Core_Memory stores a xitdb database in a dynamic byte array in memory.
+when size_of(int) >= 8 {
+	DEFAULT_VMEM_RESERVE_SIZE :: 1 << 30 // 1 GiB virtual reservation on 64-bit platforms
+} else {
+	DEFAULT_VMEM_RESERVE_SIZE :: 128 << 20 // 128 MiB on 32-bit platforms
+}
+
+// Core_Memory stores a xitdb database in a contiguous byte array in memory.
+// When initialized via core_memory_init / core_memory_init_from_bytes, it reserves a
+// fixed virtual address space (vmem_reserved > 0) and commits physical pages on demand
+// so raw_data(buf) never moves across appends, enabling lock-free concurrent readers.
 Core_Memory :: struct {
-	buf:       [dynamic]u8,
-	pos:       i64,
-	max_size:  Maybe(i64),
-	allocator: runtime.Allocator,
+	buf:           [dynamic]u8,
+	pos:           i64,
+	max_size:      Maybe(i64),
+	allocator:     runtime.Allocator,
+	vmem_reserved: int,
 }
 
 // Core_File stores a xitdb database directly on an OS file handle.
@@ -39,7 +51,37 @@ Core :: union {
 	Core_Buffered_File,
 }
 
-core_memory_init :: proc(allocator := context.allocator) -> Core {
+@(private)
+_vmem_align_page :: #force_inline proc(size: int) -> int {
+	page_sz := int(mem.PAGE_SIZE)
+	if page_sz <= 0 {
+		page_sz = 4096
+	}
+	return mem.align_forward_int(max(size, page_sz), page_sz)
+}
+
+core_memory_init :: proc(allocator := context.allocator, reserve_size: int = DEFAULT_VMEM_RESERVE_SIZE) -> Core {
+	if reserve_size > 0 {
+		aligned_reserve := _vmem_align_page(reserve_size)
+		if reserved_slice, r_err := vmem.reserve(uint(aligned_reserve)); r_err == .None && raw_data(reserved_slice) != nil {
+			initial_commit := min(_vmem_align_page(4096), aligned_reserve)
+			if c_err := vmem.commit(raw_data(reserved_slice), uint(initial_commit)); c_err == .None {
+				raw_arr := runtime.Raw_Dynamic_Array{
+					data      = raw_data(reserved_slice),
+					len       = 0,
+					cap       = initial_commit,
+					allocator = runtime.nil_allocator(),
+				}
+				return Core_Memory{
+					buf           = transmute([dynamic]u8)raw_arr,
+					pos           = 0,
+					allocator     = allocator,
+					vmem_reserved = aligned_reserve,
+				}
+			}
+			vmem.release(raw_data(reserved_slice), uint(aligned_reserve))
+		}
+	}
 	return Core_Memory{
 		buf       = make([dynamic]u8, 0, 1024, allocator),
 		pos       = 0,
@@ -47,14 +89,15 @@ core_memory_init :: proc(allocator := context.allocator) -> Core {
 	}
 }
 
-core_memory_init_from_bytes :: proc(data: []u8, allocator := context.allocator) -> Core {
-	buf := make([dynamic]u8, len(data), allocator)
-	copy(buf[:], data)
-	return Core_Memory{
-		buf       = buf,
-		pos       = 0,
-		allocator = allocator,
+core_memory_init_from_bytes :: proc(data: []u8, allocator := context.allocator, reserve_size: int = DEFAULT_VMEM_RESERVE_SIZE) -> Core {
+	c := core_memory_init(allocator, max(reserve_size, len(data)))
+	if len(data) > 0 {
+		m := &c.(Core_Memory)
+		if err := _memory_resize(m, len(data)); err == nil {
+			copy(m.buf[:len(data)], data)
+		}
 	}
+	return c
 }
 
 core_memory_bytes :: proc(c: ^Core) -> []u8 {
@@ -102,8 +145,16 @@ core_buffered_file_open :: proc(path: string, buffer_size: i64 = DEFAULT_BUFFER_
 core_destroy :: proc(c: ^Core, close_file := false) -> Error {
 	switch &v in c {
 	case Core_Memory:
-		delete(v.buf)
-		v.buf = nil
+		if v.vmem_reserved > 0 {
+			if raw_data(v.buf) != nil {
+				vmem.release(raw_data(v.buf), uint(v.vmem_reserved))
+			}
+			v.buf = nil
+			v.vmem_reserved = 0
+		} else {
+			delete(v.buf)
+			v.buf = nil
+		}
 		v.pos = 0
 	case Core_File:
 		if close_file && v.file != nil {
@@ -112,8 +163,16 @@ core_destroy :: proc(c: ^Core, close_file := false) -> Error {
 		}
 	case Core_Buffered_File:
 		_ = _buffered_flush(&v)
-		delete(v.memory.buf)
-		v.memory.buf = nil
+		if v.memory.vmem_reserved > 0 {
+			if raw_data(v.memory.buf) != nil {
+				vmem.release(raw_data(v.memory.buf), uint(v.memory.vmem_reserved))
+			}
+			v.memory.buf = nil
+			v.memory.vmem_reserved = 0
+		} else {
+			delete(v.memory.buf)
+			v.memory.buf = nil
+		}
 		if close_file && v.file.file != nil {
 			os.close(v.file.file) or_return
 			v.file.file = nil
@@ -244,7 +303,12 @@ core_set_length :: proc(c: ^Core, new_len: i64) -> Error {
 		if new_len > i64(len(v.buf)) {
 			return Xitdb_Error.Invalid_Offset
 		}
-		resize(&v.buf, int(new_len))
+		if v.vmem_reserved > 0 {
+			raw_arr := (^runtime.Raw_Dynamic_Array)(&v.buf)
+			raw_arr.len = int(new_len)
+		} else {
+			resize(&v.buf, int(new_len))
+		}
 		if v.pos > new_len {
 			v.pos = new_len
 		}
@@ -266,7 +330,12 @@ core_set_length :: proc(c: ^Core, new_len: i64) -> Error {
 			clear(&v.memory.buf)
 		} else if new_len < v.memory_pos + buf_size {
 			new_buf_len := int(new_len - v.memory_pos)
-			resize(&v.memory.buf, new_buf_len)
+			if v.memory.vmem_reserved > 0 {
+				raw_arr := (^runtime.Raw_Dynamic_Array)(&v.memory.buf)
+				raw_arr.len = new_buf_len
+			} else {
+				resize(&v.memory.buf, new_buf_len)
+			}
 		}
 		v.file_len = nil
 		_ = os.truncate(v.file.file, new_len)
@@ -359,12 +428,138 @@ core_read_exact :: proc(c: ^Core, p: []u8) -> Error {
 	return nil
 }
 
+// Stateless positional read up to len(p) bytes at `pos` without mutating any cursor position.
+core_read_at :: proc(c: ^Core, pos: i64, p: []u8) -> (read_n: int, err: Error) {
+	if pos < 0 {
+		return 0, Xitdb_Error.Expected_Unsigned_Long
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	switch &v in c {
+	case Core_Memory:
+		if pos >= i64(len(v.buf)) {
+			return 0, io.Error.EOF
+		}
+		avail := int(i64(len(v.buf)) - pos)
+		to_read := min(len(p), avail)
+		copy(p[:to_read], v.buf[int(pos):int(pos) + to_read])
+		return to_read, nil
+	case Core_File:
+		n, r_err := os.read_at(v.file, p, pos)
+		if r_err == io.Error.EOF {
+			return n, io.Error.EOF
+		}
+		return n, r_err
+	case Core_Buffered_File:
+		buf_len := i64(len(v.memory.buf))
+		if buf_len > 0 && pos >= v.memory_pos && pos < v.memory_pos + buf_len {
+			mem_off := int(pos - v.memory_pos)
+			size := min(len(p), int(buf_len) - mem_off)
+			copy(p[:size], v.memory.buf[mem_off:mem_off + size])
+			return size, nil
+		}
+		max_size := len(p)
+		if buf_len > 0 && pos < v.memory_pos {
+			max_size = min(len(p), int(v.memory_pos - pos))
+		}
+		n, r_err := os.read_at(v.file.file, p[:max_size], pos)
+		if r_err == io.Error.EOF {
+			return n, io.Error.EOF
+		}
+		return n, r_err
+	}
+	return 0, .Invalid_Database
+}
+
+// Stateless positional read of exactly len(p) bytes at `pos` without mutating any cursor position.
+core_read_exact_at :: proc(c: ^Core, pos: i64, p: []u8) -> Error {
+	if pos < 0 {
+		return Xitdb_Error.Expected_Unsigned_Long
+	}
+	if len(p) == 0 {
+		return nil
+	}
+	#partial switch &v in c {
+	case Core_Memory:
+		end_pos := pos + i64(len(p))
+		if end_pos > i64(len(v.buf)) {
+			return Xitdb_Error.Unexpected_EOF
+		}
+		copy(p, v.buf[int(pos):int(end_pos)])
+		return nil
+	case Core_Buffered_File:
+		buf_len := i64(len(v.memory.buf))
+		if buf_len > 0 && pos >= v.memory_pos && pos + i64(len(p)) <= v.memory_pos + buf_len {
+			mem_off := int(pos - v.memory_pos)
+			copy(p, v.memory.buf[mem_off : mem_off + len(p)])
+			return nil
+		}
+	}
+	total := 0
+	for total < len(p) {
+		n, err := core_read_at(c, pos + i64(total), p[total:])
+		total += n
+		if err != nil {
+			if err == io.Error.EOF {
+				if total == len(p) {
+					return nil
+				}
+				return Xitdb_Error.Unexpected_EOF
+			}
+			return err
+		}
+		if n == 0 {
+			return Xitdb_Error.Unexpected_EOF
+		}
+	}
+	return nil
+}
+
 // Write all bytes of `p` to `c`.
+@(private)
+_memory_reserve :: #force_inline proc(m: ^Core_Memory, want_cap: int) -> Error {
+	if want_cap <= cap(m.buf) {
+		return nil
+	}
+	if max_sz, ok := m.max_size.?; ok && i64(want_cap) > max_sz {
+		return Xitdb_Error.Write_Failed
+	}
+	if m.vmem_reserved > 0 {
+		if want_cap > m.vmem_reserved {
+			return Xitdb_Error.Write_Failed
+		}
+		raw_arr := (^runtime.Raw_Dynamic_Array)(&m.buf)
+		cur_cap := raw_arr.cap
+		new_cap := max(cur_cap * 2, want_cap, 65536)
+		new_cap = min(_vmem_align_page(new_cap), m.vmem_reserved)
+		commit_ptr := rawptr(uintptr(raw_arr.data) + uintptr(cur_cap))
+		commit_size := uint(new_cap - cur_cap)
+		if c_err := vmem.commit(commit_ptr, commit_size); c_err != .None {
+			return Xitdb_Error.Write_Failed
+		}
+		raw_arr.cap = new_cap
+		return nil
+	}
+	if alloc_err := reserve(&m.buf, want_cap); alloc_err != nil {
+		return Xitdb_Error.Write_Failed
+	}
+	return nil
+}
+
 @(private)
 _memory_resize :: #force_inline proc(m: ^Core_Memory, end_pos: int) -> Error {
 	if end_pos > len(m.buf) {
 		if max_sz, ok := m.max_size.?; ok && i64(end_pos) > max_sz {
 			return Xitdb_Error.Write_Failed
+		}
+		if m.vmem_reserved > 0 {
+			if end_pos > cap(m.buf) {
+				_memory_reserve(m, end_pos) or_return
+			}
+			raw_arr := (^runtime.Raw_Dynamic_Array)(&m.buf)
+			raw_arr.len = end_pos
+			return nil
 		}
 		if alloc_err := resize(&m.buf, end_pos); alloc_err != nil {
 			return Xitdb_Error.Write_Failed
@@ -586,3 +781,88 @@ core_write_slot :: #force_inline proc(c: ^Core, s: Slot) -> Error {
 	buf := slot_to_bytes(s)
 	return core_write_all(c, buf[:])
 }
+
+core_read_byte_at :: #force_inline proc(c: ^Core, pos: i64) -> (v: u8, err: Error) {
+	#partial switch &m in c {
+	case Core_Memory:
+		if pos < 0 || pos >= i64(len(m.buf)) {
+			return 0, Xitdb_Error.Unexpected_EOF
+		}
+		return m.buf[int(pos)], nil
+	case Core_Buffered_File:
+		buf_len := i64(len(m.memory.buf))
+		if buf_len > 0 && pos >= m.memory_pos && pos < m.memory_pos + buf_len {
+			return m.memory.buf[int(pos - m.memory_pos)], nil
+		}
+	}
+	b: [1]u8 = ---
+	core_read_exact_at(c, pos, b[:]) or_return
+	return b[0], nil
+}
+
+core_read_u16_at :: #force_inline proc(c: ^Core, pos: i64) -> (v: u16, err: Error) {
+	b: [2]u8 = ---
+	core_read_exact_at(c, pos, b[:]) or_return
+	return endian.unchecked_get_u16be(b[:]), nil
+}
+
+core_read_u32_at :: #force_inline proc(c: ^Core, pos: i64) -> (v: u32, err: Error) {
+	b: [4]u8 = ---
+	core_read_exact_at(c, pos, b[:]) or_return
+	return endian.unchecked_get_u32be(b[:]), nil
+}
+
+core_read_i64_at :: #force_inline proc(c: ^Core, pos: i64) -> (res: i64, err: Error) {
+	#partial switch &v in c {
+	case Core_Memory:
+		end_pos := pos + 8
+		if pos < 0 || end_pos > i64(len(v.buf)) {
+			return 0, Xitdb_Error.Unexpected_EOF
+		}
+		return i64(endian.unchecked_get_u64be(v.buf[int(pos):int(end_pos)])), nil
+	case Core_Buffered_File:
+		buf_len := i64(len(v.memory.buf))
+		if buf_len > 0 && pos >= v.memory_pos && pos + 8 <= v.memory_pos + buf_len {
+			mem_off := int(pos - v.memory_pos)
+			return i64(endian.unchecked_get_u64be(v.memory.buf[mem_off : mem_off + 8])), nil
+		}
+	}
+	b: [8]u8 = ---
+	core_read_exact_at(c, pos, b[:]) or_return
+	return i64(endian.unchecked_get_u64be(b[:])), nil
+}
+
+core_read_long_at :: #force_inline proc(c: ^Core, pos: i64) -> (res: i64, err: Error) {
+	res = core_read_i64_at(c, pos) or_return
+	if res < 0 {
+		return 0, Xitdb_Error.Expected_Unsigned_Long
+	}
+	return res, nil
+}
+
+core_read_slot_raw_at :: #force_inline proc(c: ^Core, pos: i64) -> (s: Slot, err: Error) {
+	#partial switch &v in c {
+	case Core_Memory:
+		end_pos := pos + SLOT_LENGTH
+		if pos < 0 || end_pos > i64(len(v.buf)) {
+			return {}, Xitdb_Error.Unexpected_EOF
+		}
+		return slot_from_slice_raw(v.buf[int(pos):int(end_pos)]), nil
+	case Core_Buffered_File:
+		buf_len := i64(len(v.memory.buf))
+		if buf_len > 0 && pos >= v.memory_pos && pos + SLOT_LENGTH <= v.memory_pos + buf_len {
+			mem_off := int(pos - v.memory_pos)
+			return slot_from_slice_raw(v.memory.buf[mem_off : mem_off + SLOT_LENGTH]), nil
+		}
+	}
+	buf: [SLOT_LENGTH]u8 = ---
+	core_read_exact_at(c, pos, buf[:]) or_return
+	return slot_from_bytes_raw(buf), nil
+}
+
+core_read_slot_at :: #force_inline proc(c: ^Core, pos: i64) -> (s: Slot, err: Error) {
+	s = core_read_slot_raw_at(c, pos) or_return
+	tag_validate(s.tag) or_return
+	return s, nil
+}
+

@@ -108,8 +108,7 @@ cursor_check_writable :: proc(c: ^Write_Cursor) -> Error {
 cursor_reload_slot :: proc(c: ^Write_Cursor) -> Error {
 	if (c.transaction != nil || c.db.tx_start != nil) && !is_root(c.slot_ptr) {
 		if pos, ok := c.slot_ptr.position.?; ok {
-			core_seek_to(c.db.core, pos) or_return
-			slot := core_read_slot(c.db.core) or_return
+			slot := core_read_slot_at(c.db.core, pos) or_return
 			c.slot_ptr = slot_pointer_with_slot(c.slot_ptr, slot)
 		}
 	}
@@ -245,13 +244,12 @@ cursor_read_bytes_object :: proc(c: Read_Cursor, max_size: i64 = 0, allocator :=
 		return Bytes{value = make([]u8, 0, allocator)}, nil
 
 	case .Bytes:
-		core_seek_to(c.db.core, slot_ptr.slot.value) or_return
-		value_size := core_read_long(c.db.core) or_return
+		value_size := core_read_long_at(c.db.core, slot_ptr.slot.value) or_return
 		if max_size > 0 && value_size > max_size {
 			return {}, .Stream_Too_Long
 		}
 		value := make([]u8, int(value_size), allocator)
-		err := core_read_exact(c.db.core, value)
+		err := core_read_exact_at(c.db.core, slot_ptr.slot.value + 8, value)
 		if err != nil {
 			delete(value, allocator)
 			return {}, err
@@ -259,7 +257,7 @@ cursor_read_bytes_object :: proc(c: Read_Cursor, max_size: i64 = 0, allocator :=
 		format_tag: []u8
 		if slot_ptr.slot.full {
 			format_tag = make([]u8, 2, allocator)
-			if ft_err := core_read_exact(c.db.core, format_tag); ft_err != nil {
+			if ft_err := core_read_exact_at(c.db.core, slot_ptr.slot.value + 8 + value_size, format_tag); ft_err != nil {
 				delete(value, allocator)
 				delete(format_tag, allocator)
 				return {}, ft_err
@@ -305,28 +303,27 @@ cursor_read_bytes_buf :: proc(c: Read_Cursor, buffer: []u8) -> (res: Bytes, err:
 		return {}, .End_Of_Stream
 
 	case .Bytes:
-		core_seek_to(c.db.core, slot_ptr.slot.value) or_return
-		value_size := core_read_long(c.db.core) or_return
+		value_size := core_read_long_at(c.db.core, slot_ptr.slot.value) or_return
 		if value_size > i64(len(buffer)) {
 			return {}, .Stream_Too_Long
 		}
 		if slot_ptr.slot.full {
 			if value_size + 2 <= i64(len(buffer)) {
 				combined := buffer[:value_size + 2]
-				core_read_exact(c.db.core, combined) or_return
+				core_read_exact_at(c.db.core, slot_ptr.slot.value + 8, combined) or_return
 				return Bytes{
 					value      = combined[:value_size],
 					format_tag = combined[value_size : value_size + 2],
 				}, nil
 			}
 			value := buffer[:value_size]
-			core_read_exact(c.db.core, value) or_return
+			core_read_exact_at(c.db.core, slot_ptr.slot.value + 8, value) or_return
 			ft := make([]u8, 2, context.temp_allocator)
-			core_read_exact(c.db.core, ft) or_return
+			core_read_exact_at(c.db.core, slot_ptr.slot.value + 8 + value_size, ft) or_return
 			return Bytes{value = value, format_tag = ft}, nil
 		}
 		value := buffer[:value_size]
-		core_read_exact(c.db.core, value) or_return
+		core_read_exact_at(c.db.core, slot_ptr.slot.value + 8, value) or_return
 		return Bytes{value = value}, nil
 
 	case .Short_Bytes:
@@ -372,8 +369,7 @@ cursor_read_kv_pair :: proc(c: Read_Cursor, allocator := context.temp_allocator)
 			hash         = nil,
 		}, nil
 	}
-	core_seek_to(c.db.core, slot_ptr.slot.value) or_return
-	kv_pair := decode_kv_pair(c.db.core, slot_ptr.slot.tag, int(c.db.header.hash_size), allocator) or_return
+	kv_pair := decode_kv_pair_at(c.db.core, slot_ptr.slot.value, slot_ptr.slot.tag, int(c.db.header.hash_size), allocator) or_return
 	key_slot_pos := database_kv_key_position(c.db, slot_ptr.slot)
 	value_slot_pos := database_kv_value_position(c.db, slot_ptr.slot)
 	return Read_KV_Pair_Cursor{
@@ -396,9 +392,8 @@ cursor_read_kv_pair_slots :: proc(c: Read_Cursor) -> (key_cursor: Read_Cursor, v
 	}
 	key_pos := slot_ptr.slot.value + database_kv_key_offset(c.db, slot_ptr.slot.tag)
 	val_pos := key_pos + SLOT_LENGTH
-	core_seek_to(c.db.core, key_pos) or_return
 	b: [SLOT_LENGTH * 2]u8 = ---
-	core_read_exact(c.db.core, b[:]) or_return
+	core_read_exact_at(c.db.core, key_pos, b[:]) or_return
 	key_slot := slot_from_slice_raw(b[0:SLOT_LENGTH])
 	tag_validate(key_slot.tag) or_return
 	val_slot := slot_from_slice_raw(b[SLOT_LENGTH : SLOT_LENGTH * 2])
@@ -423,20 +418,17 @@ cursor_count :: proc(c: Read_Cursor) -> (res: i64, err: Error) {
 	case .None:
 		return 0, nil
 	case .Array_List:
-		core_seek_to(c.db.core, slot_ptr.slot.value) or_return
 		hb: [ARRAY_LIST_HEADER_LENGTH]u8
-		core_read_exact(c.db.core, hb[:]) or_return
+		core_read_exact_at(c.db.core, slot_ptr.slot.value, hb[:]) or_return
 		header := array_list_header_from_bytes(hb) or_return
 		return header.size, nil
 	case .Linked_Array_List, .Sorted_Map, .Sorted_Set:
-		core_seek_to(c.db.core, slot_ptr.slot.value) or_return
 		hb: [BTREE_HEADER_LENGTH]u8
-		core_read_exact(c.db.core, hb[:]) or_return
+		core_read_exact_at(c.db.core, slot_ptr.slot.value, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
 		return header.size, nil
 	case .Bytes:
-		core_seek_to(c.db.core, slot_ptr.slot.value) or_return
-		return core_read_long(c.db.core)
+		return core_read_long_at(c.db.core, slot_ptr.slot.value)
 	case .Short_Bytes:
 		buf: [8]u8
 		endian.unchecked_put_u64be(buf[:], u64(slot_ptr.slot.value))
@@ -450,8 +442,7 @@ cursor_count :: proc(c: Read_Cursor) -> (res: i64, err: Error) {
 		}
 		return i64(size), nil
 	case .Counted_Hash_Map, .Counted_Hash_Set:
-		core_seek_to(c.db.core, slot_ptr.slot.value) or_return
-		return core_read_long(c.db.core)
+		return core_read_long_at(c.db.core, slot_ptr.slot.value)
 	case:
 		return 0, .Unexpected_Tag
 	}
@@ -470,9 +461,8 @@ cursor_reader :: proc(c: Read_Cursor) -> (res: Cursor_Reader, err: Error) {
 	slot_ptr := cursor_resolved(c) or_return
 	#partial switch slot_ptr.slot.tag {
 	case .Bytes:
-		core_seek_to(c.db.core, slot_ptr.slot.value) or_return
-		size := core_read_long(c.db.core) or_return
-		start_position := core_position(c.db.core) or_return
+		size := core_read_long_at(c.db.core, slot_ptr.slot.value) or_return
+		start_position := slot_ptr.slot.value + 8
 		return Cursor_Reader{
 			parent            = c,
 			size              = size,
@@ -522,8 +512,7 @@ cursor_reader_read :: #force_inline proc(r: ^Cursor_Reader, p: []u8) -> (res: in
 		r.relative_position += read_size
 		return int(read_size), nil
 	}
-	core_seek_to(r.parent.db.core, r.start_position + r.relative_position) or_return
-	core_read_exact(r.parent.db.core, p[:read_size]) or_return
+	core_read_exact_at(r.parent.db.core, r.start_position + r.relative_position, p[:read_size]) or_return
 	r.relative_position += read_size
 	return int(read_size), nil
 }
@@ -544,8 +533,7 @@ cursor_reader_read_fully :: #force_inline proc(r: ^Cursor_Reader, buf: []u8) -> 
 		r.relative_position += n
 		return nil
 	}
-	core_seek_to(r.parent.db.core, r.start_position + r.relative_position) or_return
-	core_read_exact(r.parent.db.core, buf) or_return
+	core_read_exact_at(r.parent.db.core, r.start_position + r.relative_position, buf) or_return
 	r.relative_position += n
 	return nil
 }
@@ -701,9 +689,19 @@ _fill_slot_block_from :: proc(cursor: Read_Cursor, position: i64, start_idx: int
 	if rem_slots <= 0 {
 		return nil
 	}
-	core_seek_to(cursor.db.core, position + i64(start_idx) * SLOT_LENGTH) or_return
+	read_pos := position + i64(start_idx) * SLOT_LENGTH
+	byte_len := rem_slots * SLOT_LENGTH
+	if mem_slice, in_mem, slice_err := core_slice_at(cursor.db.core, read_pos, byte_len); in_mem {
+		if slice_err != nil {
+			return slice_err
+		}
+		for j in 0 ..< rem_slots {
+			level.block[start_idx + j] = slot_from_slice(mem_slice[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH]) or_return
+		}
+		return nil
+	}
 	index_block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
-	core_read_exact(cursor.db.core, index_block_bytes[:rem_slots * SLOT_LENGTH]) or_return
+	core_read_exact_at(cursor.db.core, read_pos, index_block_bytes[:byte_len]) or_return
 	for j in 0 ..< rem_slots {
 		sb: [SLOT_LENGTH]u8 = ---
 		copy(sb[:], index_block_bytes[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH])
@@ -721,9 +719,8 @@ _init_iter_level :: proc(cursor: Read_Cursor, position: i64, level: ^Iter_Level)
 
 @(private)
 _init_btree_iter_level :: proc(cursor: Read_Cursor, node_ptr: i64, level: ^Iter_Level) -> Error {
-	core_seek_to(cursor.db.core, node_ptr) or_return
 	header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
-	core_read_exact(cursor.db.core, header_bytes[:]) or_return
+	core_read_exact_at(cursor.db.core, node_ptr, header_bytes[:]) or_return
 	if header_bytes[0] > u8(BTree_Node_Kind.Branch) {
 		return .Invalid_BTree_Node_Kind
 	}
@@ -745,9 +742,8 @@ cursor_iterator :: proc(unresolved_cursor: Read_Cursor) -> (res: Cursor_Iterator
 		res.index = 0
 	case .Array_List:
 		position := cursor.slot_ptr.slot.value
-		core_seek_to(cursor.db.core, position) or_return
 		hb: [ARRAY_LIST_HEADER_LENGTH]u8 = ---
-		core_read_exact(cursor.db.core, hb[:]) or_return
+		core_read_exact_at(cursor.db.core, position, hb[:]) or_return
 		header := array_list_header_from_bytes(hb) or_return
 		res.size = header.size
 		res.index = 0
@@ -755,9 +751,8 @@ cursor_iterator :: proc(unresolved_cursor: Read_Cursor) -> (res: Cursor_Iterator
 		res.stack_len = 1
 	case .Linked_Array_List, .Sorted_Map, .Sorted_Set:
 		position := cursor.slot_ptr.slot.value
-		core_seek_to(cursor.db.core, position) or_return
 		hb: [BTREE_HEADER_LENGTH]u8 = ---
-		core_read_exact(cursor.db.core, hb[:]) or_return
+		core_read_exact_at(cursor.db.core, position, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
 		res.size = header.size
 		res.index = 0
@@ -798,9 +793,8 @@ _sorted_header :: proc(cursor: Read_Cursor) -> (res: BTree_Header, err: Error) {
 	case:
 		return {}, .Unexpected_Tag
 	}
-	core_seek_to(cursor.db.core, cursor.slot_ptr.slot.value) or_return
 	hb: [BTREE_HEADER_LENGTH]u8 = ---
-	core_read_exact(cursor.db.core, hb[:]) or_return
+	core_read_exact_at(cursor.db.core, cursor.slot_ptr.slot.value, hb[:]) or_return
 	return btree_header_from_bytes(hb)
 }
 
@@ -823,9 +817,8 @@ cursor_iterator_sorted_from_index :: proc(unresolved_cursor: Read_Cursor, start_
 	node_ptr := header.root_ptr
 	rem := idx
 	for {
-		core_seek_to(cursor.db.core, node_ptr) or_return
 		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
-		core_read_exact(cursor.db.core, header_bytes[:]) or_return
+		core_read_exact_at(cursor.db.core, node_ptr, header_bytes[:]) or_return
 		kind_int := header_bytes[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
 			return {}, .Invalid_BTree_Node_Kind
@@ -846,9 +839,8 @@ cursor_iterator_sorted_from_index :: proc(unresolved_cursor: Read_Cursor, start_
 			break
 		}
 		counts_pos := position + SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
-		core_seek_to(cursor.db.core, counts_pos) or_return
 		counts_buf: [8 * BTREE_SLOT_COUNT]u8 = ---
-		core_read_exact(cursor.db.core, counts_buf[:num * 8]) or_return
+		core_read_exact_at(cursor.db.core, counts_pos, counts_buf[:num * 8]) or_return
 		i := 0
 		for i + 1 < num {
 			cnt := i64(endian.unchecked_get_u64be(counts_buf[i * 8 : i * 8 + 8]))
@@ -882,9 +874,8 @@ cursor_iterator_sorted_from_key :: proc(unresolved_cursor: Read_Cursor, start_ke
 	node_ptr := header.root_ptr
 	before: i64 = 0
 	for {
-		core_seek_to(cursor.db.core, node_ptr) or_return
 		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
-		core_read_exact(cursor.db.core, header_bytes[:]) or_return
+		core_read_exact_at(cursor.db.core, node_ptr, header_bytes[:]) or_return
 		kind_int := header_bytes[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
 			return {}, .Invalid_BTree_Node_Kind
@@ -898,7 +889,7 @@ cursor_iterator_sorted_from_key :: proc(unresolved_cursor: Read_Cursor, start_ke
 		if BTree_Node_Kind(kind_int) == .Leaf {
 			if num > 0 {
 				index_block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
-				core_read_exact(cursor.db.core, index_block_bytes[:num * SLOT_LENGTH]) or_return
+				core_read_exact_at(cursor.db.core, position, index_block_bytes[:num * SLOT_LENGTH]) or_return
 				for j in 0 ..< num {
 					level.block[j] = slot_from_slice(index_block_bytes[j * SLOT_LENGTH : (j + 1) * SLOT_LENGTH]) or_return
 				}
@@ -927,7 +918,7 @@ cursor_iterator_sorted_from_key :: proc(unresolved_cursor: Read_Cursor, start_ke
 			break
 		}
 		branch_buf: [(SLOT_LENGTH * 2 + 8) * BTREE_SLOT_COUNT]u8 = ---
-		core_read_exact(cursor.db.core, branch_buf[:SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + num * 8]) or_return
+		core_read_exact_at(cursor.db.core, position, branch_buf[:SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + num * 8]) or_return
 		lo := 1
 		hi := num
 		sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
@@ -970,9 +961,8 @@ cursor_iterator_array_list_from_index :: proc(unresolved_cursor: Read_Cursor, st
 	case:
 		return {}, .Unexpected_Tag
 	}
-	core_seek_to(cursor.db.core, cursor.slot_ptr.slot.value) or_return
 	hb: [ARRAY_LIST_HEADER_LENGTH]u8 = ---
-	core_read_exact(cursor.db.core, hb[:]) or_return
+	core_read_exact_at(cursor.db.core, cursor.slot_ptr.slot.value, hb[:]) or_return
 	header := array_list_header_from_bytes(hb) or_return
 	idx, ok := _resolve_start_index(start_index, header.size)
 	if !ok {
@@ -1007,9 +997,8 @@ cursor_iterator_linked_array_list_from_index :: proc(unresolved_cursor: Read_Cur
 	case:
 		return {}, .Unexpected_Tag
 	}
-	core_seek_to(cursor.db.core, cursor.slot_ptr.slot.value) or_return
 	hb: [BTREE_HEADER_LENGTH]u8 = ---
-	core_read_exact(cursor.db.core, hb[:]) or_return
+	core_read_exact_at(cursor.db.core, cursor.slot_ptr.slot.value, hb[:]) or_return
 	header := btree_header_from_bytes(hb) or_return
 	idx, ok := _resolve_start_index(start_index, header.size)
 	if !ok {
@@ -1018,9 +1007,8 @@ cursor_iterator_linked_array_list_from_index :: proc(unresolved_cursor: Read_Cur
 	node_ptr := header.root_ptr
 	rem := idx
 	for {
-		core_seek_to(cursor.db.core, node_ptr) or_return
 		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
-		core_read_exact(cursor.db.core, header_bytes[:]) or_return
+		core_read_exact_at(cursor.db.core, node_ptr, header_bytes[:]) or_return
 		kind_int := header_bytes[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
 			return {}, .Invalid_BTree_Node_Kind
@@ -1041,9 +1029,8 @@ cursor_iterator_linked_array_list_from_index :: proc(unresolved_cursor: Read_Cur
 			break
 		}
 		counts_pos := position + SLOT_LENGTH * BTREE_SLOT_COUNT
-		core_seek_to(cursor.db.core, counts_pos) or_return
 		counts_buf: [8 * BTREE_SLOT_COUNT]u8 = ---
-		core_read_exact(cursor.db.core, counts_buf[:num * 8]) or_return
+		core_read_exact_at(cursor.db.core, counts_pos, counts_buf[:num * 8]) or_return
 		i := 0
 		for i + 1 < num {
 			cnt := i64(endian.unchecked_get_u64be(counts_buf[i * 8 : i * 8 + 8]))
