@@ -173,6 +173,18 @@ for {
 	if !strings.has_prefix(username, "da") do break
 	// match!
 }
+
+// Descending range scan (<= "dz", or pass inclusive = false for < "dz") in O(log N) time:
+rev_it, _ := xitdb.sorted_map_iterator_reverse_from_string(username_idx, "dz", inclusive = true)
+for {
+	cur_maybe, _ := xitdb.cursor_iterator_prev(&rev_it)
+	cur, ok := cur_maybe.?
+	if !ok do break
+
+	kv, _ := xitdb.cursor_read_kv_pair(cur, context.temp_allocator)
+	username, _ := xitdb.cursor_read_string(kv.key_cursor, 128, context.temp_allocator)
+	if username < "da" do break
+}
 ```
 
 ### 2. Zero-Copy Collection Cloning & `cursor_freeze`

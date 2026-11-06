@@ -730,6 +730,21 @@ driver_assert_moment_array_list :: proc(ctx: ^Suite_Ctx, moment_idx: i64, key: s
 		testing.expect_value(ctx.t, s_err, nil)
 		testing.expect_value(ctx.t, actual, expected)
 	}
+
+	// Cross-cutting invariant: reverse iterator yields exact reverse sequence
+	rev_it, rev_err := xitdb.array_list_iterator_reverse(list)
+	testing.expect_value(ctx.t, rev_err, nil)
+	rev_idx := len(expected_items) - 1
+	for {
+		c_maybe, p_err := xitdb.cursor_iterator_prev(&rev_it)
+		testing.expect_value(ctx.t, p_err, nil)
+		c, has_c := c_maybe.?
+		if !has_c do break
+		val, _ := xitdb.cursor_read_string(c, 4096, context.temp_allocator)
+		testing.expect_value(ctx.t, val, expected_items[rev_idx])
+		rev_idx -= 1
+	}
+	testing.expect_value(ctx.t, rev_idx, -1)
 }
 
 driver_assert_moment_nested_map_uint :: proc(ctx: ^Suite_Ctx, moment_idx: i64, list_key: string, list_index: i64, map_key: string, expected: u64, target: Db_Target = .Primary) {
@@ -782,6 +797,20 @@ driver_assert_moment_linked_list :: proc(ctx: ^Suite_Ctx, moment_idx: i64, key: 
 		iter_idx += 1
 	}
 	testing.expect_value(ctx.t, iter_idx, len(expected_items))
+
+	rev_it, rev_err := xitdb.linked_array_list_iterator_reverse(list)
+	testing.expect_value(ctx.t, rev_err, nil)
+	rev_idx := len(expected_items) - 1
+	for {
+		c_maybe, p_err := xitdb.cursor_iterator_prev(&rev_it)
+		testing.expect_value(ctx.t, p_err, nil)
+		c, has_c := c_maybe.?
+		if !has_c do break
+		val, _ := xitdb.cursor_read_string(c, 4096, context.temp_allocator)
+		testing.expect_value(ctx.t, val, expected_items[rev_idx])
+		rev_idx -= 1
+	}
+	testing.expect_value(ctx.t, rev_idx, -1)
 }
 
 driver_assert_moment_counted_map_count :: proc(ctx: ^Suite_Ctx, moment_idx: i64, key: string, expected_count: i64, target: Db_Target = .Primary) {
@@ -851,6 +880,22 @@ driver_assert_moment_sorted_set :: proc(ctx: ^Suite_Ctx, moment_idx: i64, key: s
 		testing.expect_value(ctx.t, m_err, nil)
 		testing.expect_value(ctx.t, actual_m, m)
 	}
+
+	rev_it, rev_err := xitdb.sorted_set_iterator_reverse(ss)
+	testing.expect_value(ctx.t, rev_err, nil)
+	rev_idx := len(expected_sorted_members) - 1
+	for {
+		c_maybe, p_err := xitdb.cursor_iterator_prev(&rev_it)
+		testing.expect_value(ctx.t, p_err, nil)
+		c, has_c := c_maybe.?
+		if !has_c do break
+		kv, kv_err := xitdb.cursor_read_kv_pair(c, context.temp_allocator)
+		testing.expect_value(ctx.t, kv_err, nil)
+		actual_m, _ := xitdb.cursor_read_string(kv.key_cursor, 4096, context.temp_allocator)
+		testing.expect_value(ctx.t, actual_m, expected_sorted_members[rev_idx])
+		rev_idx -= 1
+	}
+	testing.expect_value(ctx.t, rev_idx, -1)
 }
 
 driver_assert_moment_sorted_map :: proc(ctx: ^Suite_Ctx, moment_idx: i64, key: string, expected_count: i64, target: Db_Target = .Primary) -> xitdb.Read_Sorted_Map {
@@ -894,6 +939,31 @@ driver_assert_moment_sorted_map :: proc(ctx: ^Suite_Ctx, moment_idx: i64, key: s
 		iter_count += 1
 	}
 	testing.expect_value(ctx.t, iter_count, expected_count)
+
+	// Cross-cutting invariant: Sorted_Map reverse iterator yields keys in strict descending order
+	rev_it, rev_err := xitdb.sorted_map_iterator_reverse(sm)
+	testing.expect_value(ctx.t, rev_err, nil)
+	prev_rev := ""
+	rev_rank := expected_count - 1
+	for {
+		c_maybe, p_err := xitdb.cursor_iterator_prev(&rev_it)
+		testing.expect_value(ctx.t, p_err, nil)
+		c, ok := c_maybe.?
+		if !ok do break
+		kv, kv_err := xitdb.cursor_read_kv_pair(c, context.temp_allocator)
+		testing.expect_value(ctx.t, kv_err, nil)
+		k_str, k_err := xitdb.cursor_read_string(kv.key_cursor, 4096, context.temp_allocator)
+		testing.expect_value(ctx.t, k_err, nil)
+		if prev_rev != "" {
+			testing.expectf(ctx.t, prev_rev > k_str, "SortedMap reverse invariant violated: %q <= %q", prev_rev, k_str)
+		}
+		rk, rk_err := xitdb.sorted_map_rank(sm, k_str)
+		testing.expect_value(ctx.t, rk_err, nil)
+		testing.expect_value(ctx.t, rk, rev_rank)
+		prev_rev = k_str
+		rev_rank -= 1
+	}
+	testing.expect_value(ctx.t, rev_rank, -1)
 	return sm
 }
 
@@ -1127,7 +1197,23 @@ _assert_range_iterator_suffix :: proc(t: ^testing.T, it: ^xitdb.Cursor_Iterator,
 	testing.expect_value(t, expected_idx, total_count)
 }
 
-// Verify `iterator_from` on Array_List and Linked_Array_List for positive, negative, and out-of-bounds indices
+@(private = "file")
+_assert_reverse_range_iterator_prefix :: proc(t: ^testing.T, it: ^xitdb.Cursor_Iterator, resolved_start: i64) {
+	expected_idx := resolved_start
+	for {
+		c_maybe, p_err := xitdb.cursor_iterator_prev(it)
+		testing.expect_value(t, p_err, nil)
+		c, ok := c_maybe.?
+		if !ok do break
+		actual, _ := xitdb.cursor_read_string(c, 64, context.temp_allocator)
+		expected_str := fmt.tprintf("item-%03d", expected_idx)
+		testing.expect_value(t, actual, expected_str)
+		expected_idx -= 1
+	}
+	testing.expect_value(t, expected_idx, -1)
+}
+
+// Verify `iterator_from` and `iterator_reverse_from` on Array_List and Linked_Array_List for positive, negative, and out-of-bounds indices
 driver_verify_indexed_range_iterators :: proc(ctx: ^Suite_Ctx, moment_idx: i64, array_key: string, linked_key: string, total_count: i64, start_indices: []i64, out_of_bounds_indices: []i64) {
 	al_cur, ok_al := _moment_require_cursor(ctx, moment_idx, array_key)
 	ll_cur, ok_ll := _moment_require_cursor(ctx, moment_idx, linked_key)
@@ -1146,6 +1232,14 @@ driver_verify_indexed_range_iterators :: proc(ctx: ^Suite_Ctx, moment_idx: i64, 
 		it_ll, err_ll := xitdb.linked_array_list_iterator_from(ll, start)
 		testing.expect_value(ctx.t, err_ll, nil)
 		_assert_range_iterator_suffix(ctx.t, &it_ll, resolved, total_count)
+
+		rev_al, rerr_al := xitdb.array_list_iterator_reverse_from(al, start)
+		testing.expect_value(ctx.t, rerr_al, nil)
+		_assert_reverse_range_iterator_prefix(ctx.t, &rev_al, resolved)
+
+		rev_ll, rerr_ll := xitdb.linked_array_list_iterator_reverse_from(ll, start)
+		testing.expect_value(ctx.t, rerr_ll, nil)
+		_assert_reverse_range_iterator_prefix(ctx.t, &rev_ll, resolved)
 	}
 
 	for oob in out_of_bounds_indices {
@@ -1158,6 +1252,16 @@ driver_verify_indexed_range_iterators :: proc(ctx: ^Suite_Ctx, moment_idx: i64, 
 		testing.expect_value(ctx.t, err2, nil)
 		c2, _ := xitdb.cursor_iterator_next(&it_ll)
 		testing.expect(ctx.t, c2 == nil, "Expected empty Linked_Array_List iterator for out-of-bounds start")
+
+		rev_al, rerr1 := xitdb.array_list_iterator_reverse_from(al, oob)
+		testing.expect_value(ctx.t, rerr1, nil)
+		rc1, _ := xitdb.cursor_iterator_prev(&rev_al)
+		testing.expect(ctx.t, rc1 == nil, "Expected empty reverse Array_List iterator for out-of-bounds start")
+
+		rev_ll, rerr2 := xitdb.linked_array_list_iterator_reverse_from(ll, oob)
+		testing.expect_value(ctx.t, rerr2, nil)
+		rc2, _ := xitdb.cursor_iterator_prev(&rev_ll)
+		testing.expect(ctx.t, rc2 == nil, "Expected empty reverse Linked_Array_List iterator for out-of-bounds start")
 	}
 }
 
@@ -3916,6 +4020,215 @@ driver_assert_vmem_write_overflow_and_init_from_bytes :: proc(ctx: ^Suite_Ctx, e
 	testing.expect(ctx.t, slice.equal(read_back, snapshot), "Expected core_memory_init_from_bytes contents to match")
 }
 
+driver_flush_primary :: proc(ctx: ^Suite_Ctx) {
+	testing.expect_value(ctx.t, xitdb.core_sync(&ctx.primary_core), nil)
+}
+
+driver_query_sorted_map_keys_reverse_from_key :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	map_key: string,
+	upper_bound: string,
+	inclusive: bool,
+	limit: int = 0,
+) -> []string {
+	m := driver_read_moment_map(ctx, moment_idx)
+	sm_cur, _ := xitdb.hash_map_get_cursor(m, map_key)
+	sm, _ := xitdb.read_sorted_map_init(sm_cur.?)
+
+	it, err := xitdb.sorted_map_iterator_reverse_from_string(sm, upper_bound, inclusive)
+	testing.expect_value(ctx.t, err, nil)
+
+	results := make([dynamic]string, 0, 8, context.temp_allocator)
+	for {
+		if limit > 0 && len(results) >= limit do break
+		c_maybe, p_err := xitdb.cursor_iterator_prev(&it)
+		testing.expect_value(ctx.t, p_err, nil)
+		c, ok := c_maybe.?
+		if !ok do break
+		kv, _ := xitdb.cursor_read_kv_pair(c, context.temp_allocator)
+		k, _ := xitdb.cursor_read_string(kv.key_cursor, 64, context.temp_allocator)
+		append(&results, k)
+	}
+	return results[:]
+}
+
+driver_query_sorted_set_reverse_from_key :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	set_key: string,
+	upper_bound: string,
+	inclusive: bool,
+	limit: int = 0,
+) -> []string {
+	m := driver_read_moment_map(ctx, moment_idx)
+	ss_cur, _ := xitdb.hash_map_get_cursor(m, set_key)
+	ss, _ := xitdb.read_sorted_set_init(ss_cur.?)
+
+	it, err := xitdb.sorted_set_iterator_reverse_from_string(ss, upper_bound, inclusive)
+	testing.expect_value(ctx.t, err, nil)
+
+	results := make([dynamic]string, 0, 8, context.temp_allocator)
+	for {
+		if limit > 0 && len(results) >= limit do break
+		c_maybe, p_err := xitdb.cursor_iterator_prev(&it)
+		testing.expect_value(ctx.t, p_err, nil)
+		c, ok := c_maybe.?
+		if !ok do break
+		kv, _ := xitdb.cursor_read_kv_pair(c, context.temp_allocator)
+		k, _ := xitdb.cursor_read_string(kv.key_cursor, 64, context.temp_allocator)
+		append(&results, k)
+	}
+	return results[:]
+}
+
+driver_query_sorted_map_keys_reverse_from_index :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	map_key: string,
+	start_idx: i64,
+	limit: int = 0,
+) -> []string {
+	m := driver_read_moment_map(ctx, moment_idx)
+	sm_cur, _ := xitdb.hash_map_get_cursor(m, map_key)
+	sm, _ := xitdb.read_sorted_map_init(sm_cur.?)
+
+	it, err := xitdb.sorted_map_iterator_reverse_from_index(sm, start_idx)
+	testing.expect_value(ctx.t, err, nil)
+
+	results := make([dynamic]string, 0, 8, context.temp_allocator)
+	for {
+		if limit > 0 && len(results) >= limit do break
+		c_maybe, p_err := xitdb.cursor_iterator_prev(&it)
+		testing.expect_value(ctx.t, p_err, nil)
+		c, ok := c_maybe.?
+		if !ok do break
+		kv, _ := xitdb.cursor_read_kv_pair(c, context.temp_allocator)
+		k, _ := xitdb.cursor_read_string(kv.key_cursor, 64, context.temp_allocator)
+		append(&results, k)
+	}
+	return results[:]
+}
+
+driver_query_array_list_reverse_from_index :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	list_key: string,
+	start_idx: i64,
+	limit: int = 0,
+) -> []string {
+	m := driver_read_moment_map(ctx, moment_idx)
+	al_cur, _ := xitdb.hash_map_get_cursor(m, list_key)
+	al, _ := xitdb.read_array_list_init(al_cur.?)
+
+	it, err := xitdb.array_list_iterator_reverse_from(al, start_idx)
+	testing.expect_value(ctx.t, err, nil)
+
+	results := make([dynamic]string, 0, 8, context.temp_allocator)
+	for {
+		if limit > 0 && len(results) >= limit do break
+		c_maybe, p_err := xitdb.cursor_iterator_prev(&it)
+		testing.expect_value(ctx.t, p_err, nil)
+		c, ok := c_maybe.?
+		if !ok do break
+		s, _ := xitdb.cursor_read_string(c, 64, context.temp_allocator)
+		append(&results, s)
+	}
+	return results[:]
+}
+
+driver_query_linked_list_reverse_from_index :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	list_key: string,
+	start_idx: i64,
+	limit: int = 0,
+) -> []string {
+	m := driver_read_moment_map(ctx, moment_idx)
+	ll_cur, _ := xitdb.hash_map_get_cursor(m, list_key)
+	ll, _ := xitdb.read_linked_array_list_init(ll_cur.?)
+
+	it, err := xitdb.linked_array_list_iterator_reverse_from(ll, start_idx)
+	testing.expect_value(ctx.t, err, nil)
+
+	results := make([dynamic]string, 0, 8, context.temp_allocator)
+	for {
+		if limit > 0 && len(results) >= limit do break
+		c_maybe, p_err := xitdb.cursor_iterator_prev(&it)
+		testing.expect_value(ctx.t, p_err, nil)
+		c, ok := c_maybe.?
+		if !ok do break
+		s, _ := xitdb.cursor_read_string(c, 64, context.temp_allocator)
+		append(&results, s)
+	}
+	return results[:]
+}
+
+driver_assert_hamt_reverse_matches_forward :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	map_key: string,
+	set_key: string,
+	expected_count: int,
+) {
+	m := driver_read_moment_map(ctx, moment_idx)
+
+	cm_cur, _ := xitdb.hash_map_get_cursor(m, map_key)
+	cm, _ := xitdb.read_counted_hash_map_init(cm_cur.?)
+	fwd_keys := make([dynamic]string, 0, expected_count, context.temp_allocator)
+	it_fwd, _ := xitdb.hash_map_iterator(cm.read_hash_map)
+	for {
+		c_maybe, _ := xitdb.cursor_iterator_next(&it_fwd)
+		c, ok := c_maybe.?
+		if !ok do break
+		kv, _ := xitdb.cursor_read_kv_pair(c, context.temp_allocator)
+		k, _ := xitdb.cursor_read_string(kv.key_cursor, 64, context.temp_allocator)
+		append(&fwd_keys, k)
+	}
+	testing.expect_value(ctx.t, len(fwd_keys), expected_count)
+
+	it_rev, r_err := xitdb.hash_map_iterator_reverse(cm.read_hash_map)
+	testing.expect_value(ctx.t, r_err, nil)
+	rev_idx := len(fwd_keys) - 1
+	for {
+		c_maybe, p_err := xitdb.cursor_iterator_prev(&it_rev)
+		testing.expect_value(ctx.t, p_err, nil)
+		c, ok := c_maybe.?
+		if !ok do break
+		kv, _ := xitdb.cursor_read_kv_pair(c, context.temp_allocator)
+		k, _ := xitdb.cursor_read_string(kv.key_cursor, 64, context.temp_allocator)
+		testing.expect_value(ctx.t, k, fwd_keys[rev_idx])
+		rev_idx -= 1
+	}
+	testing.expect_value(ctx.t, rev_idx, -1)
+
+	hs_cur, _ := xitdb.hash_map_get_cursor(m, set_key)
+	hs, _ := xitdb.read_hash_set_init(hs_cur.?)
+	hs_fwd := make([dynamic]string, 0, expected_count, context.temp_allocator)
+	hs_it_fwd, _ := xitdb.hash_set_iterator(hs)
+	for {
+		c_maybe, _ := xitdb.cursor_iterator_next(&hs_it_fwd)
+		c, ok := c_maybe.?
+		if !ok do break
+		k, _ := xitdb.cursor_read_string(c, 64, context.temp_allocator)
+		append(&hs_fwd, k)
+	}
+	testing.expect_value(ctx.t, len(hs_fwd), expected_count)
+
+	hs_it_rev, hs_r_err := xitdb.hash_set_iterator_reverse(hs)
+	testing.expect_value(ctx.t, hs_r_err, nil)
+	hs_rev_idx := len(hs_fwd) - 1
+	for {
+		c_maybe, p_err := xitdb.cursor_iterator_prev(&hs_it_rev)
+		testing.expect_value(ctx.t, p_err, nil)
+		c, ok := c_maybe.?
+		if !ok do break
+		k, _ := xitdb.cursor_read_string(c, 64, context.temp_allocator)
+		testing.expect_value(ctx.t, k, hs_fwd[hs_rev_idx])
+		hs_rev_idx -= 1
+	}
+	testing.expect_value(ctx.t, hs_rev_idx, -1)
+}
 
 
 

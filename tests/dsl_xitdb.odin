@@ -82,6 +82,10 @@ upon_compacting_database :: proc(ctx: ^Suite_Ctx, use_file_offset_map: bool = fa
 	driver_compact_primary(ctx, use_file_offset_map)
 }
 
+upon_flushing_database :: proc(ctx: ^Suite_Ctx) {
+	driver_flush_primary(ctx)
+}
+
 // ----------------------------------------------------------------------------
 // `@then` Steps — Domain Outcome Assertions
 // ----------------------------------------------------------------------------
@@ -424,6 +428,78 @@ then_virtual_memory_enforces_reservation_cap_and_clones_from_bytes :: proc(
 ) {
 	driver_assert_vmem_write_overflow_and_init_from_bytes(ctx, expected_length, expected_overflow_err)
 	driver_assert_vmem_base_pointer_unchanged(ctx)
+}
+
+then_sorted_map_reverse_from_key_equals :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	map_key: string,
+	upper_bound: string,
+	inclusive: bool,
+	expected_keys: []string,
+	limit: int = 0,
+) {
+	actual := driver_query_sorted_map_keys_reverse_from_key(ctx, moment_idx, map_key, upper_bound, inclusive, limit)
+	driver_assert_string_slice(ctx.t, actual, expected_keys)
+}
+
+then_sorted_set_reverse_from_key_equals :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	set_key: string,
+	upper_bound: string,
+	inclusive: bool,
+	expected_members: []string,
+	limit: int = 0,
+) {
+	actual := driver_query_sorted_set_reverse_from_key(ctx, moment_idx, set_key, upper_bound, inclusive, limit)
+	driver_assert_string_slice(ctx.t, actual, expected_members)
+}
+
+then_sorted_map_reverse_from_index_equals :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	map_key: string,
+	start_idx: i64,
+	expected_keys: []string,
+	limit: int = 0,
+) {
+	actual := driver_query_sorted_map_keys_reverse_from_index(ctx, moment_idx, map_key, start_idx, limit)
+	driver_assert_string_slice(ctx.t, actual, expected_keys)
+}
+
+then_array_list_reverse_from_index_equals :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	list_key: string,
+	start_idx: i64,
+	expected_items: []string,
+	limit: int = 0,
+) {
+	actual := driver_query_array_list_reverse_from_index(ctx, moment_idx, list_key, start_idx, limit)
+	driver_assert_string_slice(ctx.t, actual, expected_items)
+}
+
+then_linked_list_reverse_from_index_equals :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	list_key: string,
+	start_idx: i64,
+	expected_items: []string,
+	limit: int = 0,
+) {
+	actual := driver_query_linked_list_reverse_from_index(ctx, moment_idx, list_key, start_idx, limit)
+	driver_assert_string_slice(ctx.t, actual, expected_items)
+}
+
+then_hamt_reverse_iterators_mirror_forward_order :: proc(
+	ctx: ^Suite_Ctx,
+	moment_idx: i64,
+	map_key: string,
+	set_key: string,
+	expected_count: int,
+) {
+	driver_assert_hamt_reverse_matches_forward(ctx, moment_idx, map_key, set_key, expected_count)
 }
 
 // ----------------------------------------------------------------------------

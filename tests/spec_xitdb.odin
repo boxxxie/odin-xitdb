@@ -1348,6 +1348,269 @@ spec_virtual_memory_reservation_cap_shrink_regrow_and_init_from_bytes :: proc(t:
 	)
 }
 
+// ----------------------------------------------------------------------------
+// Scenario 41: Reverse & Upper-Bound Range Iterators Across All Collection Types
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_reverse_iterators_across_btree_bplustree_and_radix_trie :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
+
+	given_in_memory_database(&ctx)
+
+	// GIVEN a moment containing sorted keys ["alice", "bob", "charlie", "dave", "erin"]
+	// across Sorted_Map, Sorted_Set, Array_List, Linked_Array_List, Counted_Hash_Map, and Hash_Set
+	users := [?]Key_Uint{
+		{key = "alice",   val = 1},
+		{key = "bob",     val = 2},
+		{key = "charlie", val = 3},
+		{key = "dave",    val = 4},
+		{key = "erin",    val = 5},
+	}
+	names := [?]string{"alice", "bob", "charlie", "dave", "erin"}
+
+	given_committed_moment(
+		&ctx,
+		Op_Put_Sorted_Map{key = "users", entries = users[:]},
+		Op_Put_Sorted_Set{key = "tags", members = names[:]},
+		Op_Put_Array_List{key = "array", items = names[:]},
+		Op_Put_Linked_List{key = "linked", items = names[:]},
+		Op_Put_Counted_Map{key = "hashmap", entries = users[:]},
+		Op_Put_Hash_Set{key = "hashset", members = names[:]},
+	)
+
+	// THEN inclusive upper-bound reverse iteration (`<= "charlie"`) includes "charlie" and descends to "alice"
+	then_sorted_map_reverse_from_key_equals(&ctx, 0, "users", "charlie", inclusive = true,  expected_keys    = []string{"charlie", "bob", "alice"})
+	then_sorted_set_reverse_from_key_equals(&ctx, 0, "tags",  "charlie", inclusive = true,  expected_members = []string{"charlie", "bob", "alice"})
+
+	// AND exclusive upper-bound reverse iteration (`< "charlie"`) strictly precedes "charlie"
+	then_sorted_map_reverse_from_key_equals(&ctx, 0, "users", "charlie", inclusive = false, expected_keys    = []string{"bob", "alice"})
+	then_sorted_set_reverse_from_key_equals(&ctx, 0, "tags",  "charlie", inclusive = false, expected_members = []string{"bob", "alice"})
+
+	// AND an intermediate key ("carol", between "bob" and "charlie") starts at "bob" for both inclusive and exclusive bounds
+	then_sorted_map_reverse_from_key_equals(&ctx, 0, "users", "carol", inclusive = true,  expected_keys = []string{"bob", "alice"})
+	then_sorted_map_reverse_from_key_equals(&ctx, 0, "users", "carol", inclusive = false, expected_keys = []string{"bob", "alice"})
+
+	// AND an upper bound above the maximum key ("zoe") yields the full descending collection
+	then_sorted_map_reverse_from_key_equals(&ctx, 0, "users", "zoe", inclusive = true,  expected_keys = []string{"erin", "dave", "charlie", "bob", "alice"})
+	then_sorted_map_reverse_from_key_equals(&ctx, 0, "users", "zoe", inclusive = false, expected_keys = []string{"erin", "dave", "charlie", "bob", "alice"})
+
+	// AND boundary probes at or below the minimum key ("alice" / "aaa") include or exclude "alice" accurately
+	then_sorted_map_reverse_from_key_equals(&ctx, 0, "users", "alice", inclusive = true,  expected_keys = []string{"alice"})
+	then_sorted_map_reverse_from_key_equals(&ctx, 0, "users", "alice", inclusive = false, expected_keys = []string{})
+	then_sorted_map_reverse_from_key_equals(&ctx, 0, "users", "aaa",   inclusive = true,  expected_keys = []string{})
+
+	// AND reverse iteration from positive or negative index starts at that rank and walks down to index 0
+	then_sorted_map_reverse_from_index_equals(&ctx, 0, "users",   2, expected_keys  = []string{"charlie", "bob", "alice"})
+	then_sorted_map_reverse_from_index_equals(&ctx, 0, "users",  -2, expected_keys  = []string{"dave", "charlie", "bob", "alice"})
+	then_sorted_map_reverse_from_index_equals(&ctx, 0, "users",  99, expected_keys  = []string{})
+	then_array_list_reverse_from_index_equals(&ctx, 0, "array",  -2, expected_items = []string{"dave", "charlie", "bob", "alice"})
+	then_linked_list_reverse_from_index_equals(&ctx, 0, "linked", 2, expected_items = []string{"charlie", "bob", "alice"})
+
+	// AND HAMT reverse iterators (`hash_map_iterator_reverse`, `hash_set_iterator_reverse`) mirror forward HAMT order
+	then_hamt_reverse_iterators_mirror_forward_order(&ctx, 0, "hashmap", "hashset", 5)
+}
+
+// ----------------------------------------------------------------------------
+// Scenario 42: 3-Tier Buffered-File Reverse Iterators & Multi-Level Stale Separators
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_reverse_iterators_on_buffered_file_three_tier_trees_and_boundary_guards :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
+
+	// GIVEN a small-window Core_Buffered_File database (512-byte tail buffer) populated with 200 even-numbered items
+	// ("k-0000", "k-0002", ..., "k-0398") spanning 3-tier B+Trees, 3-tier B-Trees, and 2-tier Radix-Tries
+	given_buffered_file_database(&ctx, buffer_bytes = 512)
+
+	N :: 200
+	sm_entries := make([]Key_Uint, N, context.temp_allocator)
+	ss_members := make([]string, N, context.temp_allocator)
+	list_items := make([]string, N, context.temp_allocator)
+	for i in 0 ..< N {
+		k := fmt.tprintf("k-%04d", i * 2)
+		sm_entries[i] = Key_Uint{key = k, val = u64(i)}
+		ss_members[i] = k
+		list_items[i] = fmt.tprintf("item-%04d", i)
+	}
+
+	given_committed_moment(
+		&ctx,
+		Op_Put_Sorted_Map{key = "sm", entries = sm_entries},
+		Op_Put_Sorted_Set{key = "ss", members = ss_members},
+		Op_Put_Array_List{key = "al", items = list_items},
+		Op_Put_Linked_List{key = "ll", items = list_items},
+	)
+
+	// WHEN the buffered file is flushed so 3-tier nodes are read from the OS file descriptor
+	upon_flushing_database(&ctx)
+
+	// THEN full forward/reverse collection invariants and cross-leaf reverse slices succeed from disk
+	then_moment_has_sorted_map_in_order(&ctx, 0, "sm", i64(N))
+	then_moment_has_sorted_set_in_order(&ctx, 0, "ss", ss_members)
+	then_moment_has_array_list(&ctx, 0, "al", list_items)
+	then_moment_has_linked_list(&ctx, 0, "ll", list_items)
+
+	then_array_list_reverse_from_index_equals(
+		&ctx, 0, "al", start_idx = 17, limit = 4,
+		expected_items = []string{"item-0017", "item-0016", "item-0015", "item-0014"},
+	)
+	then_linked_list_reverse_from_index_equals(
+		&ctx, 0, "ll", start_idx = 17, limit = 4,
+		expected_items = []string{"item-0017", "item-0016", "item-0015", "item-0014"},
+	)
+
+	// WHEN leaf-split boundary key "k-0016" and 2nd-tier branch-split boundary key "k-0128" are deleted in Moment 1
+	// (leaving stale separator keys in parent/grandparent branches while leaf 0-th entries advance to "k-0018" and "k-0130")
+	upon_branching_moment(
+		&ctx,
+		0,
+		Op_Remove_Sorted_Map{key = "sm", keys_to_drop = []string{"k-0016", "k-0128"}},
+	)
+	upon_flushing_database(&ctx)
+
+	// THEN reverse upper-bound queries at or across the deleted leaf-split boundary ("k-0016" / "k-0017" / "k-0018")
+	// seamlessly pop the leaf and step into the preceding leaf ("k-0014", "k-0012", "k-0010")
+	then_sorted_map_reverse_from_key_equals(
+		&ctx, 1, "sm", "k-0016", inclusive = true, limit = 3,
+		expected_keys = []string{"k-0014", "k-0012", "k-0010"},
+	)
+	then_sorted_map_reverse_from_key_equals(
+		&ctx, 1, "sm", "k-0017", inclusive = true, limit = 3,
+		expected_keys = []string{"k-0014", "k-0012", "k-0010"},
+	)
+	then_sorted_map_reverse_from_key_equals(
+		&ctx, 1, "sm", "k-0018", inclusive = false, limit = 3,
+		expected_keys = []string{"k-0014", "k-0012", "k-0010"},
+	)
+	then_sorted_map_reverse_from_key_equals(
+		&ctx, 1, "sm", "k-0018", inclusive = true, limit = 3,
+		expected_keys = []string{"k-0018", "k-0014", "k-0012"},
+	)
+
+	// AND reverse upper-bound queries across the deleted 2nd-tier internal branch boundary ("k-0128" / "k-0129" / "k-0130")
+	// cascade up two branch levels and descend into the preceding subtree ("k-0126", "k-0124", "k-0122")
+	then_sorted_map_reverse_from_key_equals(
+		&ctx, 1, "sm", "k-0128", inclusive = true, limit = 3,
+		expected_keys = []string{"k-0126", "k-0124", "k-0122"},
+	)
+	then_sorted_map_reverse_from_key_equals(
+		&ctx, 1, "sm", "k-0129", inclusive = true, limit = 3,
+		expected_keys = []string{"k-0126", "k-0124", "k-0122"},
+	)
+	then_sorted_map_reverse_from_key_equals(
+		&ctx, 1, "sm", "k-0130", inclusive = false, limit = 3,
+		expected_keys = []string{"k-0126", "k-0124", "k-0122"},
+	)
+	then_sorted_map_reverse_from_key_equals(
+		&ctx, 1, "sm", "k-0130", inclusive = true, limit = 3,
+		expected_keys = []string{"k-0130", "k-0126", "k-0124"},
+	)
+}
+
+// ----------------------------------------------------------------------------
+// Pattern E (Direct SUT Unit Test): Reverse Iterator Unwritten `.None`, Sparse Slots & Tag Guards
+// ----------------------------------------------------------------------------
+
+@(test)
+unit_reverse_iterator_unwritten_none_sparse_slots_and_tag_guards :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	core: xitdb.Core = xitdb.core_memory_init()
+	defer _ = xitdb.core_destroy(&core)
+
+	db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
+	testing.expect_value(t, init_err, nil)
+
+	cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+		t_ptr := (^testing.T)(user_data)
+		root_map := xitdb.write_hash_map_init(cursor^) or_return
+
+		// 1. Unwritten cursor (.None, full = false) returns an empty iterator for all 5 reverse constructors,
+		// and repeated `cursor_iterator_prev` calls after exhaustion remain idempotent (`nil, nil` with `index == 0`)
+		unwritten_cur := xitdb.hash_map_put_cursor(&root_map, "unwritten") or_return
+		unwritten_rc := unwritten_cur.read_cursor
+
+		for kind in 0 ..< 5 {
+			it_empty: xitdb.Cursor_Iterator
+			err: xitdb.Error
+			switch kind {
+			case 0:
+				it_empty, err = xitdb.cursor_iterator_reverse(unwritten_rc)
+			case 1:
+				it_empty, err = xitdb.cursor_iterator_sorted_reverse_from_index(unwritten_rc, 0)
+			case 2:
+				it_empty, err = xitdb.cursor_iterator_sorted_reverse_from_key(unwritten_rc, []u8{'a'}, true)
+			case 3:
+				it_empty, err = xitdb.cursor_iterator_array_list_reverse_from_index(unwritten_rc, 0)
+			case 4:
+				it_empty, err = xitdb.cursor_iterator_linked_array_list_reverse_from_index(unwritten_rc, 0)
+			}
+			testing.expect_value(t_ptr, err, nil)
+			for _ in 0 ..< 3 {
+				c_empty, p_err := xitdb.cursor_iterator_prev(&it_empty)
+				testing.expect_value(t_ptr, p_err, nil)
+				testing.expect(t_ptr, c_empty == nil, "Expected nil on unwritten .None reverse iterator")
+				testing.expect_value(t_ptr, it_empty.index, i64(0))
+			}
+		}
+
+		// 2. Scalar cursor (.Uint) returns `.Unexpected_Tag` for all reverse iterator constructors and `cursor_iterator_prev`
+		scalar_cur := xitdb.hash_map_put_cursor(&root_map, "scalar") or_return
+		xitdb.cursor_write(&scalar_cur, u64(123)) or_return
+		scalar_rc := scalar_cur.read_cursor
+
+		_, e0 := xitdb.cursor_iterator_reverse(scalar_rc)
+		testing.expect_value(t_ptr, e0, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, e1 := xitdb.cursor_iterator_sorted_reverse_from_index(scalar_rc, 0)
+		testing.expect_value(t_ptr, e1, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, e2 := xitdb.cursor_iterator_sorted_reverse_from_key(scalar_rc, []u8{'a'}, true)
+		testing.expect_value(t_ptr, e2, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, e3 := xitdb.cursor_iterator_array_list_reverse_from_index(scalar_rc, 0)
+		testing.expect_value(t_ptr, e3, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, e4 := xitdb.cursor_iterator_linked_array_list_reverse_from_index(scalar_rc, 0)
+		testing.expect_value(t_ptr, e4, xitdb.Xitdb_Error.Unexpected_Tag)
+
+		bad_it := xitdb.Cursor_Iterator{cursor = scalar_rc}
+		_, e5 := xitdb.cursor_iterator_prev(&bad_it)
+		testing.expect_value(t_ptr, e5, xitdb.Xitdb_Error.Unexpected_Tag)
+
+		// 3. Sparse Array_List containing an explicit `Slot{tag = .None, full = true}` entry yields all 3 items in reverse
+		al_cur := xitdb.hash_map_put_cursor(&root_map, "sparse_al") or_return
+		al := xitdb.write_array_list_init(al_cur) or_return
+		xitdb.array_list_append(&al, "first") or_return
+		xitdb.array_list_append(&al, xitdb.Slot{tag = .None, full = true}) or_return
+		xitdb.array_list_append(&al, "third") or_return
+
+		rev_al, ral_err := xitdb.array_list_iterator_reverse(al.read_array_list)
+		testing.expect_value(t_ptr, ral_err, nil)
+
+		c2, _ := xitdb.cursor_iterator_prev(&rev_al)
+		s2, _ := xitdb.cursor_read_string(c2.?, 32, context.temp_allocator)
+		testing.expect_value(t_ptr, s2, "third")
+
+		c1, _ := xitdb.cursor_iterator_prev(&rev_al)
+		sl1, _ := xitdb.cursor_slot(c1.?)
+		testing.expect_value(t_ptr, sl1.tag, xitdb.Tag.None)
+		testing.expect_value(t_ptr, sl1.full, true)
+
+		c0, _ := xitdb.cursor_iterator_prev(&rev_al)
+		s0, _ := xitdb.cursor_read_string(c0.?, 32, context.temp_allocator)
+		testing.expect_value(t_ptr, s0, "first")
+
+		for _ in 0 ..< 3 {
+			c_done, done_err := xitdb.cursor_iterator_prev(&rev_al)
+			testing.expect_value(t_ptr, done_err, nil)
+			testing.expect(t_ptr, c_done == nil, "Expected nil after reverse iterator exhaustion")
+		}
+
+		return nil
+	}
+
+	testing.expect_value(t, xitdb.database_run_context(&db, cb, t), nil)
+}
 
 
 
