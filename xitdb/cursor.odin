@@ -857,8 +857,10 @@ cursor_iterator :: proc(unresolved_cursor: Read_Cursor) -> (res: Cursor_Iterator
 		header := array_list_header_from_bytes(hb) or_return
 		res.size = header.size
 		res.index = 0
-		_init_iter_level(cursor, header.ptr, &res.stack[0]) or_return
-		res.stack_len = 1
+		if header.size > 0 {
+			_init_iter_level(cursor, header.ptr, &res.stack[0]) or_return
+			res.stack_len = 1
+		}
 	case .Linked_Array_List, .Sorted_Map, .Sorted_Set:
 		position := cursor.slot_ptr.slot.value
 		hb: [BTREE_HEADER_LENGTH]u8 = ---
@@ -866,8 +868,10 @@ cursor_iterator :: proc(unresolved_cursor: Read_Cursor) -> (res: Cursor_Iterator
 		header := btree_header_from_bytes(hb) or_return
 		res.size = header.size
 		res.index = 0
-		_init_btree_iter_level(cursor, header.root_ptr, &res.stack[0]) or_return
-		res.stack_len = 1
+		if header.size > 0 {
+			_init_btree_iter_level(cursor, header.root_ptr, &res.stack[0]) or_return
+			res.stack_len = 1
+		}
 	case .Hash_Map, .Hash_Set:
 		res.size = 0
 		res.index = 0
@@ -901,8 +905,10 @@ cursor_iterator_reverse :: proc(unresolved_cursor: Read_Cursor) -> (res: Cursor_
 		header := btree_header_from_bytes(hb) or_return
 		res.size = header.size
 		res.index = header.size
-		_init_btree_iter_level_rev(cursor, header.root_ptr, &res.stack[0]) or_return
-		res.stack_len = 1
+		if header.size > 0 {
+			_init_btree_iter_level_rev(cursor, header.root_ptr, &res.stack[0]) or_return
+			res.stack_len = 1
+		}
 	case .Hash_Map, .Hash_Set:
 		res.size = 0
 		res.index = 0

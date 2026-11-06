@@ -384,13 +384,10 @@ then_concurrent_compaction_and_replication_succeed_during_parallel_reads :: proc
 	item_count: int,
 	sentinel_pos: i64 = 888888,
 ) {
-	driver_Verify_Compaction_And_Replication_With_Sentinel :: proc(ctx: ^Suite_Ctx, reader_count: int, item_count: int, sentinel_pos: i64) {
-		driver_verify_concurrent_compaction_and_replication_with_readers(ctx, reader_count, item_count)
-		driver_set_core_sentinel_pos(ctx, sentinel_pos)
-		then_history_has_moments(ctx, 2)
-		driver_assert_core_sentinel_pos_unchanged(ctx, sentinel_pos)
-	}
-	driver_Verify_Compaction_And_Replication_With_Sentinel(ctx, reader_count, item_count, sentinel_pos)
+	driver_verify_concurrent_compaction_and_replication_with_readers(ctx, reader_count, item_count)
+	driver_set_core_sentinel_pos(ctx, sentinel_pos)
+	then_history_has_moments(ctx, 2)
+	driver_assert_core_sentinel_pos_unchanged(ctx, sentinel_pos)
 }
 
 upon_transacting_dsl_script :: proc(ctx: ^Suite_Ctx, script: string) {
