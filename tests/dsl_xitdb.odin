@@ -525,9 +525,32 @@ then_lua_assertion_passes :: proc(ctx: ^Suite_Ctx, script: string) {
 	driver_exec_lua(ctx, script)
 }
 
+// ----------------------------------------------------------------------------
+// Copy-on-Write Overlay Forks & Structural Collection Diffs
+// ----------------------------------------------------------------------------
 
+upon_forking_primary_onto_copy_on_write_overlay :: proc(ctx: ^Suite_Ctx) {
+	driver_fork_primary_onto_overlay(ctx)
+}
 
+upon_committing_moment_on :: proc(ctx: ^Suite_Ctx, on: Db_Target, ops: ..Moment_Mutation_Op) {
+	testing.expect_value(ctx.t, driver_commit_moment(ctx, driver_history_count(ctx, on) - 1, ops, on), nil)
+}
 
+then_fork_owns_at_most_bytes :: proc(ctx: ^Suite_Ctx, max_owned: i64, primary_at_least: i64) {
+	testing.expect(ctx.t, driver_committed_size(ctx, .Primary) >= primary_at_least)
+	owned := driver_fork_owned_bytes(ctx)
+	testing.expect(ctx.t, owned > 0)
+	testing.expect(ctx.t, owned <= max_owned)
+}
 
+then_collection_diff_equals :: proc(ctx: ^Suite_Ctx, moment_a, moment_b: i64, key: string, expected: []string, on: Db_Target = .Primary) {
+	driver_assert_string_slice(ctx.t, driver_collection_diff(ctx, moment_a, moment_b, key, on), expected)
+}
 
-
+then_collection_diff_matches_full_scan :: proc(ctx: ^Suite_Ctx, moment_a, moment_b: i64, key: string, expected_count: int, on: Db_Target = .Primary) {
+	fast := driver_collection_diff(ctx, moment_a, moment_b, key, on)
+	slow := driver_brute_force_collection_diff(ctx, moment_a, moment_b, key, on)
+	testing.expect_value(ctx.t, len(fast), expected_count)
+	driver_assert_string_slice(ctx.t, fast, slow)
+}

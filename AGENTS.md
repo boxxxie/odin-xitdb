@@ -8,7 +8,8 @@ This document provides repository architecture, build/test commands, and develop
 
 * **`xitdb/`** — Pure-Odin v1 wire-compatible implementation (`package xitdb`) with zero external dependencies:
   * **`types.odin`**: Wire constants, `Slot`, `Header`, `Root_Header`, `Root_Trailer`, CRC-64/XZ, and SHA-NI hardware-accelerated SHA-1/SHA-256.
-  * **`core.odin`**: `Core_Memory` (virtual-memory `vmem.reserve` / `vmem.commit` backed so `raw_data(buf)` never moves), `Core_File` (`os.read_at` / `pread`), and `Core_Buffered_File` storage backends with stateless positional `core_read_*_at` I/O.
+  * **`core.odin`**: `Core_Memory` (virtual-memory `vmem.reserve` / `vmem.commit` backed so `raw_data(buf)` never moves), `Core_File` (`os.read_at` / `pread`), `Core_Buffered_File`, and `Core_Overlay` (zero-copy copy-on-write fork of another core) storage backends with stateless positional `core_read_*_at` I/O.
+  * **`collection_diff.odin`**: `diff_collection` structural byte-key diff of two Hash_Map / Sorted_Map versions that skips shared HAMT blocks and B+Tree subtrees.
   * **`database.odin`**: Transaction lifecycle, `database_freeze`, and central `read_slot_pointer` path engine.
   * **`cursor.odin`**: Lock-free stateless `Read_Cursor`, `Write_Cursor`, `Cursor_Reader`, `Cursor_Writer`, and stack-allocated `Cursor_Iterator`.
   * **`collections.odin`**: Typed wrappers for `Array_List`, `Linked_Array_List`, `Hash_Map`, `Counted_Hash_Map`, `Sorted_Map`, and sets.

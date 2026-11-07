@@ -34,6 +34,9 @@ Suite_Ctx :: struct {
 	compacted_core:  xitdb.Core,
 	compacted_db:    xitdb.Database,
 	has_compacted:   bool,
+	fork_core:       xitdb.Core, // `Core_Overlay` copy-on-write fork of `primary_core`
+	fork_db:         xitdb.Database,
+	has_fork:        bool,
 	lua_state:       ^lua.State,
 	last_err:        xitdb.Error,
 	last_sync_start: i64,
@@ -92,6 +95,10 @@ driver_destroy_ctx :: proc(ctx: ^Suite_Ctx) {
 	if ctx.has_replica {
 		_ = xitdb.core_destroy(&ctx.replica_core, true)
 		ctx.has_replica = false
+	}
+	if ctx.has_fork {
+		_ = xitdb.core_destroy(&ctx.fork_core)
+		ctx.has_fork = false
 	}
 	if ctx.has_primary {
 		_ = xitdb.core_destroy(&ctx.primary_core, true)
@@ -175,6 +182,8 @@ driver_active_db :: proc(ctx: ^Suite_Ctx, target: Db_Target = .Primary) -> ^xitd
 		return &ctx.replica_db
 	case .Compacted:
 		return &ctx.compacted_db
+	case .Fork:
+		return &ctx.fork_db
 	}
 	return &ctx.primary_db
 }
@@ -183,6 +192,7 @@ Db_Target :: enum {
 	Primary,
 	Replica,
 	Compacted,
+	Fork,
 }
 
 // ----------------------------------------------------------------------------
@@ -244,6 +254,7 @@ Moment_Mutation_Op :: union {
 	Op_Put_Sorted_Map,
 	Op_Remove_Sorted_Map,
 	Op_Put_Sorted_Set,
+	Op_Remove_Counted_Map,
 	Op_Fail_With,
 }
 
@@ -354,6 +365,11 @@ Op_Remove_Sorted_Map :: struct {
 Op_Put_Sorted_Set :: struct {
 	key:     string,
 	members: []string,
+}
+
+Op_Remove_Counted_Map :: struct {
+	key:          string,
+	keys_to_drop: []string,
 }
 
 Op_Fail_With :: struct {
@@ -493,6 +509,16 @@ _execute_moment_ops_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -
 			ss := xitdb.write_sorted_set_init(sc) or_return
 			for m in o.members {
 				xitdb.sorted_set_put(&ss, m) or_return
+			}
+
+		case Op_Remove_Counted_Map:
+			mc := xitdb.hash_map_put_cursor(&moment, o.key) or_return
+			cm := xitdb.write_counted_hash_map_init(mc) or_return
+			for k in o.keys_to_drop {
+				removed := xitdb.hash_map_remove(&cm, k) or_return
+				if !removed {
+					return .Key_Not_Found
+				}
 			}
 
 		case Op_Fail_With:
@@ -4230,8 +4256,101 @@ driver_assert_hamt_reverse_matches_forward :: proc(
 	testing.expect_value(ctx.t, hs_rev_idx, -1)
 }
 
+// ----------------------------------------------------------------------------
+// Copy-on-Write Overlay Forks & Structural Collection Diffs
+// ----------------------------------------------------------------------------
 
+// Forks `primary_db` at its committed size onto a zero-copy `Core_Overlay` (`Db_Target.Fork`).
+driver_fork_primary_onto_overlay :: proc(ctx: ^Suite_Ctx) {
+	size, s_err := xitdb.database_committed_size(&ctx.primary_db)
+	testing.expect_value(ctx.t, s_err, nil)
+	core, o_err := xitdb.core_overlay_init(&ctx.primary_core, size)
+	testing.expect_value(ctx.t, o_err, nil)
+	ctx.fork_core = core
+	ctx.has_fork = true
+	db, d_err := xitdb.database_init(&ctx.fork_core, ctx.primary_db.hasher)
+	testing.expect_value(ctx.t, d_err, nil)
+	ctx.fork_db = db
+}
 
+driver_fork_owned_bytes :: proc(ctx: ^Suite_Ctx) -> i64 {
+	return xitdb.core_overlay_owned_bytes(&ctx.fork_core)
+}
 
+@(private = "file")
+_moment_collection_cursor :: proc(ctx: ^Suite_Ctx, moment_idx: i64, key: string, target: Db_Target) -> xitdb.Read_Cursor {
+	m := driver_read_moment_map(ctx, moment_idx, target)
+	c, err := xitdb.hash_map_get_cursor(m, key)
+	testing.expect_value(ctx.t, err, nil)
+	if rc, ok := c.?; ok {
+		return rc
+	}
+	return xitdb.Read_Cursor{db = driver_active_db(ctx, target)}
+}
 
+// Renders `diff_collection` output as sorted "+key" / "-key" / "~key" strings.
+driver_collection_diff :: proc(ctx: ^Suite_Ctx, moment_a, moment_b: i64, key: string, target: Db_Target = .Primary) -> []string {
+	ca := _moment_collection_cursor(ctx, moment_a, key, target)
+	cb := _moment_collection_cursor(ctx, moment_b, key, target)
+	changes, err := xitdb.diff_collection(ca, cb, context.temp_allocator)
+	testing.expect_value(ctx.t, err, nil)
+	out := make([dynamic]string, 0, len(changes), context.temp_allocator)
+	for ch in changes {
+		prefix := "+" if ch.op == .Added else ("-" if ch.op == .Removed else "~")
+		append(&out, fmt.tprintf("%s%s", prefix, string(ch.key)))
+		// Value cursors must point at the right side's value
+		if ch.op != .Added {
+			testing.expect(ctx.t, ch.old_value.db != nil)
+		}
+		if ch.op != .Removed {
+			testing.expect(ctx.t, ch.new_value.db != nil)
+		}
+	}
+	slice.sort(out[:])
+	return out[:]
+}
 
+@(private = "file")
+_collection_snapshot :: proc(ctx: ^Suite_Ctx, c: xitdb.Read_Cursor) -> map[string]xitdb.Slot {
+	snap := make(map[string]xitdb.Slot, 64, context.temp_allocator)
+	if c.slot_ptr.slot.tag == .None {
+		return snap
+	}
+	it, err := xitdb.cursor_iterator(c)
+	testing.expect_value(ctx.t, err, nil)
+	for {
+		kv_maybe, n_err := xitdb.cursor_iterator_next(&it)
+		testing.expect_value(ctx.t, n_err, nil)
+		kv, ok := kv_maybe.?
+		if !ok {
+			break
+		}
+		k_cur, v_cur, kv_err := xitdb.cursor_read_kv_pair_slots(kv)
+		testing.expect_value(ctx.t, kv_err, nil)
+		k, k_err := xitdb.cursor_read_bytes(k_cur, 0, context.temp_allocator)
+		testing.expect_value(ctx.t, k_err, nil)
+		snap[string(k)] = v_cur.slot_ptr.slot
+	}
+	return snap
+}
+
+// Reference diff: full iteration of both versions compared key-by-key by value Slot.
+driver_brute_force_collection_diff :: proc(ctx: ^Suite_Ctx, moment_a, moment_b: i64, key: string, target: Db_Target = .Primary) -> []string {
+	a := _collection_snapshot(ctx, _moment_collection_cursor(ctx, moment_a, key, target))
+	b := _collection_snapshot(ctx, _moment_collection_cursor(ctx, moment_b, key, target))
+	out := make([dynamic]string, 0, 8, context.temp_allocator)
+	for k, va in a {
+		if vb, ok := b[k]; !ok {
+			append(&out, fmt.tprintf("-%s", k))
+		} else if va != vb {
+			append(&out, fmt.tprintf("~%s", k))
+		}
+	}
+	for k in b {
+		if k not_in a {
+			append(&out, fmt.tprintf("+%s", k))
+		}
+	}
+	slice.sort(out[:])
+	return out[:]
+}

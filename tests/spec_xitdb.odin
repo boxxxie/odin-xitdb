@@ -1678,9 +1678,110 @@ unit_reverse_iterator_unwritten_none_sparse_slots_and_tag_guards :: proc(t: ^tes
 	testing.expect_value(t, xitdb.database_run_context(&db, cb, t), nil)
 }
 
+// ----------------------------------------------------------------------------
+// Scenario 43: Zero-Copy Copy-on-Write Overlay Forks (`Core_Overlay`)
+// ----------------------------------------------------------------------------
 
+@(test)
+spec_copy_on_write_overlay_fork_shares_parent_bytes_and_isolates_both_sides :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
 
+	given_in_memory_database(&ctx)
 
+	// GIVEN a parent with ~64 KiB of committed history (a 1,000-entry sorted map)
+	N :: 1_000
+	entries := make([]Key_Uint, N, context.temp_allocator)
+	for i in 0 ..< N {
+		entries[i] = Key_Uint{key = fmt.tprintf("user-%05d", i), val = u64(i)}
+	}
+	given_committed_moment(&ctx, Op_Put_Sorted_Map{key = "users", entries = entries[:]}, Op_Put_String{key = "owner", val = "parent"})
 
+	// WHEN the parent is forked onto a copy-on-write overlay
+	upon_forking_primary_onto_copy_on_write_overlay(&ctx)
 
+	// THEN the fork sees the parent's full history without copying it
+	then_history_has_moments(&ctx, 1, on = .Fork)
+	then_moment_has_string(&ctx, 0, "owner", "parent", on = .Fork)
+	then_moment_has_sorted_map_in_order(&ctx, 0, "users", N)
 
+	// WHEN the parent commits first (rewriting its root header in place)
+	upon_committing_moment_on(&ctx, .Primary, Op_Put_String{key = "owner", val = "parent-v2"})
+
+	// THEN the fork still sees exactly the forked history: its header page was snapshotted at fork time
+	then_history_has_moments(&ctx, 1, on = .Fork)
+	then_moment_has_string(&ctx, 0, "owner", "parent", on = .Fork)
+
+	// WHEN the fork then commits on top of its own view
+	upon_committing_moment_on(&ctx, .Fork, Op_Put_String{key = "owner", val = "fork"})
+
+	// THEN neither side sees the other's commit
+	then_history_has_moments(&ctx, 2, on = .Fork)
+	then_history_has_moments(&ctx, 2, on = .Primary)
+	then_moment_has_string(&ctx, 1, "owner", "fork",      on = .Fork)
+	then_moment_has_string(&ctx, 1, "owner", "parent-v2", on = .Primary)
+	then_moment_has_string(&ctx, 0, "owner", "parent",    on = .Fork)
+
+	// AND the fork owns only its header page plus the bytes it appended, not the parent's history
+	then_fork_owns_at_most_bytes(&ctx, max_owned = 8 * 1024, primary_at_least = 32 * 1024)
+}
+
+// ----------------------------------------------------------------------------
+// Scenario 44: Structural Byte-Key Collection Diff (`diff_collection`)
+// ----------------------------------------------------------------------------
+
+@(test)
+spec_structural_collection_diff_reports_byte_keys_across_hamt_and_bplus_trees :: proc(t: ^testing.T) {
+	ctx := driver_init_ctx(t)
+	defer driver_destroy_ctx(&ctx)
+
+	given_in_memory_database(&ctx)
+
+	// GIVEN multi-level HAMT and B+Tree collections with 600 entries each
+	N :: 600
+	entries := make([]Key_Uint, N, context.temp_allocator)
+	for i in 0 ..< N {
+		entries[i] = Key_Uint{key = fmt.tprintf("k-%04d", i), val = u64(i)}
+	}
+	given_committed_moment(
+		&ctx,
+		Op_Put_Counted_Map{key = "hm", entries = entries[:]},
+		Op_Put_Sorted_Map{key = "sm", entries = entries[:]},
+	)
+
+	// WHEN moment 1 updates 2 values, removes 2 keys, and adds 2 keys in both collections
+	updates := [?]Key_Uint{
+		{key = "k-0007", val = 7_000},
+		{key = "k-0412", val = 412_000},
+		{key = "n-0001", val = 1},
+		{key = "n-0002", val = 2},
+	}
+	drops := [?]string{"k-0100", "k-0599"}
+	upon_committing_moment_on(
+		&ctx, .Primary,
+		Op_Put_Counted_Map{key = "hm", entries = updates[:]},
+		Op_Remove_Counted_Map{key = "hm", keys_to_drop = drops[:]},
+		Op_Put_Sorted_Map{key = "sm", entries = updates[:]},
+		Op_Remove_Sorted_Map{key = "sm", keys_to_drop = drops[:]},
+	)
+
+	// THEN both structures report exactly those 6 keys with their raw bytes
+	expected := []string{"+n-0001", "+n-0002", "-k-0100", "-k-0599", "~k-0007", "~k-0412"}
+	then_collection_diff_equals(&ctx, 0, 1, "hm", expected)
+	then_collection_diff_equals(&ctx, 0, 1, "sm", expected)
+
+	// AND agree with a full scan of both versions, in both directions
+	then_collection_diff_matches_full_scan(&ctx, 0, 1, "hm", expected_count = 6)
+	then_collection_diff_matches_full_scan(&ctx, 0, 1, "sm", expected_count = 6)
+	then_collection_diff_matches_full_scan(&ctx, 1, 0, "sm", expected_count = 6)
+
+	// AND identical versions produce no changes, while a missing collection reports everything as added
+	then_collection_diff_equals(&ctx, 1, 1, "sm", []string{})
+	then_collection_diff_matches_full_scan(&ctx, 0, 1, "absent", expected_count = 0)
+
+	// AND diffs work across a copy-on-write fork that rewrote part of the tree
+	upon_forking_primary_onto_copy_on_write_overlay(&ctx)
+	more := [?]Key_Uint{{key = "k-0300", val = 300_000}}
+	upon_committing_moment_on(&ctx, .Fork, Op_Put_Sorted_Map{key = "sm", entries = more[:]})
+	then_collection_diff_equals(&ctx, 1, 2, "sm", []string{"~k-0300"}, on = .Fork)
+}

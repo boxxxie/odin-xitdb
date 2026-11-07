@@ -44,11 +44,33 @@ Core_Buffered_File :: struct {
 	file_len:        Maybe(i64),
 }
 
+OVERLAY_PAGE_SIZE :: 4096
+
+// Core_Overlay is a zero-copy, copy-on-write view of another core frozen at `base_size` bytes
+// (e.g. a database's committed size), used to fork a database without copying it:
+// - bytes `[0, base_size)` are read straight from `base` (stateless `core_read_at`), except pages
+//   captured in `pages` (the header page is snapshotted at init; any later write below `base_size`
+//   copies its page first);
+// - bytes `>= base_size` live in the overlay's own `tail` buffer.
+// xitdb is append-only apart from the root header, so in practice only page 0 is ever copied and a
+// fork costs O(1) memory plus whatever it writes. `base` is never written through the overlay and
+// must outlive it; the parent may keep appending/committing past `base_size` concurrently on the
+// same thread without affecting the overlay's view.
+Core_Overlay :: struct {
+	base:      ^Core,
+	base_size: i64,
+	pages:     map[i64][]u8,
+	tail:      Core_Memory,
+	pos:       i64,
+	allocator: runtime.Allocator,
+}
+
 // Core is the unified storage backend union.
 Core :: union {
 	Core_Memory,
 	Core_File,
 	Core_Buffered_File,
+	Core_Overlay,
 }
 
 @(private)
@@ -142,20 +164,190 @@ core_buffered_file_open :: proc(path: string, buffer_size: i64 = DEFAULT_BUFFER_
 	return core_buffered_file_init(f, buffer_size, fsync, allocator), nil
 }
 
+// Creates a copy-on-write overlay over the first `base_size` bytes of `base` (see `Core_Overlay`).
+core_overlay_init :: proc(base: ^Core, base_size: i64, allocator := context.allocator) -> (c: Core, err: Error) {
+	if base == nil || base_size < 0 {
+		return nil, Xitdb_Error.Invalid_Offset
+	}
+	base_len := core_length(base) or_return
+	if base_size > base_len {
+		return nil, Xitdb_Error.Invalid_Offset
+	}
+	tail := core_memory_init(allocator)
+	o := Core_Overlay{
+		base      = base,
+		base_size = base_size,
+		pages     = make(map[i64][]u8, 4, allocator),
+		tail      = tail.(Core_Memory),
+		allocator = allocator,
+	}
+	// Snapshot the header page: the parent rewrites its root header in place on every commit.
+	if base_size > 0 {
+		if _, p_err := _overlay_page(&o, 0); p_err != nil {
+			_overlay_destroy(&o)
+			return nil, p_err
+		}
+	}
+	return o, nil
+}
+
+// Number of bytes owned by the overlay itself (copied pages + appended tail), excluding the shared base.
+core_overlay_owned_bytes :: proc(c: ^Core) -> i64 {
+	o, ok := c.(Core_Overlay)
+	if !ok {
+		return 0
+	}
+	total := i64(len(o.tail.buf))
+	for _, page in o.pages {
+		total += i64(len(page))
+	}
+	return total
+}
+
+@(private)
+_memory_destroy :: proc(m: ^Core_Memory) {
+	if m.vmem_reserved > 0 {
+		if raw_data(m.buf) != nil {
+			vmem.release(raw_data(m.buf), uint(m.vmem_reserved))
+		}
+		m.buf = nil
+		m.vmem_reserved = 0
+	} else {
+		delete(m.buf)
+		m.buf = nil
+	}
+	m.pos = 0
+}
+
+@(private)
+_overlay_destroy :: proc(o: ^Core_Overlay) {
+	for _, page in o.pages {
+		delete(page, o.allocator)
+	}
+	delete(o.pages)
+	o.pages = nil
+	_memory_destroy(&o.tail)
+	o.base = nil
+	o.pos = 0
+}
+
+// Returns the copy-on-write page `idx` (clipped at `base_size`), copying it from `base` on first use.
+@(private)
+_overlay_page :: proc(o: ^Core_Overlay, idx: i64) -> (page: []u8, err: Error) {
+	if existing, ok := o.pages[idx]; ok {
+		return existing, nil
+	}
+	start := idx * OVERLAY_PAGE_SIZE
+	size := int(min(i64(OVERLAY_PAGE_SIZE), o.base_size - start))
+	if size <= 0 {
+		return nil, Xitdb_Error.Invalid_Offset
+	}
+	buf, alloc_err := make([]u8, size, o.allocator)
+	if alloc_err != nil {
+		return nil, Xitdb_Error.Write_Failed
+	}
+	if r_err := core_read_exact_at(o.base, start, buf); r_err != nil {
+		delete(buf, o.allocator)
+		return nil, r_err
+	}
+	o.pages[idx] = buf
+	return buf, nil
+}
+
+@(private)
+_overlay_length :: #force_inline proc(o: ^Core_Overlay) -> i64 {
+	return o.base_size + i64(len(o.tail.buf))
+}
+
+@(private)
+_overlay_read_at :: proc(o: ^Core_Overlay, pos: i64, p: []u8) -> (read_n: int, err: Error) {
+	length := _overlay_length(o)
+	if pos >= length {
+		return 0, io.Error.EOF
+	}
+	total := 0
+	cur := pos
+	for total < len(p) && cur < length {
+		if cur < o.base_size {
+			idx := cur / OVERLAY_PAGE_SIZE
+			page_end := min((idx + 1) * OVERLAY_PAGE_SIZE, o.base_size)
+			chunk := int(min(i64(len(p) - total), page_end - cur))
+			if page, ok := o.pages[idx]; ok {
+				off := int(cur - idx * OVERLAY_PAGE_SIZE)
+				copy(p[total:total + chunk], page[off:off + chunk])
+			} else {
+				core_read_exact_at(o.base, cur, p[total:total + chunk]) or_return
+			}
+			total += chunk
+			cur += i64(chunk)
+		} else {
+			rel := int(cur - o.base_size)
+			chunk := min(len(p) - total, len(o.tail.buf) - rel)
+			copy(p[total:total + chunk], o.tail.buf[rel:rel + chunk])
+			total += chunk
+			cur += i64(chunk)
+		}
+	}
+	return total, nil
+}
+
+@(private)
+_overlay_write_at :: proc(o: ^Core_Overlay, pos: i64, p: []u8) -> Error {
+	total := 0
+	cur := pos
+	for total < len(p) {
+		if cur < o.base_size {
+			idx := cur / OVERLAY_PAGE_SIZE
+			page := _overlay_page(o, idx) or_return
+			off := int(cur - idx * OVERLAY_PAGE_SIZE)
+			chunk := min(len(p) - total, len(page) - off)
+			copy(page[off:off + chunk], p[total:total + chunk])
+			total += chunk
+			cur += i64(chunk)
+		} else {
+			rel := int(cur - o.base_size)
+			end := rel + (len(p) - total)
+			_memory_resize(&o.tail, end) or_return
+			copy(o.tail.buf[rel:end], p[total:])
+			return nil
+		}
+	}
+	return nil
+}
+
+@(private)
+_overlay_slice_at :: proc(o: ^Core_Overlay, pos: i64, n: int) -> (slice: []u8, in_mem: bool, err: Error) {
+	end := pos + i64(n)
+	if pos < 0 || end > _overlay_length(o) {
+		return nil, true, Xitdb_Error.Unexpected_EOF
+	}
+	if pos >= o.base_size {
+		rel := int(pos - o.base_size)
+		return o.tail.buf[rel:rel + n], true, nil
+	}
+	if end > o.base_size {
+		return nil, false, nil // spans base and tail
+	}
+	first := pos / OVERLAY_PAGE_SIZE
+	last := (end - 1) / OVERLAY_PAGE_SIZE if n > 0 else first
+	if first == last {
+		if page, ok := o.pages[first]; ok {
+			off := int(pos - first * OVERLAY_PAGE_SIZE)
+			return page[off:off + n], true, nil
+		}
+	}
+	for idx in first ..= last {
+		if idx in o.pages {
+			return nil, false, nil // partially copied range: fall back to positional reads
+		}
+	}
+	return core_slice_at(o.base, pos, n)
+}
+
 core_destroy :: proc(c: ^Core, close_file := false) -> Error {
 	switch &v in c {
 	case Core_Memory:
-		if v.vmem_reserved > 0 {
-			if raw_data(v.buf) != nil {
-				vmem.release(raw_data(v.buf), uint(v.vmem_reserved))
-			}
-			v.buf = nil
-			v.vmem_reserved = 0
-		} else {
-			delete(v.buf)
-			v.buf = nil
-		}
-		v.pos = 0
+		_memory_destroy(&v)
 	case Core_File:
 		if close_file && v.file != nil {
 			os.close(v.file) or_return
@@ -177,6 +369,8 @@ core_destroy :: proc(c: ^Core, close_file := false) -> Error {
 			os.close(v.file.file) or_return
 			v.file.file = nil
 		}
+	case Core_Overlay:
+		_overlay_destroy(&v)
 	}
 	return nil
 }
@@ -228,6 +422,8 @@ core_length :: proc(c: ^Core) -> (length: i64, err: Error) {
 			return flen, nil
 		}
 		return max(v.memory_pos + buf_size, flen), nil
+	case Core_Overlay:
+		return _overlay_length(&v), nil
 	}
 	return 0, .Invalid_Database
 }
@@ -246,6 +442,9 @@ core_seek_to :: proc(c: ^Core, pos: i64) -> Error {
 	case Core_Buffered_File:
 		v.pos = pos
 		return nil
+	case Core_Overlay:
+		v.pos = pos
+		return nil
 	}
 	return .Invalid_Database
 }
@@ -257,6 +456,8 @@ core_position :: proc(c: ^Core) -> (pos: i64, err: Error) {
 	case Core_File:
 		return os.seek(v.file, 0, .Current)
 	case Core_Buffered_File:
+		return v.pos, nil
+	case Core_Overlay:
 		return v.pos, nil
 	}
 	return 0, .Invalid_Database
@@ -271,6 +472,8 @@ core_flush :: proc(c: ^Core) -> Error {
 	case Core_Buffered_File:
 		_buffered_flush(&v) or_return
 		return os.flush(v.file.file)
+	case Core_Overlay:
+		return nil
 	}
 	return .Invalid_Database
 }
@@ -290,6 +493,8 @@ core_sync :: proc(c: ^Core) -> Error {
 			return nil
 		}
 		return os.sync(v.file.file)
+	case Core_Overlay:
+		return nil
 	}
 	return .Invalid_Database
 }
@@ -343,6 +548,21 @@ core_set_length :: proc(c: ^Core, new_len: i64) -> Error {
 			v.pos = new_len
 		}
 		return nil
+	case Core_Overlay:
+		tail_len := new_len - v.base_size
+		if tail_len < 0 || tail_len > i64(len(v.tail.buf)) {
+			return Xitdb_Error.Invalid_Offset
+		}
+		if v.tail.vmem_reserved > 0 {
+			raw_arr := (^runtime.Raw_Dynamic_Array)(&v.tail.buf)
+			raw_arr.len = int(tail_len)
+		} else {
+			resize(&v.tail.buf, int(tail_len))
+		}
+		if v.pos > new_len {
+			v.pos = new_len
+		}
+		return nil
 	}
 	return .Invalid_Database
 }
@@ -387,6 +607,10 @@ core_read :: proc(c: ^Core, p: []u8) -> (read_n: int, err: Error) {
 		if r_err == io.Error.EOF {
 			return n, io.Error.EOF
 		}
+		return n, r_err
+	case Core_Overlay:
+		n, r_err := _overlay_read_at(&v, v.pos, p)
+		v.pos += i64(n)
 		return n, r_err
 	}
 	return 0, .Invalid_Database
@@ -471,6 +695,8 @@ core_read_at :: proc(c: ^Core, pos: i64, p: []u8) -> (read_n: int, err: Error) {
 			return n, io.Error.EOF
 		}
 		return n, r_err
+	case Core_Overlay:
+		return _overlay_read_at(&v, pos, p)
 	}
 	return 0, .Invalid_Database
 }
@@ -697,6 +923,10 @@ core_write_all :: proc(c: ^Core, p: []u8) -> Error {
 		}
 		v.pos += n
 		return nil
+	case Core_Overlay:
+		_overlay_write_at(&v, v.pos, p) or_return
+		v.pos += i64(len(p))
+		return nil
 	}
 	return .Invalid_Database
 }
@@ -717,6 +947,8 @@ core_slice_at :: #force_inline proc(c: ^Core, pos: i64, n: int) -> (slice: []u8,
 			mem_off := int(pos - v.memory_pos)
 			return v.memory.buf[mem_off : mem_off + n], true, nil
 		}
+	case Core_Overlay:
+		return _overlay_slice_at(&v, pos, n)
 	}
 	return nil, false, nil
 }

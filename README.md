@@ -368,6 +368,13 @@ for d in diffs {
 	// e.g. path=".users[\"101\"].age", op=.Put, old_val=25, new_val=26
 }
 
+// 1b. Byte-key diff of one collection (Hash_Map / Sorted_Map, incl. binary keys) between two versions.
+//     HAMT blocks and B+Tree subtrees shared by both versions are skipped by pointer.
+changes, _ := xitdb.diff_collection(users_at_moment_a, users_at_moment_b)
+for ch in changes {
+	// ch.op (.Added / .Removed / .Changed), ch.key (raw bytes), ch.old_value, ch.new_value
+}
+
 // 2. Full audit lineage of a single path across all moments:
 hist, _ := xitdb.history_of(&db, `.users["101"].age`)
 for entry in hist {
@@ -540,6 +547,7 @@ branch none {
 * **`Core_Memory`**: Virtual-memory-backed in-memory byte buffer (`core_memory_init`, `core_memory_init_from_bytes`). Reserves a fixed virtual address range (`DEFAULT_VMEM_RESERVE_SIZE`, 1 GiB on 64-bit) via `vmem.reserve` and commits pages on demand so `raw_data(buf)` never moves across growth, enabling lock-free concurrent readers alongside a writer.
 * **`Core_Buffered_File`**: OS file handle paired with a contiguous in-memory tail write buffer (`core_buffered_file_open`, default $2\text{ MiB}$). Flushes on root commit so all committed moments are served via stateless `os.read_at`.
 * **`Core_File`**: Direct unbuffered OS file I/O (`core_file_open`). Uses stateless `os.read_at` (`pread`) so multiple threads can safely share a single `^Database` handle concurrently.
+* **`Core_Overlay`**: Zero-copy copy-on-write fork of another core frozen at a byte boundary (`core_overlay_init(&parent_core, database_committed_size(&parent_db))`). Reads below the boundary come straight from the parent; the header page is snapshotted at fork time and any other write below the boundary copies its 4 KiB page first; appended bytes live in the overlay's own buffer. Because xitdb is append-only apart from the root header, a fork costs O(1) memory plus what it writes (`core_overlay_owned_bytes`). The parent core must outlive the overlay.
 
 ### Hashers (`xitdb/types.odin`)
 
@@ -555,7 +563,8 @@ branch none {
 .
 ├── xitdb/
 │   ├── types.odin              # Wire format constants, Slot, Header, Trailer, SHA-1/SHA-256
-│   ├── core.odin               # Core_Memory, Core_File, Core_Buffered_File storage backends
+│   ├── core.odin               # Core_Memory, Core_File, Core_Buffered_File, Core_Overlay storage backends
+│   ├── collection_diff.odin    # diff_collection: structural byte-key HAMT / B+Tree diffs
 │   ├── database.odin           # Database init, transactions, freeze, path traversal engine
 │   ├── cursor.odin             # Read/Write cursors, zero-alloc stack iterators, stream I/O
 │   ├── collections.odin        # Typed APIs for ArrayList, LinkedArrayList, HashMap, SortedMap, Sets
