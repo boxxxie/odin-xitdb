@@ -316,17 +316,9 @@ database_freeze :: proc(db: ^Database) -> Error {
 
 @(private)
 _database_committed_size_with_header :: proc(db: ^Database, header: Root_Header) -> (committed_size: i64, file_size: i64, err: Error) {
-	minimum_size := i64(ROOT_HEADER_END + ROOT_TRAILER_LENGTH)
-	if header.file_size < minimum_size {
-		return 0, 0, .Invalid_Database
-	}
 	file_size = core_length(db.core) or_return
 	if file_size < header.file_size {
 		return 0, 0, .Truncated_Database
-	}
-	trailer := database_read_root_trailer(db, header.file_size) or_return
-	if trailer.root != header.root {
-		return 0, 0, .Invalid_Database
 	}
 	return header.file_size, file_size, nil
 }
@@ -334,8 +326,7 @@ _database_committed_size_with_header :: proc(db: ^Database, header: Root_Header)
 // Return the number of bytes that belong to committed transactions.
 database_committed_size :: proc(db: ^Database) -> (res: i64, err: Error) {
 	header := database_read_root_header(db) or_return
-	committed_size, _ := _database_committed_size_with_header(db, header) or_return
-	return committed_size, nil
+	return header.file_size, nil
 }
 
 @(private)
@@ -365,12 +356,19 @@ database_truncate :: proc(db: ^Database) -> Error {
 	return err
 }
 
+// Read the file size from the root header, and the root slot from the trailer it points to.
 database_read_root_header :: proc(db: ^Database) -> (res: Root_Header, err: Error) {
-	b: [ROOT_HEADER_LENGTH]u8
-	core_read_exact_at(db.core, ROOT_HEADER_START, b[:]) or_return
-	header := root_header_from_bytes(b)
-	tag_validate(header.root.tag) or_return
-	return header, nil
+	file_size := core_read_i64_at(db.core, ROOT_HEADER_FILE_SIZE_START) or_return
+	minimum_size := i64(ROOT_HEADER_END + ROOT_TRAILER_LENGTH)
+	if file_size < minimum_size {
+		return {}, .Invalid_Database
+	}
+	actual_size := core_length(db.core) or_return
+	if actual_size < file_size {
+		return {}, .Truncated_Database
+	}
+	trailer := database_read_root_trailer(db, file_size) or_return
+	return Root_Header{file_size = file_size, root = trailer.root}, nil
 }
 
 database_read_root_slot :: proc(db: ^Database) -> (res: Slot, err: Error) {

@@ -641,6 +641,33 @@ unit_wire_format_validation_and_error_guards :: proc(t: ^testing.T) {
 		_, comp_err := xitdb.database_compact(&src_db, &dst_core)
 		testing.expect_value(t, comp_err, xitdb.Xitdb_Error.Target_Not_Empty)
 	}
+
+	// 8. Torn root slot in Root_Header (bytes 20..29) is ignored because root slot is resolved
+	//    from the CRC-verified Root_Trailer at `file_size`, while a corrupted trailer fails.
+	{
+		core: xitdb.Core = xitdb.core_memory_init()
+		defer xitdb.core_destroy(&core)
+		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
+		rc := xitdb.database_root_cursor(&db)
+		_ = xitdb.cursor_write(&rc, i64(42))
+
+		// Corrupt the 9-byte root slot in Root_Header (bytes 20..29) with an invalid tag byte (99)
+		_ = xitdb.core_seek_to(&core, xitdb.ROOT_HEADER_START)
+		_ = xitdb.core_write_all(&core, []u8{99, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+
+		// Reading root header and root cursor still succeeds via the verified Root_Trailer
+		fresh_rc := xitdb.database_root_cursor(&db)
+		val, val_err := xitdb.cursor_read_int(fresh_rc.read_cursor)
+		testing.expect_value(t, val_err, nil)
+		testing.expect_value(t, val, i64(42))
+
+		// Corrupting the Root_Trailer checksum causes database_read_root_header to fail with .Invalid_Database
+		end_pos, _ := xitdb.core_length(&core)
+		_ = xitdb.core_seek_to(&core, end_pos - 1)
+		_ = xitdb.core_write_byte(&core, 0xaa)
+		_, bad_trailer_err := xitdb.cursor_read_int(xitdb.database_root_cursor(&db).read_cursor)
+		testing.expect_value(t, bad_trailer_err, xitdb.Xitdb_Error.Invalid_Database)
+	}
 }
 
 // ----------------------------------------------------------------------------

@@ -48,9 +48,6 @@ cursor_read_only :: proc(c: Write_Cursor) -> Read_Cursor {
 cursor_resolved :: proc(c: Read_Cursor) -> (res: Slot_Pointer, err: Error) {
 	if is_root(c.slot_ptr) {
 		header := database_read_root_header(c.db) or_return
-		if header.file_size < ROOT_TRAILER_LENGTH {
-			return {}, .Invalid_Database
-		}
 		position := header.file_size - ROOT_TRAILER_LENGTH
 		return Slot_Pointer{position = position, slot = header.root}, nil
 	}
