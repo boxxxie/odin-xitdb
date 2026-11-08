@@ -105,8 +105,8 @@ btree_new_root :: proc(db: ^Database) -> (res: i64, err: Error) {
 descend_by_rank :: proc(db: ^Database, root_ptr, rank: i64, $BRANCH_BLOCK_SIZE: int) -> (res: Slot_Pointer, err: Error) {
 	node_ptr := root_ptr
 	rem := rank
+	buf: [BRANCH_BLOCK_SIZE]u8 = ---
 	for {
-		buf: [BRANCH_BLOCK_SIZE]u8 = ---
 		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
 		if len(block) < BTREE_LEAF_BLOCK_SIZE {
 			return {}, Xitdb_Error.Unexpected_EOF
@@ -1132,19 +1132,26 @@ compare_key :: proc(db: ^Database, key_slot: Slot, target: []u8) -> (res: int, e
 		}
 		return bytes.compare(buf[:length], target), nil
 	case .Bytes:
-		if hdr_slice, in_mem, slice_err := core_slice_at(db.core, key_slot.value, 8); in_mem {
-			if slice_err != nil {
-				return 0, slice_err
-			}
-			length := int(endian.unchecked_get_u64be(hdr_slice))
-			if length < 0 {
+		#partial switch &v in db.core {
+		case Core_Memory:
+			p := int(key_slot.value)
+			if p < 0 || p + 8 > len(v.buf) {
 				return 0, Xitdb_Error.Unexpected_EOF
 			}
-			key_slice, _, key_err := core_slice_at(db.core, key_slot.value + 8, length)
-			if key_err != nil {
-				return 0, key_err
+			length := int(endian.unchecked_get_u64be(v.buf[p : p + 8]))
+			if length < 0 || p + 8 + length > len(v.buf) {
+				return 0, Xitdb_Error.Unexpected_EOF
 			}
-			return bytes.compare(key_slice, target), nil
+			return bytes.compare(v.buf[p + 8 : p + 8 + length], target), nil
+		case Core_Buffered_File:
+			buf_len := i64(len(v.memory.buf))
+			if buf_len > 0 && key_slot.value >= v.memory_pos && key_slot.value + 8 <= v.memory_pos + buf_len {
+				mem_off := int(key_slot.value - v.memory_pos)
+				length := int(endian.unchecked_get_u64be(v.memory.buf[mem_off : mem_off + 8]))
+				if length >= 0 && mem_off + 8 + length <= int(buf_len) {
+					return bytes.compare(v.memory.buf[mem_off + 8 : mem_off + 8 + length], target), nil
+				}
+			}
 		}
 		first_buf: [256]u8 = ---
 		first := core_read_short_at(db.core, key_slot.value, first_buf[:]) or_return
@@ -1227,8 +1234,8 @@ sorted_branch_search :: proc(db: ^Database, node: ^Sorted_Node, key: []u8) -> (i
 
 sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Slot), err: Error) {
 	node_ptr := root_ptr
+	buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
 	for {
-		buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
 		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
 		if len(block) < SORTED_LEAF_BLOCK_SIZE {
 			return nil, Xitdb_Error.Unexpected_EOF
@@ -1285,8 +1292,8 @@ sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Slot)
 sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: Error) {
 	node_ptr := root_ptr
 	rank: i64 = 0
+	buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
 	for {
-		buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
 		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
 		if len(block) < SORTED_LEAF_BLOCK_SIZE {
 			return 0, Xitdb_Error.Unexpected_EOF

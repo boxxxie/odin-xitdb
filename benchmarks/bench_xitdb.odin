@@ -283,7 +283,7 @@ print_result :: proc(r: Bench_Result) {
 	}
 	acc := &g_group_accum[slot]
 	if acc.count == 0 {
-		acc.name = strings.clone(r.name, context.allocator)
+		acc.name = r.name
 		acc.ops = r.ops
 		acc.bytes_used = r.bytes_used
 	} else if r.bytes_used > 0 {
