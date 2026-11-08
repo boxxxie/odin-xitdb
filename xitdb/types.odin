@@ -1383,12 +1383,6 @@ Sorted_Remove_Result :: struct {
 	found:    bool,
 }
 
-Sorted_Slot :: struct {
-	slot:     Slot,
-	key_slot: Slot,
-	position: i64,
-}
-
 is_key_only_entry :: #force_inline proc(entry: Slot) -> bool {
 	return entry.tag == .Bytes || entry.tag == .Short_Bytes
 }

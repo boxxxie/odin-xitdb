@@ -809,7 +809,7 @@ _exec_path_part :: proc(
 		}
 		rank := (header.size + index) if index < 0 else index
 		if write_mode == .Read_Only {
-			final_slot_ptr := read_btree_slot(db, header.root_ptr, rank) or_return
+			final_slot_ptr := descend_by_rank(db, header.root_ptr, rank, BTREE_BRANCH_BLOCK_SIZE) or_return
 			return read_slot_pointer(db, write_mode, path, path_i + 1, final_slot_ptr, frozen_at)
 		}
 		write_slot := btree_get_for_write(db, header.root_ptr, rank, frozen_at) or_return
@@ -1176,17 +1176,12 @@ _exec_path_part :: proc(
 		header := btree_header_from_bytes(hb) or_return
 
 		if write_mode == .Read_Only {
-			found_maybe := sorted_get(db, header.root_ptr, key) or_return
-			found, has_found := found_maybe.?
+			entry_maybe := sorted_get(db, header.root_ptr, key) or_return
+			entry, has_found := entry_maybe.?
 			if !has_found {
 				return {}, .Key_Not_Found
 			}
-			target_slot: Slot_Pointer
-			if _, is_key := p.target.(Sorted_Map_Get_Key); is_key {
-				target_slot = Slot_Pointer{position = nil, slot = found.key_slot}
-			} else {
-				target_slot = sorted_target_slot(db, found.slot, p.target) or_return
-			}
+			target_slot := sorted_target_slot(db, entry, p.target) or_return
 			return read_slot_pointer(db, write_mode, path, path_i + 1, target_slot, frozen_at)
 		}
 
@@ -1228,8 +1223,7 @@ _exec_path_part :: proc(
 			return {}, .Key_Not_Found
 		}
 		rank := (header.size + index) if index < 0 else index
-		found := sorted_get_by_index(db, header.root_ptr, rank) or_return
-		target_slot := Slot_Pointer{position = found.position, slot = found.slot}
+		target_slot := descend_by_rank(db, header.root_ptr, rank, SORTED_BRANCH_BLOCK_SIZE) or_return
 		return read_slot_pointer(db, write_mode, path, path_i + 1, target_slot, frozen_at)
 
 	case Sorted_Map_Remove:

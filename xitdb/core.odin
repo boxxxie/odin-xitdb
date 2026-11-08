@@ -453,7 +453,10 @@ core_read_at :: proc(c: ^Core, pos: i64, p: []u8) -> (read_n: int, err: Error) {
 		return n, r_err
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
-		if buf_len > 0 && pos >= v.memory_pos && pos < v.memory_pos + buf_len {
+		if buf_len > 0 && pos >= v.memory_pos {
+			if pos >= v.memory_pos + buf_len {
+				return 0, io.Error.EOF
+			}
 			mem_off := int(pos - v.memory_pos)
 			size := min(len(p), int(buf_len) - mem_off)
 			copy(p[:size], v.memory.buf[mem_off:mem_off + size])
@@ -514,6 +517,79 @@ core_read_exact_at :: proc(c: ^Core, pos: i64, p: []u8) -> Error {
 		}
 	}
 	return nil
+}
+
+// Stateless positional read of up to len(p) bytes at `pos` into `p`. Reaching EOF before len(p)
+// returns the subslice `p[:total]` read without error (matching Zig's readSliceShort).
+core_read_short_at :: proc(c: ^Core, pos: i64, p: []u8) -> (block: []u8, err: Error) {
+	if pos < 0 {
+		return nil, Xitdb_Error.Expected_Unsigned_Long
+	}
+	if len(p) == 0 {
+		return p[:0], nil
+	}
+	#partial switch &v in c {
+	case Core_Memory:
+		if pos >= i64(len(v.buf)) {
+			return p[:0], nil
+		}
+		avail := min(len(p), len(v.buf) - int(pos))
+		copy(p[:avail], v.buf[int(pos) : int(pos) + avail])
+		return p[:avail], nil
+	case Core_Buffered_File:
+		buf_len := i64(len(v.memory.buf))
+		if buf_len > 0 && pos >= v.memory_pos {
+			if pos >= v.memory_pos + buf_len {
+				return p[:0], nil
+			}
+			mem_off := int(pos - v.memory_pos)
+			avail := min(len(p), int(buf_len) - mem_off)
+			copy(p[:avail], v.memory.buf[mem_off : mem_off + avail])
+			return p[:avail], nil
+		}
+	}
+	total := 0
+	for total < len(p) {
+		n, r_err := core_read_at(c, pos + i64(total), p[total:])
+		total += n
+		if r_err != nil {
+			if r_err == io.Error.EOF {
+				return p[:total], nil
+			}
+			return nil, r_err
+		}
+		if n == 0 {
+			return p[:total], nil
+		}
+	}
+	return p[:total], nil
+}
+
+// Returns a zero-copy slice of up to `len(buf)` bytes at `pos` when backed by memory,
+// or reads up to `len(buf)` bytes into `buf` in a single short read when backed by a file.
+core_read_block_at :: #force_inline proc(c: ^Core, pos: i64, buf: []u8) -> (block: []u8, err: Error) {
+	if pos < 0 {
+		return nil, Xitdb_Error.Expected_Unsigned_Long
+	}
+	#partial switch &v in c {
+	case Core_Memory:
+		if pos >= i64(len(v.buf)) {
+			return nil, nil
+		}
+		avail := min(len(buf), len(v.buf) - int(pos))
+		return v.buf[int(pos) : int(pos) + avail], nil
+	case Core_Buffered_File:
+		buf_len := i64(len(v.memory.buf))
+		if buf_len > 0 && pos >= v.memory_pos {
+			if pos >= v.memory_pos + buf_len {
+				return nil, nil
+			}
+			mem_off := int(pos - v.memory_pos)
+			avail := min(len(buf), int(buf_len) - mem_off)
+			return v.memory.buf[mem_off : mem_off + avail], nil
+		}
+	}
+	return core_read_short_at(c, pos, buf)
 }
 
 // Write all bytes of `p` to `c`.

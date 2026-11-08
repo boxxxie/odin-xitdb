@@ -668,6 +668,45 @@ unit_wire_format_validation_and_error_guards :: proc(t: ^testing.T) {
 		_, bad_trailer_err := xitdb.cursor_read_int(xitdb.database_root_cursor(&db).read_cursor)
 		testing.expect_value(t, bad_trailer_err, xitdb.Xitdb_Error.Invalid_Database)
 	}
+
+	// 9. Multi-chunk (> 256B) .Bytes key comparison in Sorted_Map on an unbuffered file backend
+	{
+		ctx := driver_init_ctx(t, .File)
+		defer driver_destroy_ctx(&ctx)
+		driver_open_primary(&ctx)
+
+		rc := xitdb.database_root_cursor(&ctx.primary_db)
+		sm, sm_err := xitdb.write_sorted_map_init(rc)
+		testing.expect_value(t, sm_err, nil)
+
+		prefix_buf: [550]u8
+		for i in 0 ..< len(prefix_buf) {
+			prefix_buf[i] = u8('a' + (i % 26))
+		}
+		prefix := string(prefix_buf[:])
+		k1 := fmt.tprintf("%s_01", prefix)
+		k2 := fmt.tprintf("%s_02", prefix)
+		k3 := fmt.tprintf("%s_03", prefix)
+
+		testing.expect_value(t, xitdb.sorted_map_put(&sm, k2, i64(20)), nil)
+		testing.expect_value(t, xitdb.sorted_map_put(&sm, k1, i64(10)), nil)
+		testing.expect_value(t, xitdb.sorted_map_put(&sm, k3, i64(30)), nil)
+
+		rsm := sm.read_sorted_map
+		c1, err1 := xitdb.sorted_map_get_cursor(rsm, k1)
+		testing.expect_value(t, err1, nil)
+		v1, _ := xitdb.cursor_read_int(c1.?)
+		testing.expect_value(t, v1, i64(10))
+
+		kv1_maybe, idx_err := xitdb.sorted_map_get_index_kv_pair(rsm, 1)
+		testing.expect_value(t, idx_err, nil)
+		v2, _ := xitdb.cursor_read_int(kv1_maybe.?.value_cursor)
+		testing.expect_value(t, v2, i64(20))
+
+		rank2, r_err := xitdb.sorted_map_rank(rsm, k2)
+		testing.expect_value(t, r_err, nil)
+		testing.expect_value(t, rank2, i64(1))
+	}
 }
 
 // ----------------------------------------------------------------------------

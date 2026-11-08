@@ -6,28 +6,31 @@ import "core:encoding/endian"
 // LinkedArrayList methods (backed by a count-augmented B-Tree)
 
 read_btree_node :: proc(db: ^Database, ptr: i64) -> (res: BTree_Node, err: Error) {
-	header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
-	core_read_exact_at(db.core, ptr, header_bytes[:]) or_return
-	kind_int := header_bytes[0]
+	buf: [BTREE_BRANCH_BLOCK_SIZE]u8 = ---
+	block := core_read_block_at(db.core, ptr, buf[:]) or_return
+	if len(block) < BTREE_LEAF_BLOCK_SIZE {
+		return {}, Xitdb_Error.Unexpected_EOF
+	}
+	kind_int := block[0]
 	if kind_int > u8(BTree_Node_Kind.Branch) {
 		return {}, .Invalid_BTree_Node_Kind
 	}
 	kind := BTree_Node_Kind(kind_int)
-	num := int(header_bytes[1])
+	num := int(block[1])
 	if num > BTREE_SLOT_COUNT {
 		return {}, .Invalid_BTree_Node
 	}
+	body := block[BTREE_NODE_HEADER_SIZE:]
 	node := BTree_Node{kind = kind, num = num}
 	switch kind {
 	case .Leaf:
-		body: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8 = ---
-		core_read_exact_at(db.core, ptr + BTREE_NODE_HEADER_SIZE, body[:]) or_return
 		for i in 0 ..< num {
 			node.values[i] = slot_from_slice(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH]) or_return
 		}
 	case .Branch:
-		body: [(SLOT_LENGTH + 8) * BTREE_SLOT_COUNT]u8 = ---
-		core_read_exact_at(db.core, ptr + BTREE_NODE_HEADER_SIZE, body[:]) or_return
+		if len(block) < BTREE_BRANCH_BLOCK_SIZE {
+			return {}, Xitdb_Error.Unexpected_EOF
+		}
 		for i in 0 ..< num {
 			node.children[i] = slot_from_slice(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH]) or_return
 		}
@@ -99,86 +102,46 @@ btree_new_root :: proc(db: ^Database) -> (res: i64, err: Error) {
 	return write_btree_node(db, BTree_Node{kind = .Leaf, num = 0})
 }
 
-read_btree_slot :: proc(db: ^Database, root_ptr, rank: i64) -> (res: Slot_Pointer, err: Error) {
+descend_by_rank :: proc(db: ^Database, root_ptr, rank: i64, $BRANCH_BLOCK_SIZE: int) -> (res: Slot_Pointer, err: Error) {
 	node_ptr := root_ptr
 	rem := rank
 	for {
-		if hdr_slice, in_mem, slice_err := core_slice_at(db.core, node_ptr, BTREE_NODE_HEADER_SIZE); in_mem {
-			if slice_err != nil {
-				return {}, slice_err
-			}
-			kind_int := hdr_slice[0]
-			if kind_int > u8(BTree_Node_Kind.Branch) {
-				return {}, .Invalid_BTree_Node_Kind
-			}
-			num := int(hdr_slice[1])
-			if num > BTREE_SLOT_COUNT {
-				return {}, .Invalid_BTree_Node
-			}
-			if BTree_Node_Kind(kind_int) == .Leaf {
-				if rem >= i64(num) {
-					return {}, .Invalid_BTree_Node
-				}
-				position := node_ptr + BTREE_NODE_HEADER_SIZE + rem * SLOT_LENGTH
-				slot_slice, _, s_err := core_slice_at(db.core, position, SLOT_LENGTH)
-				if s_err != nil {
-					return {}, s_err
-				}
-				slot := slot_from_slice(slot_slice) or_return
-				return Slot_Pointer{position = position, slot = slot}, nil
-			}
-			body_len := SLOT_LENGTH * BTREE_SLOT_COUNT + num * 8
-			body_slice, _, b_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, body_len)
-			if b_err != nil {
-				return {}, b_err
-			}
-			counts_off := SLOT_LENGTH * BTREE_SLOT_COUNT
-			i := 0
-			for i + 1 < num {
-				cnt := i64(endian.unchecked_get_u64be(body_slice[counts_off + i * 8 : counts_off + (i + 1) * 8]))
-				if rem < cnt {
-					break
-				}
-				rem -= cnt
-				i += 1
-			}
-			child_slot := slot_from_slice(body_slice[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
-			node_ptr = child_slot.value
-			continue
+		buf: [BRANCH_BLOCK_SIZE]u8 = ---
+		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
+		if len(block) < BTREE_LEAF_BLOCK_SIZE {
+			return {}, Xitdb_Error.Unexpected_EOF
 		}
-
-		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
-		core_read_exact_at(db.core, node_ptr, header_bytes[:]) or_return
-		kind_int := header_bytes[0]
+		kind_int := block[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
 			return {}, .Invalid_BTree_Node_Kind
 		}
-		num := int(header_bytes[1])
+		num := int(block[1])
 		if num > BTREE_SLOT_COUNT {
 			return {}, .Invalid_BTree_Node
 		}
+		body := block[BTREE_NODE_HEADER_SIZE:]
 		if BTree_Node_Kind(kind_int) == .Leaf {
 			if rem >= i64(num) {
 				return {}, .Invalid_BTree_Node
 			}
-			position := node_ptr + BTREE_NODE_HEADER_SIZE + rem * SLOT_LENGTH
-			slot := core_read_slot_at(db.core, position) or_return
-			return Slot_Pointer{position = position, slot = slot}, nil
+			slot_off := int(rem) * SLOT_LENGTH
+			slot := slot_from_slice(body[slot_off : slot_off + SLOT_LENGTH]) or_return
+			return Slot_Pointer{position = node_ptr + BTREE_NODE_HEADER_SIZE + i64(slot_off), slot = slot}, nil
 		}
-		counts_pos := node_ptr + BTREE_NODE_HEADER_SIZE + SLOT_LENGTH * BTREE_SLOT_COUNT
-		counts_buf: [8 * BTREE_SLOT_COUNT]u8 = ---
-		core_read_exact_at(db.core, counts_pos, counts_buf[:num * 8]) or_return
+		if len(block) < BRANCH_BLOCK_SIZE {
+			return {}, Xitdb_Error.Unexpected_EOF
+		}
+		counts_off := BRANCH_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE - 8 * BTREE_SLOT_COUNT
 		i := 0
 		for i + 1 < num {
-			cnt := i64(endian.unchecked_get_u64be(counts_buf[i * 8 : i * 8 + 8]))
+			cnt := i64(endian.unchecked_get_u64be(body[counts_off + i * 8 : counts_off + (i + 1) * 8]))
 			if rem < cnt {
 				break
 			}
 			rem -= cnt
 			i += 1
 		}
-		child_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(i) * SLOT_LENGTH
-		child_slot := core_read_slot_at(db.core, child_pos) or_return
+		child_slot := slot_from_slice(body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
 		node_ptr = child_slot.value
 	}
 }
@@ -215,7 +178,7 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (res: BTr
 					core_seek_to(db.core, val_pos) or_return
 					core_write_all(db.core, empty_slot_bytes[:]) or_return
 				}
-				new_hdr := [BTREE_NODE_HEADER_SIZE]u8{header_bytes[0], u8(total)}
+				new_hdr := [BTREE_NODE_HEADER_SIZE]u8{kind_int, u8(total)}
 				core_seek_to(db.core, node_ptr) or_return
 				core_write_all(db.core, new_hdr[:]) or_return
 				return BTree_Insert_Result{
@@ -544,7 +507,7 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 				}
 				core_seek_to(db.core, entry_pos) or_return
 				core_write_all(db.core, shift_buf[:tail_len + SLOT_LENGTH]) or_return
-				new_hdr := [BTREE_NODE_HEADER_SIZE]u8{header_bytes[0], u8(total)}
+				new_hdr := [BTREE_NODE_HEADER_SIZE]u8{kind_int, u8(total)}
 				core_seek_to(db.core, node_ptr) or_return
 				core_write_all(db.core, new_hdr[:]) or_return
 				return BTree_Remove_Result{
@@ -1039,28 +1002,31 @@ btree_split :: proc(db: ^Database, root_ptr, rank: i64) -> (res: BTree_Split_Res
 // SortedMap / SortedSet methods (backed by a count-augmented B+Tree)
 
 read_sorted_node :: proc(db: ^Database, ptr: i64) -> (res: Sorted_Node, err: Error) {
-	header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
-	core_read_exact_at(db.core, ptr, header_bytes[:]) or_return
-	kind_int := header_bytes[0]
+	buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
+	block := core_read_block_at(db.core, ptr, buf[:]) or_return
+	if len(block) < SORTED_LEAF_BLOCK_SIZE {
+		return {}, Xitdb_Error.Unexpected_EOF
+	}
+	kind_int := block[0]
 	if kind_int > u8(BTree_Node_Kind.Branch) {
 		return {}, .Invalid_BTree_Node_Kind
 	}
 	kind := BTree_Node_Kind(kind_int)
-	num := int(header_bytes[1])
+	num := int(block[1])
 	if num > BTREE_SLOT_COUNT {
 		return {}, .Invalid_BTree_Node
 	}
+	body := block[BTREE_NODE_HEADER_SIZE:]
 	node := Sorted_Node{kind = kind, num = num}
 	switch kind {
 	case .Leaf:
-		body: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8 = ---
-		core_read_exact_at(db.core, ptr + BTREE_NODE_HEADER_SIZE, body[:]) or_return
 		for i in 0 ..< num {
 			node.entries[i] = slot_from_slice(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH]) or_return
 		}
 	case .Branch:
-		body: [(SLOT_LENGTH * 2 + 8) * BTREE_SLOT_COUNT]u8 = ---
-		core_read_exact_at(db.core, ptr + BTREE_NODE_HEADER_SIZE, body[:]) or_return
+		if len(block) < SORTED_BRANCH_BLOCK_SIZE {
+			return {}, Xitdb_Error.Unexpected_EOF
+		}
 		for i in 0 ..< num {
 			node.children[i] = slot_from_slice(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH]) or_return
 		}
@@ -1166,46 +1132,58 @@ compare_key :: proc(db: ^Database, key_slot: Slot, target: []u8) -> (res: int, e
 		}
 		return bytes.compare(buf[:length], target), nil
 	case .Bytes:
-		#partial switch &v in db.core {
-		case Core_Memory:
-			pos := int(key_slot.value)
-			if pos < 0 || pos + 8 > len(v.buf) {
+		if hdr_slice, in_mem, slice_err := core_slice_at(db.core, key_slot.value, 8); in_mem {
+			if slice_err != nil {
+				return 0, slice_err
+			}
+			length := int(endian.unchecked_get_u64be(hdr_slice))
+			if length < 0 {
 				return 0, Xitdb_Error.Unexpected_EOF
 			}
-			length := int(endian.unchecked_get_u64be(v.buf[pos : pos + 8]))
-			if length < 0 || pos + 8 + length > len(v.buf) {
-				return 0, Xitdb_Error.Unexpected_EOF
+			key_slice, _, key_err := core_slice_at(db.core, key_slot.value + 8, length)
+			if key_err != nil {
+				return 0, key_err
 			}
-			return bytes.compare(v.buf[pos + 8 : pos + 8 + length], target), nil
-		case Core_Buffered_File:
-			buf_len := i64(len(v.memory.buf))
-			if buf_len > 0 && key_slot.value >= v.memory_pos && key_slot.value + 8 <= v.memory_pos + buf_len {
-				mem_off := int(key_slot.value - v.memory_pos)
-				length := int(endian.unchecked_get_u64be(v.memory.buf[mem_off : mem_off + 8]))
-				if length >= 0 && mem_off + 8 + length <= int(buf_len) {
-					return bytes.compare(v.memory.buf[mem_off + 8 : mem_off + 8 + length], target), nil
-				}
+			return bytes.compare(key_slice, target), nil
+		}
+		first_buf: [256]u8 = ---
+		first := core_read_short_at(db.core, key_slot.value, first_buf[:]) or_return
+		if len(first) < 8 {
+			return 0, Xitdb_Error.Unexpected_EOF
+		}
+		stored_len := int(endian.unchecked_get_u64be(first[:8]))
+		if stored_len < 0 {
+			return 0, Xitdb_Error.Unexpected_EOF
+		}
+		avail := len(first) - 8
+		if avail < min(stored_len, len(first_buf) - 8) {
+			return 0, Xitdb_Error.Unexpected_EOF
+		}
+		head := first[8 : 8 + min(avail, stored_len)]
+		first_cmp := bytes.compare(head, target[:min(len(head), len(target))])
+		if first_cmp != 0 {
+			return first_cmp, nil
+		}
+		remaining := stored_len - len(head)
+		rest := target[len(head):]
+		pos := key_slot.value + 8 + i64(len(head))
+		for remaining > 0 {
+			if len(rest) == 0 {
+				return 1, nil
 			}
-		}
-		length := core_read_i64_at(db.core, key_slot.value) or_return
-		read_len := min(int(length), len(target))
-		if read_len <= 256 {
-			stack_buf: [256]u8 = ---
-			key_bytes := stack_buf[:read_len]
-			core_read_exact_at(db.core, key_slot.value + 8, key_bytes) or_return
-			c := bytes.compare(key_bytes, target[:read_len])
-			if c != 0 {
-				return c, nil
+			chunk_buf: [256]u8 = ---
+			n := min(remaining, len(chunk_buf))
+			stored := chunk_buf[:n]
+			core_read_exact_at(db.core, pos, stored) or_return
+			cmp := bytes.compare(stored, rest[:min(n, len(rest))])
+			if cmp != 0 {
+				return cmp, nil
 			}
-			return -1 if int(length) < len(target) else (1 if int(length) > len(target) else 0), nil
+			pos += i64(n)
+			remaining -= n
+			rest = rest[n:]
 		}
-		key_bytes := make([]u8, read_len, context.temp_allocator)
-		core_read_exact_at(db.core, key_slot.value + 8, key_bytes) or_return
-		c := bytes.compare(key_bytes, target[:read_len])
-		if c != 0 {
-			return c, nil
-		}
-		return -1 if int(length) < len(target) else (1 if int(length) > len(target) else 0), nil
+		return -1 if len(rest) > 0 else 0, nil
 	case:
 		return 0, .Unexpected_Tag
 	}
@@ -1247,92 +1225,33 @@ sorted_branch_search :: proc(db: ^Database, node: ^Sorted_Node, key: []u8) -> (i
 	return lo - 1, nil
 }
 
-sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Sorted_Slot), err: Error) {
+sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Slot), err: Error) {
 	node_ptr := root_ptr
 	for {
-		if hdr_slice, in_mem, slice_err := core_slice_at(db.core, node_ptr, BTREE_NODE_HEADER_SIZE); in_mem {
-			if slice_err != nil {
-				return nil, slice_err
-			}
-			kind_int := hdr_slice[0]
-			if kind_int > u8(BTree_Node_Kind.Branch) {
-				return nil, .Invalid_BTree_Node_Kind
-			}
-			num := int(hdr_slice[1])
-			if num > BTREE_SLOT_COUNT {
-				return nil, .Invalid_BTree_Node
-			}
-			if BTree_Node_Kind(kind_int) == .Leaf {
-				entries_slice, _, e_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, num * SLOT_LENGTH)
-				if e_err != nil {
-					return nil, e_err
-				}
-				lo := 0
-				hi := num
-				for lo < hi {
-					mid := int(uint(lo + hi) >> 1)
-					entry_slot := slot_from_slice(entries_slice[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH]) or_return
-					key_slot := sorted_entry_key_slot(db, entry_slot) or_return
-					cmp := compare_key(db, key_slot, key) or_return
-					if cmp == 0 {
-						entry_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(mid) * SLOT_LENGTH
-						return Sorted_Slot{slot = entry_slot, key_slot = key_slot, position = entry_pos}, nil
-					} else if cmp < 0 {
-						lo = mid + 1
-					} else {
-						hi = mid
-					}
-				}
-				return nil, nil
-			}
-			branch_slice, _, b_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, (BTREE_SLOT_COUNT + num) * SLOT_LENGTH)
-			if b_err != nil {
-				return nil, b_err
-			}
-			lo := 1
-			hi := num
-			sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
-			for lo < hi {
-				mid := int(uint(lo + hi) >> 1)
-				sep_slot := slot_from_slice(branch_slice[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH]) or_return
-				c := compare_key(db, sep_slot, key) or_return
-				if c <= 0 {
-					lo = mid + 1
-				} else {
-					hi = mid
-				}
-			}
-			child_idx := lo - 1
-			child_slot := slot_from_slice(branch_slice[child_idx * SLOT_LENGTH : (child_idx + 1) * SLOT_LENGTH]) or_return
-			node_ptr = child_slot.value
-			continue
+		buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
+		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
+		if len(block) < SORTED_LEAF_BLOCK_SIZE {
+			return nil, Xitdb_Error.Unexpected_EOF
 		}
-
-		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
-		core_read_exact_at(db.core, node_ptr, header_bytes[:]) or_return
-		kind_int := header_bytes[0]
+		kind_int := block[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
 			return nil, .Invalid_BTree_Node_Kind
 		}
-		num := int(header_bytes[1])
+		num := int(block[1])
 		if num > BTREE_SLOT_COUNT {
 			return nil, .Invalid_BTree_Node
 		}
+		body := block[BTREE_NODE_HEADER_SIZE:]
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			entries_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8 = ---
-			if num > 0 {
-				core_read_exact_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, entries_buf[:num * SLOT_LENGTH]) or_return
-			}
 			lo := 0
 			hi := num
 			for lo < hi {
 				mid := int(uint(lo + hi) >> 1)
-				entry_slot := slot_from_slice(entries_buf[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH]) or_return
+				entry_slot := slot_from_slice(body[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH]) or_return
 				key_slot := sorted_entry_key_slot(db, entry_slot) or_return
 				cmp := compare_key(db, key_slot, key) or_return
 				if cmp == 0 {
-					entry_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(mid) * SLOT_LENGTH
-					return Sorted_Slot{slot = entry_slot, key_slot = key_slot, position = entry_pos}, nil
+					return entry_slot, nil
 				} else if cmp < 0 {
 					lo = mid + 1
 				} else {
@@ -1341,14 +1260,15 @@ sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Sorte
 			}
 			return nil, nil
 		}
-		branch_buf: [SLOT_LENGTH * 2 * BTREE_SLOT_COUNT]u8 = ---
-		core_read_exact_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, branch_buf[:(BTREE_SLOT_COUNT + num) * SLOT_LENGTH]) or_return
+		if len(block) < SORTED_BRANCH_BLOCK_SIZE {
+			return nil, Xitdb_Error.Unexpected_EOF
+		}
 		lo := 1
 		hi := num
 		sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
 		for lo < hi {
 			mid := int(uint(lo + hi) >> 1)
-			sep_slot := slot_from_slice(branch_buf[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH]) or_return
+			sep_slot := slot_from_slice(body[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH]) or_return
 			c := compare_key(db, sep_slot, key) or_return
 			if c <= 0 {
 				lo = mid + 1
@@ -1357,91 +1277,7 @@ sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Sorte
 			}
 		}
 		child_idx := lo - 1
-		child_slot := slot_from_slice(branch_buf[child_idx * SLOT_LENGTH : (child_idx + 1) * SLOT_LENGTH]) or_return
-		node_ptr = child_slot.value
-	}
-}
-
-sorted_get_by_index :: proc(db: ^Database, root_ptr, rank: i64) -> (res: Sorted_Slot, err: Error) {
-	node_ptr := root_ptr
-	rem := rank
-	for {
-		if hdr_slice, in_mem, slice_err := core_slice_at(db.core, node_ptr, BTREE_NODE_HEADER_SIZE); in_mem {
-			if slice_err != nil {
-				return {}, slice_err
-			}
-			kind_int := hdr_slice[0]
-			if kind_int > u8(BTree_Node_Kind.Branch) {
-				return {}, .Invalid_BTree_Node_Kind
-			}
-			num := int(hdr_slice[1])
-			if num > BTREE_SLOT_COUNT {
-				return {}, .Invalid_BTree_Node
-			}
-			if BTree_Node_Kind(kind_int) == .Leaf {
-				if rem >= i64(num) {
-					return {}, .Invalid_BTree_Node
-				}
-				pos := node_ptr + BTREE_NODE_HEADER_SIZE + rem * SLOT_LENGTH
-				s_slice, _, s_err := core_slice_at(db.core, pos, SLOT_LENGTH)
-				if s_err != nil {
-					return {}, s_err
-				}
-				slot := slot_from_slice(s_slice) or_return
-				return Sorted_Slot{slot = slot, position = pos}, nil
-			}
-			body_len := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + num * 8
-			body_slice, _, b_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, body_len)
-			if b_err != nil {
-				return {}, b_err
-			}
-			counts_off := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
-			i := 0
-			for i + 1 < num {
-				cnt := i64(endian.unchecked_get_u64be(body_slice[counts_off + i * 8 : counts_off + (i + 1) * 8]))
-				if rem < cnt {
-					break
-				}
-				rem -= cnt
-				i += 1
-			}
-			child_slot := slot_from_slice(body_slice[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
-			node_ptr = child_slot.value
-			continue
-		}
-
-		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
-		core_read_exact_at(db.core, node_ptr, header_bytes[:]) or_return
-		kind_int := header_bytes[0]
-		if kind_int > u8(BTree_Node_Kind.Branch) {
-			return {}, .Invalid_BTree_Node_Kind
-		}
-		num := int(header_bytes[1])
-		if num > BTREE_SLOT_COUNT {
-			return {}, .Invalid_BTree_Node
-		}
-		if BTree_Node_Kind(kind_int) == .Leaf {
-			if rem >= i64(num) {
-				return {}, .Invalid_BTree_Node
-			}
-			pos := node_ptr + BTREE_NODE_HEADER_SIZE + rem * SLOT_LENGTH
-			slot := core_read_slot_at(db.core, pos) or_return
-			return Sorted_Slot{slot = slot, position = pos}, nil
-		}
-		counts_pos := node_ptr + BTREE_NODE_HEADER_SIZE + SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
-		counts_buf: [8 * BTREE_SLOT_COUNT]u8 = ---
-		core_read_exact_at(db.core, counts_pos, counts_buf[:num * 8]) or_return
-		i := 0
-		for i + 1 < num {
-			cnt := i64(endian.unchecked_get_u64be(counts_buf[i * 8 : i * 8 + 8]))
-			if rem < cnt {
-				break
-			}
-			rem -= cnt
-			i += 1
-		}
-		child_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(i) * SLOT_LENGTH
-		child_slot := core_read_slot_at(db.core, child_pos) or_return
+		child_slot := slot_from_slice(body[child_idx * SLOT_LENGTH : (child_idx + 1) * SLOT_LENGTH]) or_return
 		node_ptr = child_slot.value
 	}
 }
@@ -1450,87 +1286,26 @@ sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: 
 	node_ptr := root_ptr
 	rank: i64 = 0
 	for {
-		if hdr_slice, in_mem, slice_err := core_slice_at(db.core, node_ptr, BTREE_NODE_HEADER_SIZE); in_mem {
-			if slice_err != nil {
-				return 0, slice_err
-			}
-			kind_int := hdr_slice[0]
-			if kind_int > u8(BTree_Node_Kind.Branch) {
-				return 0, .Invalid_BTree_Node_Kind
-			}
-			num := int(hdr_slice[1])
-			if num > BTREE_SLOT_COUNT {
-				return 0, .Invalid_BTree_Node
-			}
-			if BTree_Node_Kind(kind_int) == .Leaf {
-				entries_slice, _, e_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, num * SLOT_LENGTH)
-				if e_err != nil {
-					return 0, e_err
-				}
-				lo := 0
-				hi := num
-				for lo < hi {
-					mid := int(uint(lo + hi) >> 1)
-					entry_slot := slot_from_slice(entries_slice[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH]) or_return
-					key_slot := sorted_entry_key_slot(db, entry_slot) or_return
-					cmp := compare_key(db, key_slot, key) or_return
-					if cmp == 0 {
-						return rank + i64(mid), nil
-					} else if cmp < 0 {
-						lo = mid + 1
-					} else {
-						hi = mid
-					}
-				}
-				return rank + i64(lo), nil
-			}
-			branch_slice, _, b_err := core_slice_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + num * 8)
-			if b_err != nil {
-				return 0, b_err
-			}
-			lo := 1
-			hi := num
-			sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
-			for lo < hi {
-				mid := int(uint(lo + hi) >> 1)
-				sep_slot := slot_from_slice(branch_slice[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH]) or_return
-				c := compare_key(db, sep_slot, key) or_return
-				if c <= 0 {
-					lo = mid + 1
-				} else {
-					hi = mid
-				}
-			}
-			i := lo - 1
-			counts_off := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
-			for k in 0 ..< i {
-				rank += i64(endian.unchecked_get_u64be(branch_slice[counts_off + k * 8 : counts_off + (k + 1) * 8]))
-			}
-			child_slot := slot_from_slice(branch_slice[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
-			node_ptr = child_slot.value
-			continue
+		buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
+		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
+		if len(block) < SORTED_LEAF_BLOCK_SIZE {
+			return 0, Xitdb_Error.Unexpected_EOF
 		}
-
-		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
-		core_read_exact_at(db.core, node_ptr, header_bytes[:]) or_return
-		kind_int := header_bytes[0]
+		kind_int := block[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
 			return 0, .Invalid_BTree_Node_Kind
 		}
-		num := int(header_bytes[1])
+		num := int(block[1])
 		if num > BTREE_SLOT_COUNT {
 			return 0, .Invalid_BTree_Node
 		}
+		body := block[BTREE_NODE_HEADER_SIZE:]
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			entries_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8 = ---
-			if num > 0 {
-				core_read_exact_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, entries_buf[:num * SLOT_LENGTH]) or_return
-			}
 			lo := 0
 			hi := num
 			for lo < hi {
 				mid := int(uint(lo + hi) >> 1)
-				entry_slot := slot_from_slice(entries_buf[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH]) or_return
+				entry_slot := slot_from_slice(body[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH]) or_return
 				key_slot := sorted_entry_key_slot(db, entry_slot) or_return
 				cmp := compare_key(db, key_slot, key) or_return
 				if cmp == 0 {
@@ -1543,14 +1318,15 @@ sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: 
 			}
 			return rank + i64(lo), nil
 		}
-		branch_buf: [(SLOT_LENGTH * 2 + 8) * BTREE_SLOT_COUNT]u8 = ---
-		core_read_exact_at(db.core, node_ptr + BTREE_NODE_HEADER_SIZE, branch_buf[:SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + num * 8]) or_return
+		if len(block) < SORTED_BRANCH_BLOCK_SIZE {
+			return 0, Xitdb_Error.Unexpected_EOF
+		}
 		lo := 1
 		hi := num
 		sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
 		for lo < hi {
 			mid := int(uint(lo + hi) >> 1)
-			sep_slot := slot_from_slice(branch_buf[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH]) or_return
+			sep_slot := slot_from_slice(body[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH]) or_return
 			c := compare_key(db, sep_slot, key) or_return
 			if c <= 0 {
 				lo = mid + 1
@@ -1561,9 +1337,9 @@ sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: 
 		i := lo - 1
 		counts_off := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
 		for k in 0 ..< i {
-			rank += i64(endian.unchecked_get_u64be(branch_buf[counts_off + k * 8 : counts_off + (k + 1) * 8]))
+			rank += i64(endian.unchecked_get_u64be(body[counts_off + k * 8 : counts_off + (k + 1) * 8]))
 		}
-		child_slot := slot_from_slice(branch_buf[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
+		child_slot := slot_from_slice(body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
 		node_ptr = child_slot.value
 	}
 }
@@ -1663,22 +1439,22 @@ write_sorted_key_and_entry :: proc(db: ^Database, key: []u8, key_only: bool) -> 
 sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, frozen_at: i64) -> (res: Sorted_Insert_Result, err: Error) {
 	reusable := btree_reusable(db, node_ptr, frozen_at)
 	if reusable {
-		header_bytes: [BTREE_NODE_HEADER_SIZE]u8
-		core_read_exact_at(db.core, node_ptr, header_bytes[:]) or_return
-		kind_int := header_bytes[0]
+		node_buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
+		block := core_read_short_at(db.core, node_ptr, node_buf[:]) or_return
+		if len(block) < SORTED_LEAF_BLOCK_SIZE {
+			return {}, Xitdb_Error.Unexpected_EOF
+		}
+		kind_int := block[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
 			return {}, .Invalid_BTree_Node_Kind
 		}
-		num := int(header_bytes[1])
+		num := int(block[1])
 		if num > BTREE_SLOT_COUNT {
 			return {}, .Invalid_BTree_Node
 		}
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			entries_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8 = ---
-			if num > 0 {
-				core_read_exact_at(db.core, position, entries_buf[:num * SLOT_LENGTH]) or_return
-			}
+			entries_buf := block[BTREE_NODE_HEADER_SIZE : BTREE_NODE_HEADER_SIZE + SLOT_LENGTH * BTREE_SLOT_COUNT]
 			lo := 0
 			hi := num
 			matched_slot: Slot
@@ -1747,7 +1523,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 					core_seek_to(db.core, entry_pos) or_return
 					core_write_all(db.core, eb[:]) or_return
 				}
-				new_hdr := [BTREE_NODE_HEADER_SIZE]u8{header_bytes[0], u8(total)}
+				new_hdr := [BTREE_NODE_HEADER_SIZE]u8{kind_int, u8(total)}
 				core_seek_to(db.core, node_ptr) or_return
 				core_write_all(db.core, new_hdr[:]) or_return
 				return Sorted_Insert_Result{
@@ -1788,8 +1564,10 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 				split    = Sorted_Split{node_ptr = right_ptr, count = i64(right_n), separator = separator},
 			}, nil
 		} else {
-			branch_buf: [(SLOT_LENGTH * 2 + 8) * BTREE_SLOT_COUNT]u8 = ---
-			core_read_exact_at(db.core, position, branch_buf[:SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + num * 8]) or_return
+			if len(block) < SORTED_BRANCH_BLOCK_SIZE {
+				return {}, Xitdb_Error.Unexpected_EOF
+			}
+			branch_buf := block[BTREE_NODE_HEADER_SIZE:SORTED_BRANCH_BLOCK_SIZE]
 			lo := 1
 			hi := num
 			sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
@@ -2036,22 +1814,22 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 
 sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (res: Sorted_Remove_Result, err: Error) {
 	if btree_reusable(db, node_ptr, frozen_at) {
-		header_bytes: [BTREE_NODE_HEADER_SIZE]u8
-		core_read_exact_at(db.core, node_ptr, header_bytes[:]) or_return
-		kind_int := header_bytes[0]
+		node_buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
+		block := core_read_short_at(db.core, node_ptr, node_buf[:]) or_return
+		if len(block) < SORTED_LEAF_BLOCK_SIZE {
+			return {}, Xitdb_Error.Unexpected_EOF
+		}
+		kind_int := block[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
 			return {}, .Invalid_BTree_Node_Kind
 		}
-		num := int(header_bytes[1])
+		num := int(block[1])
 		if num > BTREE_SLOT_COUNT {
 			return {}, .Invalid_BTree_Node
 		}
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			entries_buf: [SLOT_LENGTH * BTREE_SLOT_COUNT]u8
-			if num > 0 {
-				core_read_exact_at(db.core, position, entries_buf[:num * SLOT_LENGTH]) or_return
-			}
+			entries_buf := block[BTREE_NODE_HEADER_SIZE : BTREE_NODE_HEADER_SIZE + SLOT_LENGTH * BTREE_SLOT_COUNT]
 			lo := 0
 			hi := num
 			found := false
@@ -2083,13 +1861,15 @@ sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -
 			}
 			core_seek_to(db.core, entry_pos) or_return
 			core_write_all(db.core, shift_buf[:tail_len + SLOT_LENGTH]) or_return
-			new_hdr := [BTREE_NODE_HEADER_SIZE]u8{header_bytes[0], u8(total)}
+			new_hdr := [BTREE_NODE_HEADER_SIZE]u8{kind_int, u8(total)}
 			core_seek_to(db.core, node_ptr) or_return
 			core_write_all(db.core, new_hdr[:]) or_return
 			return Sorted_Remove_Result{node_ptr = node_ptr, found = true}, nil
 		} else {
-			branch_buf: [SLOT_LENGTH * 2 * BTREE_SLOT_COUNT]u8
-			core_read_exact_at(db.core, position, branch_buf[:(BTREE_SLOT_COUNT + num) * SLOT_LENGTH]) or_return
+			if len(block) < SORTED_BRANCH_BLOCK_SIZE {
+				return {}, Xitdb_Error.Unexpected_EOF
+			}
+			branch_buf := block[BTREE_NODE_HEADER_SIZE:SORTED_BRANCH_BLOCK_SIZE]
 			lo := 1
 			hi := num
 			sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
