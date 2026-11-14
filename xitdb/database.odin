@@ -202,6 +202,22 @@ database_init :: proc(core: ^Core, hasher := Hasher{}) -> (db: Database, err: Er
 	core_seek_to(core, 0) or_return
 	length := core_length(core) or_return
 
+	// A database whose first commit never finished holds nothing. If it is no
+	// bigger than a new database, it was interrupted while being created, so
+	// it is created again. Otherwise it is a full copy that was interrupted
+	// (see `database_apply_replicated`), which is left for the next sync to replace.
+	has_commit := false
+	if length > 0 {
+		db.header = database_read_and_validate_header(&db) or_return
+		fsize := database_read_file_size(&db) or_return
+		has_commit = fsize > 0
+		new_size := database_file_size_start(db.header.version) + 8 + ROOT_TRAILER_LENGTH
+		if !has_commit && length <= new_size {
+			core_set_length(core, 0) or_return
+			length = 0
+		}
+	}
+
 	if length == 0 {
 		file_id := h.file_id
 		if file_id == 0 {
@@ -219,13 +235,10 @@ database_init :: proc(core: ^Core, hasher := Hasher{}) -> (db: Database, err: Er
 			padding      = 0,
 			magic_number = MAGIC_NUMBER,
 		}
-		header_write(db.header, core) or_return
-		rh_bytes: [FILE_SIZE_START + 8 - ROOT_HEADER_START]u8
-		core_write_all(core, rh_bytes[:]) or_return
+		database_write_headers(&db) or_return
 		database_commit_root(&db, Slot{}, 0) or_return
 		core_sync(core) or_return
-	} else {
-		db.header = database_read_and_validate_header(&db) or_return
+	} else if has_commit {
 		_ = database_committed_size(&db) or_return
 	}
 
@@ -268,6 +281,15 @@ database_digest_string_buf :: proc(db: ^Database, s: string, buf: []u8) -> []u8 
 	return database_digest_buf(db, transmute([]u8)s, buf)
 }
 
+header_read_and_validate :: proc(r: ^Core, expected_hash_size: u16) -> (res: Header, err: Error) {
+	header := header_read(r) or_return
+	header_validate(header) or_return
+	if expected_hash_size != 0 && header.hash_size != expected_hash_size {
+		return {}, .Invalid_Hash_Size
+	}
+	return header, nil
+}
+
 database_read_and_validate_header :: proc(db: ^Database) -> (res: Header, err: Error) {
 	header := header_read_at(db.core, 0) or_return
 	header_validate(header) or_return
@@ -275,6 +297,27 @@ database_read_and_validate_header :: proc(db: ^Database) -> (res: Header, err: E
 		return {}, .Invalid_Hash_Size
 	}
 	return header, nil
+}
+
+// Write the database header and an empty root header. The database has
+// no first commit until the root header is given its file size.
+database_write_headers :: proc(db: ^Database) -> Error {
+	core_seek_to(db.core, 0) or_return
+	header_write(db.header, db.core) or_return
+	// Version 1's root header is the biggest (17 bytes).
+	root_header: [SLOT_LENGTH + 8]u8
+	rh_len := int(database_file_size_start(db.header.version) + 8 - ROOT_HEADER_START)
+	return core_write_all(db.core, root_header[:rh_len])
+}
+
+// The root header's file size. It is 0 until the first commit or full copy
+// has finished, including when the file was cut off before it.
+database_read_file_size :: proc(db: ^Database) -> (res: i64, err: Error) {
+	file_size_start := database_file_size_start(db.header.version)
+	if (core_length(db.core) or_return) < file_size_start + 8 {
+		return 0, nil
+	}
+	return core_read_i64_at(db.core, file_size_start)
 }
 
 // Return a writeable root cursor pointing at ROOT_HEADER_START.

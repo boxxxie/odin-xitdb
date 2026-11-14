@@ -802,8 +802,8 @@ database_compact :: proc(db: ^Database, target_core: ^Core, offset_map: ^Offset_
 
 // Return this database's current `Replica_State` (committed size + trailer checksum).
 database_replica_state :: proc(db: ^Database) -> (res: Replica_State, err: Error) {
-	// A full copy that didn't finish leaves nothing behind (see `database_apply_replicated`).
-	if (core_length(db.core) or_return) == 0 {
+	// A full copy that didn't finish has no first commit (see `database_apply_replicated`).
+	if (database_read_file_size(db) or_return) == 0 {
 		return Replica_State{committed_size = 0, checksum = 0}, nil
 	}
 	committed_size := database_committed_size(db) or_return
@@ -928,9 +928,32 @@ database_read_committed_bytes :: proc(db: ^Database, start, end: i64, allocator 
 
 // Apply `length` bytes from `source_core` (starting at `source_core`'s current position)
 // at `start` in `db` and commit them.
-database_apply_replicated :: proc(db: ^Database, start: i64, source_core: ^Core, length: i64) -> (err: Error) {
+database_apply_replicated :: proc(db: ^Database, start: i64, source_core: ^Core, length: i64) -> Error {
+	if start < 0 || length < 0 {
+		return .Invalid_Range
+	}
+	buf: [4096]u8 = ---
+	position := start
 	if start == 0 {
+		// The bytes are a different database, with its own header. Its root header
+		// stays empty until the rest has arrived, so a copy that doesn't finish is
+		// a database without a first commit (see `database_init`), which the next sync replaces.
+		if length < ROOT_HEADER_START {
+			return .Invalid_Range
+		}
+		header := header_read_and_validate(source_core, db.hasher.hash_size) or_return
+		position = database_file_size_start(header.version) + 8
+		if length < position {
+			return .Invalid_Range
+		}
 		core_set_length(db.core, 0) or_return
+		db.header = header
+		database_write_headers(db) or_return
+		// Sync the headers before the data, which could otherwise reach
+		// the disk without them and leave a file that can't be opened.
+		core_sync(db.core) or_return
+		// The root header that came with the bytes isn't needed.
+		core_read_exact(source_core, buf[:position - ROOT_HEADER_START]) or_return
 	} else {
 		root_header := database_read_root_header(db) or_return
 		committed_size, file_size := _database_committed_size_with_header(db, root_header) or_return
@@ -942,41 +965,32 @@ database_apply_replicated :: proc(db: ^Database, start: i64, source_core: ^Core,
 		}
 	}
 
-	// The old database is gone once a new one starts replacing it. If the new one
-	// doesn't fully arrive, leave nothing behind, so the next sync can replace it again.
-	defer if err != nil && start == 0 {
-		_ = core_set_length(db.core, 0)
-	}
-
-	core_seek_to(db.core, start) or_return
-	if length > 0 {
+	core_seek_to(db.core, position) or_return
+	remaining := start + length - position
+	if remaining > 0 {
 		#partial switch &src in source_core {
 		case Core_Memory:
-			if src.pos >= 0 && src.pos + length <= i64(len(src.buf)) {
-				slice := src.buf[int(src.pos):int(src.pos + length)]
-				src.pos += length
+			if src.pos >= 0 && src.pos + remaining <= i64(len(src.buf)) {
+				slice := src.buf[int(src.pos):int(src.pos + remaining)]
+				src.pos += remaining
 				core_write_all(db.core, slice) or_return
 			} else {
 				return Xitdb_Error.Unexpected_EOF
 			}
 		case:
-			buf: [4096]u8 = ---
-			for remaining := length; remaining > 0; {
-				chunk := min(remaining, i64(len(buf)))
+			for rem := remaining; rem > 0; {
+				chunk := min(rem, i64(len(buf)))
 				core_read_exact(source_core, buf[:chunk]) or_return
 				core_write_all(db.core, buf[:chunk]) or_return
-				remaining -= chunk
+				rem -= chunk
 			}
 		}
 	}
 
-	if start == 0 {
-		core_sync(db.core) or_return
-		header := database_read_and_validate_header(db) or_return
-		db.header = header
-		_ = database_committed_size(db) or_return
-	} else if length > 0 {
+	if length > 0 {
+		// The bytes must end with a trailer. Update the root header to match it.
 		_ = database_read_root_trailer(db, start + length) or_return
+		core_sync(db.core) or_return
 		database_write_root_header(db) or_return
 		core_sync(db.core) or_return
 	}
@@ -984,9 +998,31 @@ database_apply_replicated :: proc(db: ^Database, start: i64, source_core: ^Core,
 }
 
 // Convenience wrapper to apply a `[]u8` slice of replicated bytes at `start`.
-database_apply_replicated_bytes :: proc(db: ^Database, start: i64, data: []u8) -> (err: Error) {
+database_apply_replicated_bytes :: proc(db: ^Database, start: i64, data: []u8) -> Error {
+	if start < 0 {
+		return .Invalid_Range
+	}
+	length := i64(len(data))
+	position := start
 	if start == 0 {
+		if length < ROOT_HEADER_START {
+			return .Invalid_Range
+		}
+		hdr_buf: [HEADER_LENGTH]u8
+		copy(hdr_buf[:], data[:HEADER_LENGTH])
+		header := header_from_bytes(hdr_buf)
+		header_validate(header) or_return
+		if db.hasher.hash_size != 0 && header.hash_size != db.hasher.hash_size {
+			return .Invalid_Hash_Size
+		}
+		position = database_file_size_start(header.version) + 8
+		if length < position {
+			return .Invalid_Range
+		}
 		core_set_length(db.core, 0) or_return
+		db.header = header
+		database_write_headers(db) or_return
+		core_sync(db.core) or_return
 	} else {
 		root_header := database_read_root_header(db) or_return
 		committed_size, file_size := _database_committed_size_with_header(db, root_header) or_return
@@ -997,20 +1033,14 @@ database_apply_replicated_bytes :: proc(db: ^Database, start: i64, data: []u8) -
 			core_set_length(db.core, committed_size) or_return
 		}
 	}
-	defer if err != nil && start == 0 {
-		_ = core_set_length(db.core, 0)
-	}
 
-	core_seek_to(db.core, start) or_return
-	core_write_all(db.core, data) or_return
+	core_seek_to(db.core, position) or_return
+	payload_offset := int(position - start)
+	core_write_all(db.core, data[payload_offset:]) or_return
 
-	if start == 0 {
+	if length > 0 {
+		_ = database_read_root_trailer(db, start + length) or_return
 		core_sync(db.core) or_return
-		header := database_read_and_validate_header(db) or_return
-		db.header = header
-		_ = database_committed_size(db) or_return
-	} else if len(data) > 0 {
-		_ = database_read_root_trailer(db, start + i64(len(data))) or_return
 		database_write_root_header(db) or_return
 		core_sync(db.core) or_return
 	}

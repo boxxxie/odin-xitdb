@@ -737,6 +737,83 @@ unit_wire_format_validation_and_error_guards :: proc(t: ^testing.T) {
 		testing.expect_value(t, r_err, nil)
 		testing.expect_value(t, rank2, i64(1))
 	}
+
+	// 10. Interrupted initial database creation (file_size == 0 and length <= new_size)
+	//     recovers cleanly on `database_init` by re-creating the genesis commit.
+	{
+		core: xitdb.Core = xitdb.core_memory_init()
+		defer _ = xitdb.core_destroy(&core)
+
+		// Simulate an interrupted genesis creation: valid 20B Header + 12B zero root header + 10B partial trailer (42B <= 57B)
+		hdr := xitdb.Header{
+			file_id      = 0x1122334455667788,
+			hash_id      = 0,
+			hash_size    = 20,
+			version      = xitdb.VERSION,
+			padding      = 0,
+			magic_number = xitdb.MAGIC_NUMBER,
+		}
+		testing.expect_value(t, xitdb.header_write(hdr, &core), nil)
+		partial_zeros: [22]u8
+		testing.expect_value(t, xitdb.core_write_all(&core, partial_zeros[:]), nil)
+
+		recovered_db, rec_err := xitdb.database_init(&core, xitdb.sha1_hasher(file_id = 0x9988776655443322))
+		testing.expect_value(t, rec_err, nil)
+		rec_sz, sz_err := xitdb.database_committed_size(&recovered_db)
+		testing.expect_value(t, sz_err, nil)
+		testing.expect_value(t, rec_sz, i64(57))
+		testing.expect_value(t, recovered_db.header.file_id, u64(0x9988776655443322))
+	}
+
+	// 11. Interrupted full replication copy (`database_apply_replicated` at `start == 0` cut off mid-stream):
+	//     leaves valid header + zero `file_size` + partial body (> 57B), reopens cleanly via `database_init`,
+	//     reports `Replica_State{committed_size = 0, checksum = 0}`, and succeeds on the next full sync.
+	{
+		src_core: xitdb.Core = xitdb.core_memory_init()
+		defer _ = xitdb.core_destroy(&src_core)
+		src_db, _ := xitdb.database_init(&src_core, xitdb.sha1_hasher(file_id = 777))
+		src_rc := xitdb.database_root_cursor(&src_db)
+		_ = xitdb.cursor_write(&src_rc, "a sufficiently long payload so total committed size exceeds 80 bytes!")
+		src_end, _ := xitdb.database_committed_size(&src_db)
+
+		full_bytes, _ := xitdb.database_read_committed_bytes(&src_db, 0, src_end, context.temp_allocator)
+		defer free_all(context.temp_allocator)
+
+		rep_core: xitdb.Core = xitdb.core_memory_init()
+		defer _ = xitdb.core_destroy(&rep_core)
+		rep_db, _ := xitdb.database_init(&rep_core, xitdb.sha1_hasher(file_id = 888))
+
+		// Feed a truncated stream (missing the final 10 bytes, but claiming full `src_end` length)
+		trunc_stream: xitdb.Core = xitdb.core_memory_from_bytes(full_bytes[:len(full_bytes) - 10])
+		defer _ = xitdb.core_destroy(&trunc_stream)
+		apply_err := xitdb.database_apply_replicated(&rep_db, 0, &trunc_stream, src_end)
+		testing.expect_value(t, apply_err, xitdb.Xitdb_Error.Unexpected_EOF)
+
+		// Simulate an interrupted copy that wrote > 57 bytes before dying (file_size in root header is still 0)
+		_ = xitdb.core_seek_to(&rep_core, 32)
+		_ = xitdb.core_write_all(&rep_core, full_bytes[32:len(full_bytes) - 5])
+
+		// Re-opening the interrupted replica succeeds without overwriting the partial copy
+		reopened_rep, re_err := xitdb.database_init(&rep_core, xitdb.sha1_hasher())
+		testing.expect_value(t, re_err, nil)
+
+		// replica_state reports {committed_size = 0, checksum = 0} so replication_start returns 0
+		state, st_err := xitdb.database_replica_state(&reopened_rep)
+		testing.expect_value(t, st_err, nil)
+		testing.expect_value(t, state.committed_size, i64(0))
+		testing.expect_value(t, state.checksum, u64(0))
+
+		rep_start, rs_err := xitdb.database_replication_start(&src_db, state)
+		testing.expect_value(t, rs_err, nil)
+		testing.expect_value(t, rep_start, i64(0))
+
+		// Applying the full payload now succeeds and recovers the replica
+		testing.expect_value(t, xitdb.database_apply_replicated_bytes(&reopened_rep, 0, full_bytes), nil)
+		verify_rc := xitdb.database_root_cursor(&reopened_rep)
+		actual_str, str_err := xitdb.cursor_read_string(verify_rc.read_cursor, 4096, context.temp_allocator)
+		testing.expect_value(t, str_err, nil)
+		testing.expect_value(t, actual_str, "a sufficiently long payload so total committed size exceeds 80 bytes!")
+	}
 }
 
 // ----------------------------------------------------------------------------
