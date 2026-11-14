@@ -17,7 +17,7 @@ This guide documents the low-level Odin core storage backends, wire format primi
 * **`core_memory_init_from_bytes(data: []u8, allocator := context.allocator, reserve_size: int = DEFAULT_VMEM_RESERVE_SIZE) -> Core`**
   Initializes a `vmem`-backed `Core_Memory` populated with a copy of `data`.
 * **`core_file_open(path: string, flags := os.File_Flags{.Read, .Write, .Create}, fsync := true) -> (Core, Error)`**
-  Unbuffered OS file I/O using `os.read_at` (`pread` on Linux) for lock-free concurrent reads on a shared `^Database`.
+  Unbuffered OS file I/O using `os.read_at` (`pread` on Linux) for lock-free concurrent reads on a shared `^Database`. When a thread or process only reads, open its file in read-only mode (`flags = {.Read}`) so `database_init` cannot write to an empty file or one whose creation or `database_apply_replicated` replacement is still in progress.
 * **`core_buffered_file_open(path: string, buffer_size: i64 = DEFAULT_BUFFER_SIZE, flags := os.File_Flags{.Read, .Write, .Create}, fsync := true, allocator := context.allocator) -> (Core, Error)`**
   Pairs an OS file handle with an in-memory tail write buffer (`2 MiB` default). Flushes on root commit (`database_commit_root`) so all committed moments are served via stateless `os.read_at`.
 * **`core_destroy(c: ^Core, close_file := false) -> Error`**
@@ -56,7 +56,7 @@ Every reference in `xitdb` is a 9-byte `Slot` (`SLOT_LENGTH :: 9`):
 
 A database file begins with:
 1. **`Header` (20 bytes)**: Magic (`"xit\x00"` or custom `file_id`), `hash_size` (`u16`), `hash_id` (`u32`), `version` (`u16`), and `root_header_offset` (`i64`).
-2. **`Root_Header` (17 bytes)**: Latest committed `trailer_offset` (`i64`) and `root_slot` (`Slot`).
+2. **`Root_Header` (12 bytes in v2, 17 bytes in v1)**: 4 zero padding bytes at offset `20..24` followed by the 8-byte aligned committed `file_size` (`i64`) at `FILE_SIZE_START` (`24..32`), with the root `Slot` resolved from the verified `Root_Trailer` at `file_size`.
 3. **`Root_Trailer` (25 bytes, appended at the end of every root transaction)**: `commit_id` (`u64`), `root_slot` (`Slot`), and `checksum` (`u64` CRC-64/XZ over `file_id || trailer_offset || commit_id || root_slot_bytes`).
 
 If a crash occurs mid-transaction before `Root_Header` is updated, reopening the database verifies the trailer at `Root_Header.trailer_offset` and automatically truncates any uncommitted trailing bytes on the next write.
