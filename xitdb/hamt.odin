@@ -368,12 +368,11 @@ read_array_list_slot_append :: proc(
 	if !pos_ok {
 		return {}, .Cursor_Not_Writeable
 	}
-	// Clear values left by a rollback or slice
-	if slot_ptr.slot != (Slot{}) {
-		slot_ptr = slot_pointer_with_slot(slot_ptr, Slot{})
-		core_seek_to(db.core, pos) or_return
-		core_write_slot(db.core, slot_ptr.slot) or_return
-	}
+	// Clear values left by a rollback or slice. The slot is written as a `.None`
+	// slot marked `full`, so it counts as an element even if nothing is written to it.
+	slot_ptr = slot_pointer_with_slot(slot_ptr, Slot{})
+	core_seek_to(db.core, pos) or_return
+	core_write_slot(db.core, Slot{full = true}) or_return
 	return Array_List_Append_Result{
 		header   = Array_List_Header{ptr = index_pos, size = header.size + 1},
 		slot_ptr = slot_ptr,

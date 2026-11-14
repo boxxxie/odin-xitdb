@@ -1959,6 +1959,54 @@ driver_verify_radix_trie_root_overflow_and_sparse_none_slots :: proc(ctx: ^Suite
 		iter_cnt += 1
 	}
 	testing.expect_value(ctx.t, iter_cnt, slice_down_to)
+
+	// Verify `array_list_append_cursor` clears any leftover slot from a slice/rollback on disk
+	// as `Slot{full = true}` so `array_list_get_slot(-1)` and `array_list_iterator` count the
+	// unwritten element, while `cursor_slot(append_cur.read_cursor)` returns an empty `Slot{}`.
+	Append_Clear_State :: struct {
+		t: ^testing.T,
+	}
+	ac_st := Append_Clear_State{t = ctx.t}
+	ac_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+		s := (^Append_Clear_State)(user_data)
+		m := xitdb.write_hash_map_init(cursor^) or_return
+		lc := xitdb.hash_map_put_cursor(&m, "radix") or_return
+		list := xitdb.write_array_list_init(lc) or_return
+
+		cleared := xitdb.Slot{full = true}
+		count_before := xitdb.array_list_count(list.read_array_list) or_return
+
+		ac1 := xitdb.array_list_append_cursor(&list) or_return
+		ac1_slot := xitdb.cursor_slot(ac1.read_cursor) or_return
+		testing.expect(s.t, xitdb.slot_empty(ac1_slot), "Expected append_cursor slot to be empty in memory")
+		last_slot1 := xitdb.array_list_get_slot(list.read_array_list, -1) or_return
+		testing.expect_value(s.t, last_slot1, cleared)
+
+		// Verify `array_list_iterator` counts the unwritten appended element too
+		it_unwritten := xitdb.array_list_iterator(list.read_array_list) or_return
+		unwritten_cnt: i64 = 0
+		for {
+			c_m := xitdb.cursor_iterator_next(&it_unwritten) or_return
+			if _, has_c := c_m.?; !has_c {
+				break
+			}
+			unwritten_cnt += 1
+		}
+		testing.expect_value(s.t, unwritten_cnt, count_before + 1)
+
+		xitdb.array_list_slice(&list, count_before) or_return
+		xitdb.array_list_append(&list, u64(999)) or_return
+		xitdb.array_list_slice(&list, count_before) or_return
+
+		ac2 := xitdb.array_list_append_cursor(&list) or_return
+		ac2_slot := xitdb.cursor_slot(ac2.read_cursor) or_return
+		testing.expect(s.t, xitdb.slot_empty(ac2_slot), "Expected append_cursor after slice to clear old slot")
+		last_slot2 := xitdb.array_list_get_slot(list.read_array_list, -1) or_return
+		testing.expect_value(s.t, last_slot2, cleared)
+		xitdb.array_list_slice(&list, count_before) or_return
+		return nil
+	}
+	testing.expect_value(ctx.t, driver_run_moment_tx(ctx, 1, ac_cb, &ac_st), nil)
 }
 
 driver_verify_btree_linked_list_structural_operations :: proc(ctx: ^Suite_Ctx, item_count: int, slice_offset: i64, slice_size: i64, insert_idx: i64, inserted_val: string, remove_idx: i64) {
