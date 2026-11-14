@@ -860,15 +860,16 @@ database_read_committed :: proc(db: ^Database, start, end: i64, target_core: ^Co
 	if start < 0 || start > end || end > committed_size {
 		return .Invalid_Range
 	}
-	if start > 0 && start < ROOT_HEADER_END {
+	file_size_start := database_file_size_start(db.header.version)
+	data_start := file_size_start + 8
+	if start > 0 && start < data_start {
 		return .Invalid_Range
 	}
 	if start == 0 {
-		trailer := database_read_root_trailer(db, end) or_return
-		_stream_bytes(db, target_core, 0, ROOT_HEADER_START) or_return
-		root_header := root_header_to_bytes(Root_Header{file_size = end, root = trailer.root})
-		core_write_all(target_core, root_header[:]) or_return
-		return _stream_bytes(db, target_core, ROOT_HEADER_END, end - ROOT_HEADER_END)
+		_ = database_read_root_trailer(db, end) or_return
+		_stream_bytes(db, target_core, 0, file_size_start) or_return
+		core_write_i64(target_core, end) or_return
+		return _stream_bytes(db, target_core, data_start, end - data_start)
 	}
 	return _stream_bytes(db, target_core, start, end - start)
 }
@@ -880,17 +881,18 @@ database_read_committed_buf :: proc(db: ^Database, start, end: i64, buf: []u8) -
 	if start < 0 || start > end || end > committed_size {
 		return nil, .Invalid_Range
 	}
-	if start > 0 && start < ROOT_HEADER_END {
+	file_size_start := database_file_size_start(db.header.version)
+	data_start := file_size_start + 8
+	if start > 0 && start < data_start {
 		return nil, .Invalid_Range
 	}
 	needed := int(end - start)
 	out := buf[:needed] if needed <= len(buf) else make([]u8, needed, context.temp_allocator)
 	if start == 0 {
-		trailer := database_read_root_trailer(db, end) or_return
-		core_read_exact_at(db.core, 0, out[:ROOT_HEADER_START]) or_return
-		root_header := root_header_to_bytes(Root_Header{file_size = end, root = trailer.root})
-		copy(out[ROOT_HEADER_START:ROOT_HEADER_END], root_header[:])
-		core_read_exact_at(db.core, ROOT_HEADER_END, out[ROOT_HEADER_END:]) or_return
+		_ = database_read_root_trailer(db, end) or_return
+		core_read_exact_at(db.core, 0, out[:file_size_start]) or_return
+		endian.unchecked_put_u64be(out[file_size_start:data_start], u64(end))
+		core_read_exact_at(db.core, data_start, out[data_start:]) or_return
 		return out, nil
 	}
 	core_read_exact_at(db.core, start, out) or_return
@@ -903,16 +905,17 @@ database_read_committed_bytes :: proc(db: ^Database, start, end: i64, allocator 
 	if start < 0 || start > end || end > committed_size {
 		return nil, .Invalid_Range
 	}
-	if start > 0 && start < ROOT_HEADER_END {
+	file_size_start := database_file_size_start(db.header.version)
+	data_start := file_size_start + 8
+	if start > 0 && start < data_start {
 		return nil, .Invalid_Range
 	}
 	out := make([]u8, int(end - start), allocator)
 	if start == 0 {
-		trailer := database_read_root_trailer(db, end) or_return
-		core_read_exact_at(db.core, 0, out[:ROOT_HEADER_START]) or_return
-		root_header := root_header_to_bytes(Root_Header{file_size = end, root = trailer.root})
-		copy(out[ROOT_HEADER_START:ROOT_HEADER_END], root_header[:])
-		core_read_exact_at(db.core, ROOT_HEADER_END, out[ROOT_HEADER_END:]) or_return
+		_ = database_read_root_trailer(db, end) or_return
+		core_read_exact_at(db.core, 0, out[:file_size_start]) or_return
+		endian.unchecked_put_u64be(out[file_size_start:data_start], u64(end))
+		core_read_exact_at(db.core, data_start, out[data_start:]) or_return
 		return out, nil
 	}
 	core_read_exact_at(db.core, start, out) or_return
@@ -963,8 +966,8 @@ database_apply_replicated :: proc(db: ^Database, start: i64, source_core: ^Core,
 		db.header = header
 		_ = database_committed_size(db) or_return
 	} else if length > 0 {
-		trailer := database_read_root_trailer(db, start + length) or_return
-		database_write_root_header(db, trailer.root) or_return
+		_ = database_read_root_trailer(db, start + length) or_return
+		database_write_root_header(db) or_return
 		core_sync(db.core) or_return
 	}
 	return nil
@@ -994,8 +997,8 @@ database_apply_replicated_bytes :: proc(db: ^Database, start: i64, data: []u8) -
 		db.header = header
 		_ = database_committed_size(db) or_return
 	} else if len(data) > 0 {
-		trailer := database_read_root_trailer(db, start + i64(len(data))) or_return
-		database_write_root_header(db, trailer.root) or_return
+		_ = database_read_root_trailer(db, start + i64(len(data))) or_return
+		database_write_root_header(db) or_return
 		core_sync(db.core) or_return
 	}
 	return nil

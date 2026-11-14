@@ -328,6 +328,35 @@ unit_cryptographic_hash_vectors_and_trailer_crc64 :: proc(t: ^testing.T) {
 	// Root trailer checksum (CRC-64/XZ) deterministic check
 	trailer := xitdb.new_root_trailer(0, 37, xitdb.Slot{value = 100, tag = .Array_List}, 1)
 	testing.expect(t, trailer.checksum != 0, "Expected non-zero root trailer checksum")
+
+	// Genesis v2 database layout (57 bytes: 20B Header + 4B padding + 8B file_size + 25B Root_Trailer at offset 32)
+	{
+		core: xitdb.Core = xitdb.core_memory_init()
+		defer _ = xitdb.core_destroy(&core)
+		h := xitdb.sha1_hasher(file_id = 0x0102030405060708)
+		db, db_err := xitdb.database_init(&core, h)
+		testing.expect_value(t, db_err, nil)
+
+		committed_sz, sz_err := xitdb.database_committed_size(&db)
+		testing.expect_value(t, sz_err, nil)
+		testing.expect_value(t, committed_sz, i64(57))
+
+		bytes, rd_err := xitdb.database_read_committed_bytes(&db, 0, committed_sz, context.temp_allocator)
+		defer free_all(context.temp_allocator)
+		testing.expect_value(t, rd_err, nil)
+		testing.expect_value(t, len(bytes), 57)
+
+		expected_file_id := [8]u8{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+		testing.expect(t, slice.equal(bytes[12:20], expected_file_id[:]), "Expected big-endian file_id at bytes[12..20]")
+
+		expected_trailer := [25]u8{
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x95, 0xd4, 0x94, 0xc3, 0x4d, 0xf8, 0x07,
+			0xe5,
+		}
+		testing.expect(t, slice.equal(bytes[32:57], expected_trailer[:]), "Expected v2 genesis trailer at bytes[32..57]")
+	}
 }
 
 // ----------------------------------------------------------------------------
@@ -642,8 +671,9 @@ unit_wire_format_validation_and_error_guards :: proc(t: ^testing.T) {
 		testing.expect_value(t, comp_err, xitdb.Xitdb_Error.Target_Not_Empty)
 	}
 
-	// 8. Torn root slot in Root_Header (bytes 20..29) is ignored because root slot is resolved
-	//    from the CRC-verified Root_Trailer at `file_size`, while a corrupted trailer fails.
+	// 8. Root_Header padding bytes (20..24 in v2) are ignored because only `file_size` at
+	//    `FILE_SIZE_START` (24..32) is read and the root slot is resolved from the CRC-verified
+	//    Root_Trailer at `file_size`, while a corrupted trailer fails.
 	{
 		core: xitdb.Core = xitdb.core_memory_init()
 		defer xitdb.core_destroy(&core)
@@ -651,9 +681,9 @@ unit_wire_format_validation_and_error_guards :: proc(t: ^testing.T) {
 		rc := xitdb.database_root_cursor(&db)
 		_ = xitdb.cursor_write(&rc, i64(42))
 
-		// Corrupt the 9-byte root slot in Root_Header (bytes 20..29) with an invalid tag byte (99)
+		// Corrupt the 4 padding bytes before FILE_SIZE_START (bytes 20..24)
 		_ = xitdb.core_seek_to(&core, xitdb.ROOT_HEADER_START)
-		_ = xitdb.core_write_all(&core, []u8{99, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+		_ = xitdb.core_write_all(&core, []u8{99, 0xff, 0xff, 0xff})
 
 		// Reading root header and root cursor still succeeds via the verified Root_Trailer
 		fresh_rc := xitdb.database_root_cursor(&db)

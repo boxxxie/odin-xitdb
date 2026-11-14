@@ -8,8 +8,8 @@ import "core:os"
 import "core:simd"
 import "core:simd/x86"
 
-// Protocol constants (wire-compatible with xitdb v1).
-VERSION                    :: u16(1)
+// Protocol constants (wire-compatible with xitdb v1 and v2).
+VERSION                    :: u16(2)
 MAGIC_NUMBER               :: [3]u8{'x', 'i', 't'}
 BIT_COUNT                  :: 4
 SLOT_COUNT                 :: 1 << BIT_COUNT // 16
@@ -30,9 +30,10 @@ SORTED_BRANCH_BLOCK_SIZE :: BTREE_NODE_HEADER_SIZE + (SLOT_LENGTH * 2 + 8) * BTR
 // Header and Trailer offsets.
 HEADER_LENGTH               :: 20
 ROOT_HEADER_START           :: 20
-ROOT_HEADER_LENGTH          :: 17
-ROOT_HEADER_END             :: ROOT_HEADER_START + ROOT_HEADER_LENGTH // 37
-ROOT_HEADER_FILE_SIZE_START :: ROOT_HEADER_START + SLOT_LENGTH // 29
+FILE_SIZE_START             :: 24 // 8-byte aligned offset for v2 root header file_size
+ROOT_HEADER_LENGTH          :: 17 // v1 root header length
+ROOT_HEADER_END             :: ROOT_HEADER_START + ROOT_HEADER_LENGTH // 37 (v1)
+ROOT_HEADER_FILE_SIZE_START :: ROOT_HEADER_START + SLOT_LENGTH // 29 (v1)
 ROOT_TRAILER_LENGTH         :: 25
 
 ARRAY_LIST_HEADER_LENGTH :: 16
@@ -937,7 +938,7 @@ header_validate :: proc(h: Header) -> Error {
 	if h.magic_number != MAGIC_NUMBER {
 		return .Invalid_Database
 	}
-	if h.version != VERSION {
+	if h.version != 1 && h.version != VERSION {
 		return .Invalid_Version
 	}
 	return nil

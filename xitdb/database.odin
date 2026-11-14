@@ -220,7 +220,7 @@ database_init :: proc(core: ^Core, hasher := Hasher{}) -> (db: Database, err: Er
 			magic_number = MAGIC_NUMBER,
 		}
 		header_write(db.header, core) or_return
-		rh_bytes := root_header_to_bytes(Root_Header{file_size = 0, root = Slot{}})
+		rh_bytes: [FILE_SIZE_START + 8 - ROOT_HEADER_START]u8
 		core_write_all(core, rh_bytes[:]) or_return
 		database_commit_root(&db, Slot{}, 0) or_return
 		core_sync(core) or_return
@@ -356,10 +356,17 @@ database_truncate :: proc(db: ^Database) -> Error {
 	return err
 }
 
+// Where the root header's file size is. The committed data starts after it.
+// Version 1 has a copy of the root slot before it, which isn't used or updated.
+database_file_size_start :: #force_inline proc(version: u16) -> i64 {
+	return i64(ROOT_HEADER_FILE_SIZE_START) if version == 1 else i64(FILE_SIZE_START)
+}
+
 // Read the file size from the root header, and the root slot from the trailer it points to.
 database_read_root_header :: proc(db: ^Database) -> (res: Root_Header, err: Error) {
-	file_size := core_read_i64_at(db.core, ROOT_HEADER_FILE_SIZE_START) or_return
-	minimum_size := i64(ROOT_HEADER_END + ROOT_TRAILER_LENGTH)
+	file_size_start := database_file_size_start(db.header.version)
+	file_size := core_read_i64_at(db.core, file_size_start) or_return
+	minimum_size := file_size_start + 8 + ROOT_TRAILER_LENGTH
 	if file_size < minimum_size {
 		return {}, .Invalid_Database
 	}
@@ -397,14 +404,13 @@ database_commit_root :: proc(db: ^Database, root: Slot, commit_id: u64) -> Error
 	trailer := root_trailer_to_bytes(new_root_trailer(db.header.file_id, trailer_pos, root, commit_id))
 	core_write_all(db.core, trailer[:]) or_return
 	core_sync(db.core) or_return
-	return database_write_root_header(db, root)
+	return database_write_root_header(db)
 }
 
-database_write_root_header :: proc(db: ^Database, root: Slot) -> Error {
+database_write_root_header :: proc(db: ^Database) -> Error {
 	file_size := core_length(db.core) or_return
-	core_seek_to(db.core, ROOT_HEADER_START) or_return
-	header := root_header_to_bytes(Root_Header{file_size = file_size, root = root})
-	core_write_all(db.core, header[:]) or_return
+	core_seek_to(db.core, database_file_size_start(db.header.version)) or_return
+	core_write_i64(db.core, file_size) or_return
 	return core_flush(db.core)
 }
 
