@@ -802,6 +802,10 @@ database_compact :: proc(db: ^Database, target_core: ^Core, offset_map: ^Offset_
 
 // Return this database's current `Replica_State` (committed size + trailer checksum).
 database_replica_state :: proc(db: ^Database) -> (res: Replica_State, err: Error) {
+	// A full copy that didn't finish leaves nothing behind (see `database_apply_replicated`).
+	if (core_length(db.core) or_return) == 0 {
+		return Replica_State{committed_size = 0, checksum = 0}, nil
+	}
 	committed_size := database_committed_size(db) or_return
 	trailer := database_read_root_trailer(db, committed_size) or_return
 	return Replica_State{committed_size = committed_size, checksum = trailer.checksum}, nil
@@ -924,7 +928,7 @@ database_read_committed_bytes :: proc(db: ^Database, start, end: i64, allocator 
 
 // Apply `length` bytes from `source_core` (starting at `source_core`'s current position)
 // at `start` in `db` and commit them.
-database_apply_replicated :: proc(db: ^Database, start: i64, source_core: ^Core, length: i64) -> Error {
+database_apply_replicated :: proc(db: ^Database, start: i64, source_core: ^Core, length: i64) -> (err: Error) {
 	if start == 0 {
 		core_set_length(db.core, 0) or_return
 	} else {
@@ -936,6 +940,12 @@ database_apply_replicated :: proc(db: ^Database, start: i64, source_core: ^Core,
 		if file_size > committed_size {
 			core_set_length(db.core, committed_size) or_return
 		}
+	}
+
+	// The old database is gone once a new one starts replacing it. If the new one
+	// doesn't fully arrive, leave nothing behind, so the next sync can replace it again.
+	defer if err != nil && start == 0 {
+		_ = core_set_length(db.core, 0)
 	}
 
 	core_seek_to(db.core, start) or_return
@@ -974,7 +984,7 @@ database_apply_replicated :: proc(db: ^Database, start: i64, source_core: ^Core,
 }
 
 // Convenience wrapper to apply a `[]u8` slice of replicated bytes at `start`.
-database_apply_replicated_bytes :: proc(db: ^Database, start: i64, data: []u8) -> Error {
+database_apply_replicated_bytes :: proc(db: ^Database, start: i64, data: []u8) -> (err: Error) {
 	if start == 0 {
 		core_set_length(db.core, 0) or_return
 	} else {
@@ -986,6 +996,9 @@ database_apply_replicated_bytes :: proc(db: ^Database, start: i64, data: []u8) -
 		if file_size > committed_size {
 			core_set_length(db.core, committed_size) or_return
 		}
+	}
+	defer if err != nil && start == 0 {
+		_ = core_set_length(db.core, 0)
 	}
 
 	core_seek_to(db.core, start) or_return
