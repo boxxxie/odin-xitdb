@@ -2449,11 +2449,23 @@ driver_verify_sorted_set_key_only_entries_and_map_reinterpretation :: proc(ctx: 
 		testing.expect_value(c.t, cur0.?.slot_ptr.slot.tag, xitdb.Tag.Bytes) // "longer-sorted-set-key" sorts before "short"
 		kv0 := xitdb.cursor_read_kv_pair(cur0.?, context.temp_allocator) or_return
 		testing.expect_value(c.t, kv0.value_cursor.slot_ptr.slot.tag, xitdb.Tag.None)
-		testing.expect_value(c.t, kv0.key_cursor.slot_ptr.position, nil)
+		testing.expect_value(c.t, kv0.key_cursor.slot_ptr.position, cur0.?.slot_ptr.position)
 		testing.expect_value(c.t, kv0.value_cursor.slot_ptr.position, nil)
 
 		cur1, _ := xitdb.cursor_iterator_next(&it)
 		testing.expect_value(c.t, cur1.?.slot_ptr.slot.tag, xitdb.Tag.Short_Bytes) // "short"
+		kv1 := xitdb.cursor_read_kv_pair(cur1.?, context.temp_allocator) or_return
+		testing.expect_value(c.t, kv1.key_cursor.slot_ptr.position, cur1.?.slot_ptr.position)
+		// Verify `cursor_reader` works on `key_cursor` of a `.Short_Bytes` key-only entry in a Sorted_Set
+		rdr1 := xitdb.cursor_reader(kv1.key_cursor) or_return
+		rdr1_bytes := xitdb.cursor_reader_read_all(&rdr1, context.temp_allocator) or_return
+		testing.expect_value(c.t, string(rdr1_bytes), "short")
+
+		// Also verify via `sorted_set_get_index_kv_pair`
+		ss_idx_kv, _ := xitdb.sorted_set_get_index_kv_pair(ss.read_sorted_set, 1, context.temp_allocator)
+		rdr_short := xitdb.cursor_reader(ss_idx_kv.?.key_cursor) or_return
+		rdr_short_bytes := xitdb.cursor_reader_read_all(&rdr_short, context.temp_allocator) or_return
+		testing.expect_value(c.t, string(rdr_short_bytes), "short")
 		return nil
 	}
 
