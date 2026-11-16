@@ -55,11 +55,11 @@ Every reference in `xitdb` is a 9-byte `Slot` (`SLOT_LENGTH :: 9`):
 ### Crash-Safe Root Header & Trailer
 
 A database file begins with:
-1. **`Header` (20 bytes)**: Magic (`"xit\x00"` or custom `file_id`), `hash_size` (`u16`), `hash_id` (`u32`), `version` (`u16`), and `root_header_offset` (`i64`).
+1. **`Header` (20 bytes)**: Magic (`"xit"`), `padding` (`u8`), `version` (`u16`, `2` for new databases; `1` also supported), `hash_size` (`u16`), `hash_id` (`u32`), and `file_id` (`u64`).
 2. **`Root_Header` (12 bytes in v2, 17 bytes in v1)**: 4 zero padding bytes at offset `20..24` followed by the 8-byte aligned committed `file_size` (`i64`) at `FILE_SIZE_START` (`24..32`), with the root `Slot` resolved from the verified `Root_Trailer` at `file_size`.
 3. **`Root_Trailer` (25 bytes, appended at the end of every root transaction)**: `commit_id` (`u64`), `root_slot` (`Slot`), and `checksum` (`u64` CRC-64/XZ over `file_id || trailer_offset || commit_id || root_slot_bytes`).
 
-If a crash occurs mid-transaction before `Root_Header` is updated, reopening the database verifies the trailer at `Root_Header.trailer_offset` and automatically truncates any uncommitted trailing bytes on the next write.
+If a crash occurs mid-transaction before `Root_Header` is updated, reopening the database verifies the trailer at the committed `file_size` and automatically truncates any uncommitted trailing bytes on the next write.
 
 ---
 

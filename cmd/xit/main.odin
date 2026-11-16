@@ -14,6 +14,10 @@ main :: proc() {
 		print_usage()
 		return
 	}
+	if args[0] == "-v" || args[0] == "--version" || args[0] == "version" {
+		fmt.printf("xit v%s (xitdb wire format v%d)\n", xitdb.PACKAGE_VERSION, xitdb.VERSION)
+		return
+	}
 
 	// Interactive REPL with in-memory database: `xit --memory`
 	if args[0] == "--memory" || args[0] == "-m" {
@@ -693,6 +697,7 @@ print_usage :: proc() {
 	fmt.println(`xit — CLI & Interactive REPL for xitdb
 
 Usage:
+  odin run cmd/xit -- --version                        Print CLI and wire format version
   odin run cmd/xit -- <db.xit>                         Launch interactive REPL on <db.xit>
   odin run cmd/xit -- --memory                         Launch interactive REPL in memory
   odin run cmd/xit -- status  <db.xit>                 Inspect header, size, and moment count

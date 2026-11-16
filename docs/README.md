@@ -2,7 +2,7 @@
 
 Welcome to the `xitdb` documentation for Odin and LuaJIT 2.1.
 
-`xitdb` is an immutable, persistent, single-file structural database written in pure Odin and wire-compatible with [xitdb v1](https://github.com/radarroark/xitdb). It provides copy-on-write persistent collections (`Hash_Map`, `Counted_Hash_Map`, `Sorted_Map`, `Array_List`, `Linked_Array_List`, `Hash_Set`, `Counted_Hash_Set`, `Sorted_Set`), a 5-layer query/transaction/Datalog DSL, and an embedded LuaJIT 2.1 userdata client and bytecode engine.
+`xitdb` is an immutable, persistent, single-file structural database written in pure Odin and wire-compatible with [xitdb v2](https://github.com/xit-vcs/xitdb) (with backward-compatible v1 support). It provides copy-on-write persistent collections (`Hash_Map`, `Counted_Hash_Map`, `Sorted_Map`, `Array_List`, `Linked_Array_List`, `Hash_Set`, `Counted_Hash_Set`, `Sorted_Set`), a 5-layer query/transaction/Datalog DSL, and an embedded LuaJIT 2.1 userdata client and bytecode engine.
 
 ---
 

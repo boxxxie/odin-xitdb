@@ -1,6 +1,6 @@
 # xitdb 5-Layer DSL & Datalog Reference
 
-The [`xitdb/dsl.odin`](../xitdb/dsl.odin) module layers a zero-dependency query, transaction, reflection, and Datalog engine on top of `xitdb`'s persistent structural trees. Every DSL operation compiles down to `read_slot_pointer` and `[]Path_Part` without altering the v1 wire format.
+The [`xitdb/dsl.odin`](../xitdb/dsl.odin) module layers a zero-dependency query, transaction, reflection, and Datalog engine on top of `xitdb`'s persistent structural trees. Every DSL operation compiles down to `read_slot_pointer` and `[]Path_Part` without altering the xitdb wire format.
 
 > For the embedded LuaJIT 2.1 bindings to this 5-layer DSL, see [`LUAJIT.md`](LUAJIT.md). For low-level storage cores, cursors, and collection APIs, see [`CORE_API.md`](CORE_API.md).
 

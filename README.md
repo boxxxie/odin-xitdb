@@ -1,12 +1,12 @@
 # xitdb for Odin
 
 [![CI](https://github.com/boxxxie/odin-xitdb/actions/workflows/ci.yml/badge.svg)](https://github.com/boxxxie/odin-xitdb/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.1.0-blue.svg)](README.md)
+[![Version](https://img.shields.io/badge/version-v2.0.0-blue.svg)](README.md)
 [![Odin](https://img.shields.io/badge/Odin-dev--2026--09%2B-3882D2.svg)](https://odin-lang.org)
-[![Format](https://img.shields.io/badge/xitdb-v1%20wire%20format-5C6BC0.svg)](https://github.com/radarroark/xitdb)
+[![Format](https://img.shields.io/badge/xitdb-v2%20wire%20format-5C6BC0.svg)](https://github.com/xit-vcs/xitdb)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-An immutable, persistent, single-file structural database written in pure Odin. Wire-compatible with [xitdb](https://github.com/radarroark/xitdb) v1 (Zig, Go, Java, Clojure) with zero external dependencies.
+An immutable, persistent, single-file structural database written in pure Odin. Wire-compatible with [xitdb](https://github.com/xit-vcs/xitdb) v2 (with backward-compatible v1 support; Zig, Go, Java, Clojure, TypeScript) with zero external dependencies.
 
 Unlike flat key-value stores that force you to serialize objects into opaque blobs, **xitdb** lets you nest maps, sorted B+Trees, radix tries, sets, scalars, and streaming byte arrays directly on disk. Every transaction appends a new root snapshot ("moment") using structural sharing, giving you instant time-travel queries, zero-copy collection cloning, and lock-free reads of historical state.
 

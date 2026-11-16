@@ -8,7 +8,8 @@ import "core:os"
 import "core:simd"
 import "core:simd/x86"
 
-// Protocol constants (wire-compatible with xitdb v1 and v2).
+// Package & protocol constants (wire-compatible with xitdb v1 and v2).
+PACKAGE_VERSION            :: "2.0.0"
 VERSION                    :: u16(2)
 MAGIC_NUMBER               :: [3]u8{'x', 'i', 't'}
 BIT_COUNT                  :: 4
