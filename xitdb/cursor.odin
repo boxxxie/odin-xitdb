@@ -247,7 +247,7 @@ cursor_read_bytes_object :: proc(c: Read_Cursor, max_size: i64 = 0, allocator :=
 			return {}, .Stream_Too_Long
 		}
 		value := make([]u8, int(value_size), allocator)
-		err := core_read_exact_at(c.db.core, slot_ptr.slot.value + 8, value)
+		err = core_read_exact_at(c.db.core, slot_ptr.slot.value + 8, value)
 		if err != nil {
 			delete(value, allocator)
 			return {}, err

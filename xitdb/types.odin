@@ -1182,13 +1182,13 @@ decode_kv_pair :: proc(c: ^Core, tag: Tag, hash_size: int, allocator := context.
 	case:
 		return {}, .Unexpected_Tag
 	}
-	if err := tag_validate(kv.key_slot.tag); err != nil {
+	if err = tag_validate(kv.key_slot.tag); err != nil {
 		if kv.hash != nil {
 			delete(kv.hash, allocator)
 		}
 		return {}, err
 	}
-	if err := tag_validate(kv.value_slot.tag); err != nil {
+	if err = tag_validate(kv.value_slot.tag); err != nil {
 		if kv.hash != nil {
 			delete(kv.hash, allocator)
 		}
@@ -1233,13 +1233,13 @@ decode_kv_pair_at :: proc(c: ^Core, pos: i64, tag: Tag, hash_size: int, allocato
 	case:
 		return {}, .Unexpected_Tag
 	}
-	if err := tag_validate(kv.key_slot.tag); err != nil {
+	if err = tag_validate(kv.key_slot.tag); err != nil {
 		if kv.hash != nil {
 			delete(kv.hash, allocator)
 		}
 		return {}, err
 	}
-	if err := tag_validate(kv.value_slot.tag); err != nil {
+	if err = tag_validate(kv.value_slot.tag); err != nil {
 		if kv.hash != nil {
 			delete(kv.hash, allocator)
 		}
