@@ -2315,12 +2315,12 @@ _l_db_pull :: proc "c" (L: ^lua.State) -> c.int {
 		}
 		cur_maybe, s_err := select_cursor(db, sel)
 		if s_err != nil do return _raise_err(L, s_err, "db:pull")
-		c, has_c := cur_maybe.?
+		cur, has_c := cur_maybe.?
 		if !has_c {
 			lua.pushnil(L)
 			return 1
 		}
-		rc = c
+		rc = cur
 	}
 
 	pv, err := pull(rc, pattern, context.temp_allocator)
@@ -2344,12 +2344,12 @@ _l_db_unmarshal :: proc "c" (L: ^lua.State) -> c.int {
 		sel := _lua_tostring_odin(L, 2)
 		cur_maybe, s_err := select_cursor(db, sel)
 		if s_err != nil do return _raise_err(L, s_err, "db:unmarshal")
-		c, has_c := cur_maybe.?
+		cur, has_c := cur_maybe.?
 		if !has_c {
 			lua.pushnil(L)
 			return 1
 		}
-		rc = c
+		rc = cur
 	}
 
 	err := lua_unmarshal_cursor(L, rc)
