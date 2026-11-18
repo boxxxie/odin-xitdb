@@ -27,7 +27,7 @@ shift
 EXTRA_ARGS=("$@")
 
 has_budget_flag() {
-	for arg in "${EXTRA_ARGS[@]}"; do
+	for arg in ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; do
 		if [[ "$arg" == -runs=* || "$arg" == -max_total_time=* ]]; then
 			return 0
 		fi
@@ -37,23 +37,40 @@ has_budget_flag() {
 
 build_target() {
 	local t="$1"
-	local src="fuzz/fuzz_${t}.odin"
+	local src_dir="fuzz/${t}"
 	local ir_dir=".tmp/fuzz/ir_${t}"
 	local work_dir=".tmp/fuzz/work_${t}"
 	local art_dir=".tmp/fuzz/artifacts_${t}"
 	local bin=".tmp/fuzz/fuzz_${t}"
+	local clang_bin="${CLANG:-}"
+	if [[ -z "$clang_bin" ]]; then
+		if [[ -n "${CC:-}" && "${CC}" == *clang* ]]; then
+			clang_bin="$CC"
+		else
+			clang_bin="clang"
+		fi
+	fi
 
-	echo "==> Checking ${src}"
-	odin check "$src" -file -collection:xitdb=./xitdb -no-entry-point -vet -vet-packages:"fuzz_${t}" -vet-tabs -warnings-as-errors
+	local sys_libs=(-lm -lpthread)
+	if [[ "$(uname -s)" == "Linux" ]]; then
+		sys_libs+=(-ldl)
+	fi
+	local lua_libs=(-lluajit-5.1)
+	if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists luajit 2>/dev/null; then
+		read -r -a lua_libs <<< "$(pkg-config --libs luajit)"
+	fi
 
-	echo "==> Building LLVM IR for ${src}"
+	echo "==> Checking ${src_dir}"
+	odin check "$src_dir" -collection:xitdb=./xitdb -no-entry-point -vet -vet-packages:"fuzz_${t}" -vet-tabs -warnings-as-errors
+
+	echo "==> Building ASan-instrumented LLVM IR for ${src_dir}"
 	rm -rf "$ir_dir"
 	mkdir -p "$ir_dir" "$work_dir" "$art_dir"
-	odin build "$src" -file -collection:xitdb=./xitdb -build-mode:llvm-ir -no-entry-point -out:"$ir_dir"
+	odin build "$src_dir" -collection:xitdb=./xitdb -build-mode:llvm-ir -sanitize:address -no-entry-point -out:"$ir_dir"
 
-	echo "==> Linking ${bin} with libFuzzer + ASan"
-	clang -O1 -g -fsanitize=fuzzer,address -Wno-override-module "$ir_dir"/*.ll \
-		-o "$bin" -lm -lpthread -ldl -lluajit-5.1
+	echo "==> Linking ${bin} with libFuzzer + ASan (${clang_bin})"
+	"$clang_bin" -O1 -g -fsanitize=fuzzer,address -Wno-override-module -Wno-backend-plugin "$ir_dir"/*.ll \
+		-o "$bin" "${sys_libs[@]}" "${lua_libs[@]}"
 }
 
 run_target() {
@@ -87,7 +104,7 @@ run_target() {
 		cmd+=(-max_total_time=30)
 	fi
 
-	cmd+=("${EXTRA_ARGS[@]}")
+	cmd+=(${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
 	cmd+=("$work_dir")
 	if [[ -d "$seed_dir" ]]; then
 		cmd+=("$seed_dir")

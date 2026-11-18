@@ -261,6 +261,9 @@ _overlay_length :: #force_inline proc(o: ^Core_Overlay) -> i64 {
 
 @(private)
 _overlay_read_at :: proc(o: ^Core_Overlay, pos: i64, p: []u8) -> (read_n: int, err: Error) {
+	if pos < 0 {
+		return 0, Xitdb_Error.Expected_Unsigned_Long
+	}
 	length := _overlay_length(o)
 	if pos >= length {
 		return 0, io.Error.EOF
@@ -624,11 +627,12 @@ core_read_exact :: proc(c: ^Core, p: []u8) -> Error {
 	}
 	#partial switch &v in c {
 	case Core_Memory:
-		end_pos := v.pos + i64(len(p))
-		if v.pos < 0 || end_pos > i64(len(v.buf)) {
-			v.pos = i64(len(v.buf))
+		buf_len := i64(len(v.buf))
+		if v.pos < 0 || v.pos > buf_len || i64(len(p)) > buf_len - v.pos {
+			v.pos = buf_len
 			return Xitdb_Error.Unexpected_EOF
 		}
+		end_pos := v.pos + i64(len(p))
 		copy(p, v.buf[int(v.pos):int(end_pos)])
 		v.pos = end_pos
 		return nil
@@ -781,6 +785,9 @@ core_read_short_at :: proc(c: ^Core, pos: i64, p: []u8) -> (block: []u8, err: Er
 	}
 	total := 0
 	for total < len(p) {
+		if pos > max(i64) - i64(total) {
+			return p[:total], nil
+		}
 		n, r_err := core_read_at(c, pos + i64(total), p[total:])
 		total += n
 		if r_err != nil {
@@ -1015,17 +1022,19 @@ core_write_long :: #force_inline proc(c: ^Core, v: i64) -> Error {
 core_read_i64 :: #force_inline proc(c: ^Core) -> (res: i64, err: Error) {
 	#partial switch &v in c {
 	case Core_Memory:
-		end_pos := v.pos + 8
-		if v.pos < 0 || end_pos > i64(len(v.buf)) {
-			v.pos = i64(len(v.buf))
+		buf_len := i64(len(v.buf))
+		if v.pos < 0 || v.pos > buf_len || 8 > buf_len - v.pos {
+			v.pos = buf_len
 			return 0, Xitdb_Error.Unexpected_EOF
 		}
+		end_pos := v.pos + 8
 		res = i64(endian.unchecked_get_u64be(v.buf[int(v.pos):int(end_pos)]))
 		v.pos = end_pos
 		return res, nil
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
-		if buf_len > 0 && v.pos >= v.memory_pos && v.pos + 8 <= v.memory_pos + buf_len {
+		mem_end := v.memory_pos + buf_len
+		if buf_len > 0 && v.pos >= v.memory_pos && v.pos <= mem_end && 8 <= mem_end - v.pos {
 			mem_off := int(v.pos - v.memory_pos)
 			res = i64(endian.unchecked_get_u64be(v.memory.buf[mem_off : mem_off + 8]))
 			v.pos += 8
@@ -1055,17 +1064,19 @@ core_write_i64 :: #force_inline proc(c: ^Core, v: i64) -> Error {
 core_read_slot_raw :: #force_inline proc(c: ^Core) -> (s: Slot, err: Error) {
 	#partial switch &v in c {
 	case Core_Memory:
-		end_pos := v.pos + SLOT_LENGTH
-		if v.pos < 0 || end_pos > i64(len(v.buf)) {
-			v.pos = i64(len(v.buf))
+		buf_len := i64(len(v.buf))
+		if v.pos < 0 || v.pos > buf_len || SLOT_LENGTH > buf_len - v.pos {
+			v.pos = buf_len
 			return {}, Xitdb_Error.Unexpected_EOF
 		}
+		end_pos := v.pos + SLOT_LENGTH
 		s = slot_from_slice_raw(v.buf[int(v.pos):int(end_pos)])
 		v.pos = end_pos
 		return s, nil
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
-		if buf_len > 0 && v.pos >= v.memory_pos && v.pos + SLOT_LENGTH <= v.memory_pos + buf_len {
+		mem_end := v.memory_pos + buf_len
+		if buf_len > 0 && v.pos >= v.memory_pos && v.pos <= mem_end && SLOT_LENGTH <= mem_end - v.pos {
 			mem_off := int(v.pos - v.memory_pos)
 			s = slot_from_slice_raw(v.memory.buf[mem_off : mem_off + SLOT_LENGTH])
 			v.pos += SLOT_LENGTH
@@ -1100,9 +1111,12 @@ core_write_slot :: #force_inline proc(c: ^Core, s: Slot) -> Error {
 }
 
 core_read_byte_at :: #force_inline proc(c: ^Core, pos: i64) -> (v: u8, err: Error) {
+	if pos < 0 {
+		return 0, Xitdb_Error.Expected_Unsigned_Long
+	}
 	#partial switch &m in c {
 	case Core_Memory:
-		if pos < 0 || pos >= i64(len(m.buf)) {
+		if pos >= i64(len(m.buf)) {
 			return 0, Xitdb_Error.Unexpected_EOF
 		}
 		return m.buf[int(pos)], nil
@@ -1130,16 +1144,21 @@ core_read_u32_at :: #force_inline proc(c: ^Core, pos: i64) -> (v: u32, err: Erro
 }
 
 core_read_i64_at :: #force_inline proc(c: ^Core, pos: i64) -> (res: i64, err: Error) {
+	if pos < 0 {
+		return 0, Xitdb_Error.Expected_Unsigned_Long
+	}
 	#partial switch &v in c {
 	case Core_Memory:
-		end_pos := pos + 8
-		if pos < 0 || end_pos > i64(len(v.buf)) {
+		buf_len := i64(len(v.buf))
+		if pos > buf_len || 8 > buf_len - pos {
 			return 0, Xitdb_Error.Unexpected_EOF
 		}
+		end_pos := pos + 8
 		return i64(endian.unchecked_get_u64be(v.buf[int(pos):int(end_pos)])), nil
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
-		if buf_len > 0 && pos >= v.memory_pos && pos + 8 <= v.memory_pos + buf_len {
+		mem_end := v.memory_pos + buf_len
+		if buf_len > 0 && pos >= v.memory_pos && pos <= mem_end && 8 <= mem_end - pos {
 			mem_off := int(pos - v.memory_pos)
 			return i64(endian.unchecked_get_u64be(v.memory.buf[mem_off : mem_off + 8])), nil
 		}
@@ -1158,16 +1177,21 @@ core_read_long_at :: #force_inline proc(c: ^Core, pos: i64) -> (res: i64, err: E
 }
 
 core_read_slot_raw_at :: #force_inline proc(c: ^Core, pos: i64) -> (s: Slot, err: Error) {
+	if pos < 0 {
+		return {}, Xitdb_Error.Expected_Unsigned_Long
+	}
 	#partial switch &v in c {
 	case Core_Memory:
-		end_pos := pos + SLOT_LENGTH
-		if pos < 0 || end_pos > i64(len(v.buf)) {
+		buf_len := i64(len(v.buf))
+		if pos > buf_len || SLOT_LENGTH > buf_len - pos {
 			return {}, Xitdb_Error.Unexpected_EOF
 		}
+		end_pos := pos + SLOT_LENGTH
 		return slot_from_slice_raw(v.buf[int(pos):int(end_pos)]), nil
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
-		if buf_len > 0 && pos >= v.memory_pos && pos + SLOT_LENGTH <= v.memory_pos + buf_len {
+		mem_end := v.memory_pos + buf_len
+		if buf_len > 0 && pos >= v.memory_pos && pos <= mem_end && SLOT_LENGTH <= mem_end - pos {
 			mem_off := int(pos - v.memory_pos)
 			return slot_from_slice_raw(v.memory.buf[mem_off : mem_off + SLOT_LENGTH]), nil
 		}

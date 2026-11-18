@@ -1,4 +1,4 @@
-branch @-1 {
+3branch @-1 {
   doc "mutate"
   meta "ticket" = "XIT-1"
   fork .fruits -> .fruits_bak

@@ -6,22 +6,22 @@ This directory contains the test suite for `xitdb`. It combines **Acceptance Tes
 
 ## Quick Start
 
-Run the entire test suite from the repository root:
+Run the entire test suite from the repository root (enforcing zero leaks / bad frees):
 
 ```bash
-odin test tests
+odin test tests -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 ```
 
 Run a single specification or unit test by name:
 
 ```bash
-odin test tests -define:ODIN_TEST_NAMES=xitdb_tests.spec_reference_database_wire_compatibility
+odin test tests -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:ODIN_TEST_NAMES=xitdb_tests.spec_reference_database_wire_compatibility
 ```
 
 Run with thread count and verbose output:
 
 ```bash
-odin test tests -terse
+odin test tests -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -terse
 ```
 
 ---
@@ -91,12 +91,12 @@ Two complementary fuzzing layers cover `xitdb`:
    * Runs fast smoke seeds inside default `odin test tests`.
    * Scale up operation counts or pin a specific seed under AddressSanitizer:
      ```bash
-     odin test tests -sanitize:address -define:ODIN_FUZZ_OPS=2000
-     odin test tests -sanitize:address -define:ODIN_FUZZ_SEED=42 -define:ODIN_FUZZ_OPS=2000
+     odin test tests -sanitize:address -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:ODIN_FUZZ_OPS=2000
+     odin test tests -sanitize:address -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:ODIN_FUZZ_SEED=42 -define:ODIN_FUZZ_OPS=2000
      ```
 
 2. **Coverage-Guided `libFuzzer` + ASan / LSan Harnesses (`fuzz/`):**
-   * Builds Odin targets via `-build-mode:llvm-ir` and links with `clang -fsanitize=fuzzer,address` (writing binaries, corpora, and crash artifacts under git-ignored `.tmp/fuzz/`; run from the repository root):
+   * Builds Odin targets via `-build-mode:llvm-ir -sanitize:address` and links with `clang -fsanitize=fuzzer,address` (writing binaries, corpora, and crash artifacts under git-ignored `.tmp/fuzz/`; run from the repository root):
      ```bash
      ./fuzz/run.sh all -runs=2000          # smoke check all targets
      ./fuzz/run.sh dsl -max_total_time=30   # fuzz selectors, Datalog, Pull, and transact_script

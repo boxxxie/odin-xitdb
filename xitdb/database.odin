@@ -995,7 +995,12 @@ _exec_path_part :: proc(
 				if root_res.persisted {
 					root = read_btree_node(db, root_res.node_ptr) or_return
 				}
+				collapse_steps := 0
 				for root.kind == .Branch && root.num == 1 {
+					if collapse_steps >= ITERATOR_STACK_SIZE * 2 {
+						return {}, .Max_Shift_Exceeded
+					}
+					collapse_steps += 1
 					new_root_ptr = root.children[0].value
 					root = read_btree_node(db, new_root_ptr) or_return
 				}

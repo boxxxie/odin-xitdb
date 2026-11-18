@@ -242,6 +242,9 @@ cursor_read_bytes_object :: proc(c: Read_Cursor, max_size: i64 = 0, allocator :=
 		return Bytes{value = make([]u8, 0, allocator)}, nil
 
 	case .Bytes:
+		if slot_ptr.slot.value < 0 {
+			return {}, .Expected_Unsigned_Long
+		}
 		value_size := core_read_long_at(c.db.core, slot_ptr.slot.value) or_return
 		if value_size < 0 {
 			return {}, .Expected_Unsigned_Long
@@ -309,12 +312,20 @@ cursor_read_bytes_buf :: proc(c: Read_Cursor, buffer: []u8) -> (res: Bytes, err:
 		return {}, .End_Of_Stream
 
 	case .Bytes:
+		if slot_ptr.slot.value < 0 {
+			return {}, .Expected_Unsigned_Long
+		}
 		value_size := core_read_long_at(c.db.core, slot_ptr.slot.value) or_return
 		if value_size < 0 {
 			return {}, .Expected_Unsigned_Long
 		}
 		if value_size > i64(len(buffer)) {
 			return {}, .Stream_Too_Long
+		}
+		extra: i64 = 10 if slot_ptr.slot.full else 8
+		core_len := core_length(c.db.core) or_return
+		if slot_ptr.slot.value > core_len || extra > core_len - slot_ptr.slot.value || value_size > core_len - slot_ptr.slot.value - extra {
+			return {}, Xitdb_Error.Unexpected_EOF
 		}
 		if slot_ptr.slot.full {
 			if value_size <= i64(len(buffer)) - 2 {
@@ -473,11 +484,16 @@ cursor_reader :: proc(c: Read_Cursor) -> (res: Cursor_Reader, err: Error) {
 	slot_ptr := cursor_resolved(c) or_return
 	#partial switch slot_ptr.slot.tag {
 	case .Bytes:
+		if slot_ptr.slot.value < 0 {
+			return {}, .Expected_Unsigned_Long
+		}
 		size := core_read_long_at(c.db.core, slot_ptr.slot.value) or_return
 		if size < 0 {
 			return {}, .Expected_Unsigned_Long
 		}
-		if slot_ptr.slot.value > max(i64) - 8 {
+		core_len := core_length(c.db.core) or_return
+		extra: i64 = 10 if slot_ptr.slot.full else 8
+		if slot_ptr.slot.value > core_len || extra > core_len - slot_ptr.slot.value || size > core_len - slot_ptr.slot.value - extra {
 			return {}, Xitdb_Error.Unexpected_EOF
 		}
 		start_position := slot_ptr.slot.value + 8
@@ -518,6 +534,9 @@ cursor_reader_read :: #force_inline proc(r: ^Cursor_Reader, p: []u8) -> (res: in
 	if r.size < r.relative_position {
 		return 0, .End_Of_Stream
 	}
+	if r.start_position < 0 || r.relative_position < 0 || r.start_position > max(i64) - r.relative_position {
+		return 0, Xitdb_Error.Unexpected_EOF
+	}
 	read_size := min(i64(len(p)), r.size - r.relative_position)
 	if read_size == 0 {
 		return 0, nil
@@ -539,6 +558,9 @@ cursor_reader_read_fully :: #force_inline proc(r: ^Cursor_Reader, buf: []u8) -> 
 	n := i64(len(buf))
 	if r.size < r.relative_position || r.size - r.relative_position < n {
 		return .End_Of_Stream
+	}
+	if r.start_position < 0 || r.relative_position < 0 || r.start_position > max(i64) - r.relative_position {
+		return Xitdb_Error.Unexpected_EOF
 	}
 	if n == 0 {
 		return nil

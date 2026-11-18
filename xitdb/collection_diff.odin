@@ -51,6 +51,12 @@ diff_collection :: proc(cur_a, cur_b: Read_Cursor, allocator := context.temp_all
 	a := cursor_resolved_cursor(cur_a) or_return
 	b := cursor_resolved_cursor(cur_b) or_return
 	out := make([dynamic]Collection_Change, 0, 8, allocator)
+	defer if err != nil {
+		for ch in out {
+			delete(ch.key, allocator)
+		}
+		delete(out)
+	}
 	ctx := Diff_Ctx{db_a = a.db, db_b = b.db, out = &out, allocator = allocator}
 	if a.slot_ptr.slot == b.slot_ptr.slot {
 		return out[:], nil
@@ -175,7 +181,7 @@ _collect_slot :: proc(db: ^Database, s: Slot, slot_pos: i64, out: ^[dynamic]Map_
 	case .None:
 		return nil
 	case .Index:
-		return _collect_index_block(db, s.value, out, depth + 1)
+		return _collect_index_block(db, s.value, out, depth)
 	case .KV_Pair:
 		hash_size := int(db.header.hash_size)
 		hash := make([]u8, hash_size, context.temp_allocator)

@@ -73,33 +73,51 @@ LLVMFuzzerTestOneInput :: proc "c" (data: [^]u8, size: uint) -> i32 {
 
 	switch mode {
 	case 0:
-		_, _ = xitdb.parse_selector(payload, context.temp_allocator)
-		steps, p_err := xitdb.parse_steps(payload, context.temp_allocator)
-		if p_err == nil && len(steps) > 0 {
-			formatted := xitdb.format_steps(steps, context.temp_allocator)
-			steps2, p_err2 := xitdb.parse_steps(formatted, context.temp_allocator)
-			assert(p_err2 == nil)
-			assert(len(steps2) == len(steps))
-			for i in 0 ..< len(steps) {
-				assert(steps2[i].kind == steps[i].kind)
-				assert(steps2[i].key == steps[i].key)
-				assert(steps2[i].index == steps[i].index)
+		if sel, s_err := xitdb.parse_selector(payload, context.allocator); s_err == nil {
+			xitdb.selector_destroy(&sel, context.allocator)
+		}
+		steps, p_err := xitdb.parse_steps(payload, context.allocator)
+		if p_err == nil {
+			defer xitdb.steps_destroy(steps, context.allocator)
+			if len(steps) > 0 {
+				formatted := xitdb.format_steps(steps, context.temp_allocator)
+				steps2, p_err2 := xitdb.parse_steps(formatted, context.allocator)
+				assert(p_err2 == nil)
+				defer xitdb.steps_destroy(steps2, context.allocator)
+				assert(len(steps2) == len(steps))
+				for i in 0 ..< len(steps) {
+					assert(steps2[i].kind == steps[i].kind)
+					assert(steps2[i].key == steps[i].key)
+					assert(steps2[i].index == steps[i].index)
+				}
 			}
 		}
 		_, _ = xitdb.select_cursor(&g_seed_db, payload)
-		_, _ = xitdb.get_string(&g_seed_db, payload, context.temp_allocator)
-		_, _ = xitdb.history_of(&g_seed_db, payload, context.temp_allocator)
+		if gs, g_err := xitdb.get_string(&g_seed_db, payload, context.allocator); g_err == nil {
+			if len(gs) > 0 {
+				delete(gs, context.allocator)
+			}
+		}
+		if hist, h_err := xitdb.history_of(&g_seed_db, payload, context.allocator); h_err == nil {
+			xitdb.history_entries_destroy(hist, context.allocator)
+		}
 
 	case 1:
-		_, _ = xitdb.parse_datalog(payload, context.temp_allocator)
+		if dq, d_err := xitdb.parse_datalog(payload, context.allocator); d_err == nil {
+			xitdb.datalog_query_destroy(&dq)
+		}
 		_, _ = xitdb.query_datalog(&g_seed_db, payload, -1, context.temp_allocator)
 
 	case 2:
 		root_rc := xitdb.database_root_cursor(&g_seed_db).read_cursor
-		_, _ = xitdb.pull(root_rc, payload, context.temp_allocator)
+		if pv_root, pr_err := xitdb.pull(root_rc, payload, context.allocator); pr_err == nil {
+			xitdb.pull_value_destroy(pv_root, context.allocator)
+		}
 		if mc, merr := xitdb.select_cursor(&g_seed_db, "@-1"); merr == nil {
 			if cur, ok := mc.?; ok {
-				_, _ = xitdb.pull(cur, payload, context.temp_allocator)
+				if pv_m, pm_err := xitdb.pull(cur, payload, context.allocator); pm_err == nil {
+					xitdb.pull_value_destroy(pv_m, context.allocator)
+				}
 			}
 		}
 
@@ -112,9 +130,12 @@ LLVMFuzzerTestOneInput :: proc "c" (data: [^]u8, size: uint) -> i32 {
 		}
 		scratch_db, derr := xitdb.database_init(&scratch_core, xitdb.sha1_hasher())
 		if derr == nil {
-			_, serr := xitdb.transact_script(&scratch_db, payload, context.temp_allocator)
+			rep, serr := xitdb.transact_script(&scratch_db, payload, context.allocator)
 			if serr == nil {
-				_, _ = xitdb.diff_moments(&scratch_db, 0, -1, true, context.temp_allocator)
+				xitdb.tx_report_destroy(&rep, context.allocator)
+				if dc, diff_err := xitdb.diff_moments(&scratch_db, 0, -1, true, context.allocator); diff_err == nil {
+					xitdb.diff_changes_destroy(dc, context.allocator)
+				}
 			}
 		}
 	}

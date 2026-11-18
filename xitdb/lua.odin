@@ -2564,16 +2564,40 @@ _l_db_query_datalog :: proc "c" (L: ^lua.State) -> c.int {
 @(private = "file")
 _check_tx :: #force_inline proc(L: ^lua.State, idx: c.int) -> ^Lua_Tx_UD {
 	ud := _check_ud(L, idx, Lua_Tx_UD, .Tx, "invalid or destroyed xitdb.Tx")
-	if ud == nil || ud.destroyed {
+	if ud == nil || ud.destroyed || ud.committed {
 		_raise_msg(L, "invalid or destroyed xitdb.Tx")
 	}
 	return ud
 }
 
 @(private = "file")
+_tx_release_callbacks :: proc(L: ^lua.State, ud: ^Lua_Tx_UD) {
+	if ud == nil || ud.destroyed {
+		return
+	}
+	for &op in ud.tx.ops {
+		if op.kind == .Callback && op.user_data != nil {
+			cb := (^_Tx_Lua_Callback)(op.user_data)
+			if L != nil && cb.fn_ref != lua.NOREF && cb.fn_ref != lua.REFNIL {
+				lua.L_unref(L, lua.REGISTRYINDEX, cb.fn_ref)
+			}
+			free(cb, ud.tx.allocator)
+			op.user_data = nil
+		}
+	}
+}
+
+@(private = "file")
 _tx_cleanup :: proc(ud: ^Lua_Tx_UD) {
 	if ud == nil || ud.destroyed {
 		return
+	}
+	for &op in ud.tx.ops {
+		if op.kind == .Callback && op.user_data != nil {
+			cb := (^_Tx_Lua_Callback)(op.user_data)
+			free(cb, ud.tx.allocator)
+			op.user_data = nil
+		}
 	}
 	tx_destroy(&ud.tx)
 	for chunk in ud.owned_chunks {
@@ -2589,6 +2613,7 @@ _tx_cleanup :: proc(ud: ^Lua_Tx_UD) {
 _l_tx_gc :: proc "c" (L: ^lua.State) -> c.int {
 	context = _lua_context(L)
 	ud := _test_ud(L, 1, Lua_Tx_UD, .Tx)
+	_tx_release_callbacks(L, ud)
 	_tx_cleanup(ud)
 	return 0
 }
@@ -2786,7 +2811,7 @@ _l_tx_with_cursor :: proc "c" (L: ^lua.State) -> c.int {
 	}
 	lua.pushvalue(L, 2)
 	ref := lua.L_ref(L, lua.REGISTRYINDEX)
-	cb_holder := new(_Tx_Lua_Callback, context.temp_allocator)
+	cb_holder := new(_Tx_Lua_Callback, ud.tx.allocator)
 	cb_holder^ = _Tx_Lua_Callback{L = L, fn_ref = ref}
 	tx_with_cursor(&ud.tx, _tx_lua_cb_trampoline, cb_holder)
 	lua.pushvalue(L, 1)
@@ -2796,9 +2821,15 @@ _l_tx_with_cursor :: proc "c" (L: ^lua.State) -> c.int {
 @(private = "file")
 _l_tx_commit :: proc "c" (L: ^lua.State) -> c.int {
 	context = _lua_context(L)
-	ud := _check_tx(L, 1)
+	ud := _check_ud(L, 1, Lua_Tx_UD, .Tx, "invalid or destroyed xitdb.Tx")
+	if ud == nil {
+		return _raise_msg(L, "invalid or destroyed xitdb.Tx")
+	}
 	if ud.committed {
 		return _raise_msg(L, "tx:commit called on already-committed Tx")
+	}
+	if ud.destroyed {
+		return _raise_msg(L, "invalid or destroyed xitdb.Tx")
 	}
 	rep, err := tx_commit(&ud.tx)
 	if err != nil {
@@ -2807,28 +2838,37 @@ _l_tx_commit :: proc "c" (L: ^lua.State) -> c.int {
 			if op.kind == .Callback && op.user_data != nil {
 				cb := (^_Tx_Lua_Callback)(op.user_data)
 				if len(cb_err_msg) == 0 && len(cb.err_msg) > 0 {
-					cb_err_msg = cb.err_msg
+					cb_err_msg = strings.clone(cb.err_msg, context.temp_allocator)
 				}
-				lua.L_unref(L, lua.REGISTRYINDEX, cb.fn_ref)
 			}
 		}
 		tx_report_destroy(&rep, ud.tx.allocator)
+		_tx_release_callbacks(L, ud)
+		ud.committed = true
 		_tx_cleanup(ud)
 		if len(cb_err_msg) > 0 {
 			return _raise_msg(L, cb_err_msg)
 		}
 		return _raise_err(L, err, "tx:commit")
 	}
-	for op in ud.tx.ops {
-		if op.kind == .Callback && op.user_data != nil {
-			cb := (^_Tx_Lua_Callback)(op.user_data)
-			lua.L_unref(L, lua.REGISTRYINDEX, cb.fn_ref)
-		}
-	}
-	_tx_cleanup(ud)
+	_tx_release_callbacks(L, ud)
 	ud.committed = true
-	_push_tx_report(L, rep)
-	tx_report_destroy(&rep, ud.tx.allocator)
+	tx_alloc := ud.tx.allocator
+	_tx_cleanup(ud)
+
+	push_rep := rep
+	if len(rep.changes) > 0 {
+		temp_changes := make([]Tx_Change, len(rep.changes), context.temp_allocator)
+		for chg, idx in rep.changes {
+			temp_changes[idx] = chg
+			if len(chg.path_str) > 0 {
+				temp_changes[idx].path_str = strings.clone(chg.path_str, context.temp_allocator)
+			}
+		}
+		push_rep.changes = temp_changes
+	}
+	tx_report_destroy(&rep, tx_alloc)
+	_push_tx_report(L, push_rep)
 	return 1
 }
 

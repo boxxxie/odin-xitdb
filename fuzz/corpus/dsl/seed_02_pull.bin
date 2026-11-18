@@ -1,1 +1,1 @@
-{.users["101"]{username, age, dept}, .fruits[0..2], $catalog, ^tags}
+2{.users["101"]{username, age, dept}, .fruits[0..2], $catalog, ^tags}

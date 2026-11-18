@@ -1,4 +1,4 @@
-find ?dept, count(?id), sum(?age)
+1find ?dept, count(?id), sum(?age)
 where
   $username->id[?name] = ?id
   starts_with(?name, "al")

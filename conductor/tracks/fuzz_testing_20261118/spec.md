@@ -13,16 +13,16 @@ Add a lightweight, two-part fuzzing setup to [`xitdb-odin`](../../../AGENTS.md) 
 ## Architecture & Scope
 
 ### 1. Coverage-Guided `libFuzzer` + ASan Harnesses (`fuzz/`)
-Build pipeline using Odin's LLVM-IR output (`-build-mode:llvm-ir -no-entry-point`) linked with `clang -O1 -g -fsanitize=fuzzer,address -Wno-override-module` (`-lm -lpthread -ldl -lluajit-5.1`):
-* **`fuzz/fuzz_dsl.odin` (DSL & Query Parsers):**
+Build pipeline using Odin's LLVM-IR output (`-build-mode:llvm-ir -sanitize:address -no-entry-point`) linked with `clang -O1 -g -fsanitize=fuzzer,address -Wno-override-module -Wno-backend-plugin`:
+* **`fuzz/dsl/fuzz_dsl.odin` (DSL & Query Parsers):**
   - Export `LLVMFuzzerTestOneInput` calling `context = runtime.default_context()` and `defer free_all(context.temp_allocator)`.
   - Exercise `xitdb.parse_selector`, `xitdb.parse_steps`, `xitdb.parse_datalog`, `xitdb.pull` (against a seeded `Core_Memory` DB), and `xitdb.transact_script`.
   - Include a minimal seed corpus and optional token dictionary for selector/Datalog sigils and keywords.
-* **`fuzz/fuzz_wire.odin` (Corrupted `.xit` Wire Format & Compaction):**
+* **`fuzz/wire/fuzz_wire.odin` (Corrupted `.xit` Wire Format & Compaction):**
   - Seed corpus with valid minimal v1 and v2 `Core_Memory` byte snapshots (`core_memory_bytes`).
   - Feed mutated/truncated bytes via `core_memory_init_from_bytes` into `database_init`, `database_read_and_validate_header`, `database_read_root_header`, `database_committed_size`, `database_compact`, `diff_moments`, and shallow cursor reads.
   - Invariant: corrupted or truncated `.xit` payloads must return structured `Error` values without panicking, hanging, or triggering ASan OOB reads.
-* **`fuzz/fuzz_lua.odin` (LuaJIT Bridge Safety):**
+* **`fuzz/lua/fuzz_lua.odin` (LuaJIT Bridge Safety):**
   - Exercise untrusted/mutated Lua chunks against a fresh `lua.State` + `Core_Memory` database under ASan to guard `xitdb/lua.odin` userdata lifetimes and error paths.
 * **Runner Script (`fuzz/run.sh`) & Git Hygiene:**
   - Provide a single script to build any target (`dsl`, `wire`, `lua`, or `all`), run bounded campaigns (e.g., `-max_total_time=30`), and store ephemeral `.ll` build outputs and crash artifacts under git-ignored directories (`.tmp/` or `fuzz/.tmp/`), while keeping curated small seeds under `fuzz/corpus/`.
@@ -34,7 +34,7 @@ Build pipeline using Odin's LLVM-IR output (`-build-mode:llvm-ir -no-entry-point
   - `Hash_Map` / `Counted_Hash_Map` / `Sorted_Map` (`put`, `remove`, range/prefix queries) and Set variants
   - Multi-moment branching (`base_moment`), `diff_moments` / `collection_diff`, `database_compact`, and forward vs. reverse `Cursor_Iterator` checks
   - Cross-backend parity checks across `Core_Memory`, `Core_Buffered_File`, and `Core_Overlay`
-* Verify zero memory leaks under `odin test`'s tracking allocator and run deeper sweeps under `-sanitize:address` (`odin test tests -sanitize:address -define:ODIN_FUZZ_OPS=2000`).
+* Verify zero memory leaks under `odin test`'s tracking allocator and run deeper sweeps under `-sanitize:address` (`odin test tests -sanitize:address -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:ODIN_FUZZ_OPS=2000`).
 
 ### 3. Remediation & Permanent Regression Tests
 * Run bounded initial campaigns for both `libFuzzer` targets and simulation sweeps.

@@ -17,7 +17,7 @@ read_btree_node :: proc(db: ^Database, ptr: i64) -> (res: BTree_Node, err: Error
 	}
 	kind := BTree_Node_Kind(kind_int)
 	num := int(block[1])
-	if num > BTREE_SLOT_COUNT {
+	if num > BTREE_SLOT_COUNT || (kind == .Branch && num == 0) {
 		return {}, .Invalid_BTree_Node
 	}
 	body := block[BTREE_NODE_HEADER_SIZE:]
@@ -151,7 +151,10 @@ descend_by_rank :: proc(db: ^Database, root_ptr, rank: i64, $BRANCH_BLOCK_SIZE: 
 	}
 }
 
-btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (res: BTree_Insert_Result, err: Error) {
+btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int = 0) -> (res: BTree_Insert_Result, err: Error) {
+	if depth >= ITERATOR_STACK_SIZE * 2 {
+		return {}, .Max_Shift_Exceeded
+	}
 	if btree_reusable(db, node_ptr, frozen_at) {
 		header_bytes: [BTREE_NODE_HEADER_SIZE]u8
 		core_read_exact_at(db.core, node_ptr, header_bytes[:]) or_return
@@ -160,7 +163,7 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (res: BTr
 			return {}, .Invalid_BTree_Node_Kind
 		}
 		num := int(header_bytes[1])
-		if num > BTREE_SLOT_COUNT {
+		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
 			return {}, .Invalid_BTree_Node
 		}
 		if BTree_Node_Kind(kind_int) == .Leaf {
@@ -213,8 +216,11 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (res: BTr
 			}
 			child_slot_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(i) * SLOT_LENGTH
 			child_slot := core_read_slot_at(db.core, child_slot_pos) or_return
+			if child_slot.tag != .Index {
+				return {}, .Unexpected_Tag
+			}
 			child_ptr := child_slot.value
-			child := btree_insert(db, child_ptr, rem, frozen_at) or_return
+			child := btree_insert(db, child_ptr, rem, frozen_at, depth + 1) or_return
 			if child.split == nil {
 				if child.node_ptr != child_ptr {
 					core_seek_to(db.core, child_slot_pos) or_return
@@ -329,8 +335,11 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (res: BTr
 			rem -= node.counts[i]
 			i += 1
 		}
+		if node.children[i].tag != .Index {
+			return {}, .Unexpected_Tag
+		}
 		child_ptr := node.children[i].value
-		child := btree_insert(db, child_ptr, rem, frozen_at) or_return
+		child := btree_insert(db, child_ptr, rem, frozen_at, depth + 1) or_return
 		if child.split == nil && btree_reusable(db, node_ptr, frozen_at) {
 			if child.node_ptr != child_ptr {
 				child_slot_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(i) * SLOT_LENGTH
@@ -402,7 +411,10 @@ btree_grow_root :: proc(db: ^Database, result: BTree_Insert_Result) -> (res: i64
 	return btree_make_root(db, BTree_Join_Result{node_ptr = result.node_ptr, count = result.count, split = result.split})
 }
 
-btree_get_for_write :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (res: BTree_Write_Slot, err: Error) {
+btree_get_for_write :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int = 0) -> (res: BTree_Write_Slot, err: Error) {
+	if depth >= ITERATOR_STACK_SIZE * 2 {
+		return {}, .Max_Shift_Exceeded
+	}
 	header_bytes: [BTREE_NODE_HEADER_SIZE]u8
 	core_read_exact_at(db.core, node_ptr, header_bytes[:]) or_return
 	kind_int := header_bytes[0]
@@ -410,7 +422,7 @@ btree_get_for_write :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (r
 		return {}, .Invalid_BTree_Node_Kind
 	}
 	num := int(header_bytes[1])
-	if num > BTREE_SLOT_COUNT {
+	if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
 		return {}, .Invalid_BTree_Node
 	}
 	reusable := btree_reusable(db, node_ptr, frozen_at)
@@ -452,8 +464,11 @@ btree_get_for_write :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (r
 		}
 		child_slot_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(i) * SLOT_LENGTH
 		child_slot := core_read_slot_at(db.core, child_slot_pos) or_return
+		if child_slot.tag != .Index {
+			return {}, .Unexpected_Tag
+		}
 		child_ptr := child_slot.value
-		child := btree_get_for_write(db, child_ptr, rem, frozen_at) or_return
+		child := btree_get_for_write(db, child_ptr, rem, frozen_at, depth + 1) or_return
 		if child.node_ptr != child_ptr {
 			core_seek_to(db.core, child_slot_pos) or_return
 			core_write_slot(db.core, Slot{value = child.node_ptr, tag = .Index}) or_return
@@ -468,8 +483,11 @@ btree_get_for_write :: proc(db: ^Database, node_ptr, rank, frozen_at: i64) -> (r
 		rem -= node.counts[i]
 		i += 1
 	}
+	if node.children[i].tag != .Index {
+		return {}, .Unexpected_Tag
+	}
 	child_ptr := node.children[i].value
-	child := btree_get_for_write(db, child_ptr, rem, frozen_at) or_return
+	child := btree_get_for_write(db, child_ptr, rem, frozen_at, depth + 1) or_return
 	node.children[i] = Slot{value = child.node_ptr, tag = .Index}
 	new_ptr := write_btree_node(db, node) or_return
 	return BTree_Write_Slot{node_ptr = new_ptr, value_position = child.value_position, slot = child.slot}, nil
@@ -483,7 +501,10 @@ BTree_Remove_Result :: struct {
 	node:      BTree_Node,
 }
 
-btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: bool = false) -> (res: BTree_Remove_Result, err: Error) {
+btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: bool = false, depth: int = 0) -> (res: BTree_Remove_Result, err: Error) {
+	if depth >= ITERATOR_STACK_SIZE * 2 {
+		return {}, .Max_Shift_Exceeded
+	}
 	reusable := btree_reusable(db, node_ptr, frozen_at)
 	if reusable {
 		header_bytes: [BTREE_NODE_HEADER_SIZE]u8
@@ -493,7 +514,7 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 			return {}, .Invalid_BTree_Node_Kind
 		}
 		num := int(header_bytes[1])
-		if num > BTREE_SLOT_COUNT {
+		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
 			return {}, .Invalid_BTree_Node
 		}
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
@@ -551,8 +572,11 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 			}
 			child_slot_pos := position + i64(i) * SLOT_LENGTH
 			child_slot := core_read_slot_at(db.core, child_slot_pos) or_return
+			if child_slot.tag != .Index {
+				return {}, .Unexpected_Tag
+			}
 			child_ptr := child_slot.value
-			child := btree_remove(db, child_ptr, rem, frozen_at, false) or_return
+			child := btree_remove(db, child_ptr, rem, frozen_at, false, depth + 1) or_return
 			if child.num >= BTREE_SPLIT_COUNT || num == 1 {
 				ptr := child.node_ptr
 				if !child.persisted {
@@ -642,8 +666,11 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 			rem -= node.counts[i]
 			i += 1
 		}
+		if node.children[i].tag != .Index {
+			return {}, .Unexpected_Tag
+		}
 		child_ptr := node.children[i].value
-		child := btree_remove(db, child_ptr, rem, frozen_at, false) or_return
+		child := btree_remove(db, child_ptr, rem, frozen_at, false, depth + 1) or_return
 		if child.num == 0 {
 			btree_drop_child(&node, i)
 			return BTree_Remove_Result{
@@ -817,16 +844,25 @@ btree_merge_nodes :: proc(db: ^Database, a, b: BTree_Node) -> (res: BTree_Join_R
 	return btree_assemble_branch(db, children[: a.num + b.num], counts[: a.num + b.num], a.num + b.num)
 }
 
-btree_join_right :: proc(db: ^Database, a_ptr: i64, ha: int, b_ptr: i64, hb: int) -> (res: BTree_Join_Result, err: Error) {
+btree_join_right :: proc(db: ^Database, a_ptr: i64, ha: int, b_ptr: i64, hb: int, depth: int = 0) -> (res: BTree_Join_Result, err: Error) {
+	if depth >= ITERATOR_STACK_SIZE * 2 || ha <= hb {
+		return {}, .Max_Shift_Exceeded
+	}
 	a := read_btree_node(db, a_ptr) or_return
+	if a.kind != .Branch || a.num == 0 {
+		return {}, .Invalid_BTree_Node
+	}
 	last := a.num - 1
+	if a.children[last].tag != .Index {
+		return {}, .Unexpected_Tag
+	}
 	sub: BTree_Join_Result
 	if ha - 1 == hb {
 		last_child := read_btree_node(db, a.children[last].value) or_return
 		b_node := read_btree_node(db, b_ptr) or_return
 		sub = btree_merge_nodes(db, last_child, b_node) or_return
 	} else {
-		sub = btree_join_right(db, a.children[last].value, ha - 1, b_ptr, hb) or_return
+		sub = btree_join_right(db, a.children[last].value, ha - 1, b_ptr, hb, depth + 1) or_return
 	}
 
 	children: [BTREE_SLOT_COUNT + 1]Slot
@@ -844,15 +880,24 @@ btree_join_right :: proc(db: ^Database, a_ptr: i64, ha: int, b_ptr: i64, hb: int
 	return btree_assemble_branch(db, children[:total], counts[:total], total)
 }
 
-btree_join_left :: proc(db: ^Database, a_ptr: i64, ha: int, b_ptr: i64, hb: int) -> (res: BTree_Join_Result, err: Error) {
+btree_join_left :: proc(db: ^Database, a_ptr: i64, ha: int, b_ptr: i64, hb: int, depth: int = 0) -> (res: BTree_Join_Result, err: Error) {
+	if depth >= ITERATOR_STACK_SIZE * 2 || hb <= ha {
+		return {}, .Max_Shift_Exceeded
+	}
 	b := read_btree_node(db, b_ptr) or_return
+	if b.kind != .Branch || b.num == 0 {
+		return {}, .Invalid_BTree_Node
+	}
+	if b.children[0].tag != .Index {
+		return {}, .Unexpected_Tag
+	}
 	sub: BTree_Join_Result
 	if hb - 1 == ha {
 		a_node := read_btree_node(db, a_ptr) or_return
 		first_child := read_btree_node(db, b.children[0].value) or_return
 		sub = btree_merge_nodes(db, a_node, first_child) or_return
 	} else {
-		sub = btree_join_left(db, a_ptr, ha, b.children[0].value, hb - 1) or_return
+		sub = btree_join_left(db, a_ptr, ha, b.children[0].value, hb - 1, depth + 1) or_return
 	}
 
 	children: [BTREE_SLOT_COUNT + 1]Slot
@@ -905,7 +950,10 @@ btree_subtree :: proc(db: ^Database, children: []Slot, counts: []i64, start, len
 	return branch_res.node_ptr, nil
 }
 
-btree_split_right :: proc(db: ^Database, root_ptr, rank: i64) -> (res: i64, err: Error) {
+btree_split_right :: proc(db: ^Database, root_ptr, rank: i64, depth: int = 0) -> (res: i64, err: Error) {
+	if depth >= ITERATOR_STACK_SIZE * 2 {
+		return 0, .Max_Shift_Exceeded
+	}
 	if rank == 0 {
 		return root_ptr, nil
 	}
@@ -928,7 +976,10 @@ btree_split_right :: proc(db: ^Database, root_ptr, rank: i64) -> (res: i64, err:
 	if rem == node.counts[i] {
 		return btree_subtree(db, node.children[:], node.counts[:], i + 1, node.num - (i + 1))
 	}
-	child_right := btree_split_right(db, node.children[i].value, rem) or_return
+	if node.children[i].tag != .Index {
+		return 0, .Unexpected_Tag
+	}
+	child_right := btree_split_right(db, node.children[i].value, rem, depth + 1) or_return
 	joined_right := child_right
 	if i + 1 < node.num {
 		right_sub := btree_subtree(db, node.children[:], node.counts[:], i + 1, node.num - (i + 1)) or_return
@@ -937,7 +988,10 @@ btree_split_right :: proc(db: ^Database, root_ptr, rank: i64) -> (res: i64, err:
 	return joined_right, nil
 }
 
-btree_split_left :: proc(db: ^Database, root_ptr, rank: i64) -> (res: i64, err: Error) {
+btree_split_left :: proc(db: ^Database, root_ptr, rank: i64, depth: int = 0) -> (res: i64, err: Error) {
+	if depth >= ITERATOR_STACK_SIZE * 2 {
+		return 0, .Max_Shift_Exceeded
+	}
 	if rank == 0 {
 		return btree_new_root(db)
 	}
@@ -966,7 +1020,10 @@ btree_split_left :: proc(db: ^Database, root_ptr, rank: i64) -> (res: i64, err: 
 		}
 		return btree_subtree(db, node.children[:], node.counts[:], 0, i + 1)
 	}
-	child_left := btree_split_left(db, node.children[i].value, rem) or_return
+	if node.children[i].tag != .Index {
+		return 0, .Unexpected_Tag
+	}
+	child_left := btree_split_left(db, node.children[i].value, rem, depth + 1) or_return
 	joined_left := child_left
 	if i > 0 {
 		left_sub := btree_subtree(db, node.children[:], node.counts[:], 0, i) or_return
@@ -975,7 +1032,10 @@ btree_split_left :: proc(db: ^Database, root_ptr, rank: i64) -> (res: i64, err: 
 	return joined_left, nil
 }
 
-btree_split :: proc(db: ^Database, root_ptr, rank: i64) -> (res: BTree_Split_Result, err: Error) {
+btree_split :: proc(db: ^Database, root_ptr, rank: i64, depth: int = 0) -> (res: BTree_Split_Result, err: Error) {
+	if depth >= ITERATOR_STACK_SIZE * 2 {
+		return {}, .Max_Shift_Exceeded
+	}
 	node := read_btree_node(db, root_ptr) or_return
 	if node.kind == .Leaf {
 		r := int(rank)
@@ -996,7 +1056,10 @@ btree_split :: proc(db: ^Database, root_ptr, rank: i64) -> (res: BTree_Split_Res
 		rem -= node.counts[i]
 		i += 1
 	}
-	child := btree_split(db, node.children[i].value, rem) or_return
+	if node.children[i].tag != .Index {
+		return {}, .Unexpected_Tag
+	}
+	child := btree_split(db, node.children[i].value, rem, depth + 1) or_return
 	joined_left := child.left
 	if i > 0 {
 		left_sub := btree_subtree(db, node.children[:], node.counts[:], 0, i) or_return
@@ -1024,7 +1087,7 @@ read_sorted_node :: proc(db: ^Database, ptr: i64) -> (res: Sorted_Node, err: Err
 	}
 	kind := BTree_Node_Kind(kind_int)
 	num := int(block[1])
-	if num > BTREE_SLOT_COUNT {
+	if num > BTREE_SLOT_COUNT || (kind == .Branch && num == 0) {
 		return {}, .Invalid_BTree_Node
 	}
 	body := block[BTREE_NODE_HEADER_SIZE:]
@@ -1470,7 +1533,10 @@ write_sorted_key_and_entry :: proc(db: ^Database, key: []u8, key_only: bool) -> 
 	return key_slot, entry, nil
 }
 
-sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, frozen_at: i64) -> (res: Sorted_Insert_Result, err: Error) {
+sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, frozen_at: i64, depth: int = 0) -> (res: Sorted_Insert_Result, err: Error) {
+	if depth >= ITERATOR_STACK_SIZE * 2 {
+		return {}, .Max_Shift_Exceeded
+	}
 	reusable := btree_reusable(db, node_ptr, frozen_at)
 	if reusable {
 		node_buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
@@ -1483,7 +1549,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 			return {}, .Invalid_BTree_Node_Kind
 		}
 		num := int(block[1])
-		if num > BTREE_SLOT_COUNT {
+		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
 			return {}, .Invalid_BTree_Node
 		}
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
@@ -1618,8 +1684,11 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 			i := lo - 1
 			child_slot_pos := position + i64(i) * SLOT_LENGTH
 			child_slot := slot_from_slice(branch_buf[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
+			if child_slot.tag != .Index {
+				return {}, .Unexpected_Tag
+			}
 			child_ptr := child_slot.value
-			child := sorted_put(db, child_ptr, key, key_only, frozen_at) or_return
+			child := sorted_put(db, child_ptr, key, key_only, frozen_at, depth + 1) or_return
 			if child.split == nil {
 				if child.node_ptr != child_ptr {
 					core_seek_to(db.core, child_slot_pos) or_return
@@ -1776,8 +1845,11 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 
 	case .Branch:
 		i := sorted_branch_search(db, &node, key) or_return
+		if node.children[i].tag != .Index {
+			return {}, .Unexpected_Tag
+		}
 		child_ptr := node.children[i].value
-		child := sorted_put(db, child_ptr, key, key_only, frozen_at) or_return
+		child := sorted_put(db, child_ptr, key, key_only, frozen_at, depth + 1) or_return
 		if !child.added && child.node_ptr == child_ptr {
 			return Sorted_Insert_Result{
 				node_ptr = node_ptr,
@@ -1846,7 +1918,10 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 	return {}, .Unreachable
 }
 
-sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -> (res: Sorted_Remove_Result, err: Error) {
+sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64, depth: int = 0) -> (res: Sorted_Remove_Result, err: Error) {
+	if depth >= ITERATOR_STACK_SIZE * 2 {
+		return {}, .Max_Shift_Exceeded
+	}
 	if btree_reusable(db, node_ptr, frozen_at) {
 		node_buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
 		block := core_read_short_at(db.core, node_ptr, node_buf[:]) or_return
@@ -1858,7 +1933,7 @@ sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -
 			return {}, .Invalid_BTree_Node_Kind
 		}
 		num := int(block[1])
-		if num > BTREE_SLOT_COUNT {
+		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
 			return {}, .Invalid_BTree_Node
 		}
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
@@ -1920,8 +1995,11 @@ sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -
 			i := lo - 1
 			child_slot_pos := position + i64(i) * SLOT_LENGTH
 			child_slot := slot_from_slice(branch_buf[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
+			if child_slot.tag != .Index {
+				return {}, .Unexpected_Tag
+			}
 			child_ptr := child_slot.value
-			child := sorted_remove(db, child_ptr, key, frozen_at) or_return
+			child := sorted_remove(db, child_ptr, key, frozen_at, depth + 1) or_return
 			if !child.found {
 				return Sorted_Remove_Result{node_ptr = node_ptr, found = false}, nil
 			}
@@ -1965,8 +2043,11 @@ sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64) -
 
 	case .Branch:
 		i := sorted_branch_search(db, &node, key) or_return
+		if node.children[i].tag != .Index {
+			return {}, .Unexpected_Tag
+		}
 		child_ptr := node.children[i].value
-		child := sorted_remove(db, child_ptr, key, frozen_at) or_return
+		child := sorted_remove(db, child_ptr, key, frozen_at, depth + 1) or_return
 		if !child.found {
 			return Sorted_Remove_Result{node_ptr = node_ptr, found = false}, nil
 		}

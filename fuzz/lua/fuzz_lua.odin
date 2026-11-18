@@ -2,6 +2,7 @@ package fuzz_lua
 
 import "base:runtime"
 import "core:c"
+import "core:c/libc"
 import xitdb "xitdb:."
 import lua "xitdb:luajit"
 
@@ -14,7 +15,47 @@ when ODIN_OS == .Linux {
 }
 
 @(private = "file")
+LUA_MASKRET :: c.int(1 << 1)
+@(private = "file")
 LUA_MASKCOUNT :: c.int(1 << 3)
+@(private = "file")
+LUA_MAX_ALLOC_BYTES :: uint(8 * 1024 * 1024)
+
+@(private = "file")
+_Lua_Alloc_State :: struct {
+	used:  uint,
+	limit: uint,
+}
+
+@(private = "file")
+_bounded_lua_alloc :: proc "c" (ud: rawptr, ptr: rawptr, osize: c.size_t, nsize: c.size_t) -> rawptr {
+	state := (^_Lua_Alloc_State)(ud)
+	// When ptr == nil, Lua passes an object type tag in osize rather than byte size.
+	old_bytes := uint(osize) if ptr != nil else 0
+	new_bytes := uint(nsize)
+
+	if new_bytes == 0 {
+		if ptr != nil {
+			state.used -= min(state.used, old_bytes)
+			libc.free(ptr)
+		}
+		return nil
+	}
+
+	if new_bytes > old_bytes {
+		delta := new_bytes - old_bytes
+		if delta > state.limit || state.used + delta > state.limit {
+			return nil
+		}
+	}
+
+	new_ptr := libc.realloc(ptr, nsize)
+	if new_ptr == nil {
+		return nil
+	}
+	state.used = state.used - min(state.used, old_bytes) + new_bytes
+	return new_ptr
+}
 
 @(private = "file")
 Lua_Hook :: #type proc "c" (L: ^lua.State, ar: rawptr)
@@ -27,6 +68,9 @@ foreign luajit_lib {
 
 @(private = "file")
 _instruction_limit_hook :: proc "c" (L: ^lua.State, _ar: rawptr) {
+	// Re-arm every instruction/return so pcall/xpcall/coroutine.resume cannot swallow
+	// the error and spin indefinitely until libFuzzer's wall-clock timeout.
+	_ = lua_sethook(L, _instruction_limit_hook, LUA_MASKCOUNT | LUA_MASKRET, 1)
 	lua.L_error(L, "instruction limit exceeded")
 }
 
@@ -41,6 +85,9 @@ _sandbox_state :: proc(L: ^lua.State) {
 		"debug",
 		"package",
 		"jit",
+		"coroutine",
+		"xpcall",
+		"newproxy",
 		"require",
 		"loadfile",
 		"dofile",
@@ -51,6 +98,13 @@ _sandbox_state :: proc(L: ^lua.State) {
 		lua.pushnil(L)
 		lua.setglobal(L, name)
 	}
+
+	lua.getglobal(L, "string")
+	if lua.type(L, -1) == .TABLE {
+		lua.pushnil(L)
+		lua.setfield(L, -2, "rep")
+	}
+	lua.pop(L, 1)
 
 	lua.getglobal(L, "xitdb")
 	if lua.type(L, -1) == .TABLE {
@@ -91,7 +145,17 @@ LLVMFuzzerTestOneInput :: proc "c" (data: [^]u8, size: uint) -> i32 {
 		return 0
 	}
 
-	L := xitdb.lua_new_state(&db)
+	alloc_state := _Lua_Alloc_State{limit = LUA_MAX_ALLOC_BYTES}
+	L := lua.newstate(_bounded_lua_alloc, &alloc_state)
+	if L != nil {
+		lua.L_openlibs(L)
+		xitdb.lua_open_xitdb(L)
+		xitdb.lua_push_database(L, &db)
+		lua.setglobal(L, "db")
+	} else {
+		// Non-GC64 LuaJIT builds reject custom high-address allocators in lua_newstate.
+		L = xitdb.lua_new_state(&db)
+	}
 	if L == nil {
 		return 0
 	}

@@ -219,10 +219,15 @@ _compactor_reserve_block :: #force_inline proc(c: ^_Compactor, size: int) -> (re
 @(private)
 _compactor_remap_slot :: proc(c: ^_Compactor, slot: Slot) -> (res: Slot, err: Error) {
 	tag_validate(slot.tag) or_return
-	new_offset: i64
 	#partial switch slot.tag {
 	case .None, .Uint, .Int, .Float, .Short_Bytes:
 		return slot, nil
+	}
+	if slot.value < 0 {
+		return {}, .Expected_Unsigned_Long
+	}
+	new_offset: i64
+	#partial switch slot.tag {
 
 	case .Bytes:
 		new_offset = _compactor_remap_bytes(c, slot) or_return
@@ -315,6 +320,9 @@ _compactor_remap_slot :: proc(c: ^_Compactor, slot: Slot) -> (res: Slot, err: Er
 
 @(private)
 _compactor_remap_bytes :: proc(c: ^_Compactor, slot: Slot) -> (res: i64, err: Error) {
+	if slot.value < 0 {
+		return 0, .Expected_Unsigned_Long
+	}
 	mapped, found := offset_map_get(c.offset_map, slot.value) or_return
 	if found {
 		return mapped, nil
@@ -446,6 +454,9 @@ _compactor_populate_btree :: proc(c: ^_Compactor, source_offset, target_offset: 
 
 @(private)
 _compactor_remap_btree_node :: proc(c: ^_Compactor, node_offset: i64) -> (res: i64, err: Error) {
+	if node_offset < 0 {
+		return 0, .Expected_Unsigned_Long
+	}
 	mapped, found := offset_map_get(c.offset_map, node_offset) or_return
 	if found {
 		return mapped, nil
@@ -548,6 +559,9 @@ _compactor_populate_sorted_map :: proc(c: ^_Compactor, source_offset, target_off
 
 @(private)
 _compactor_remap_sorted_map_node :: proc(c: ^_Compactor, node_offset: i64) -> (res: i64, err: Error) {
+	if node_offset < 0 {
+		return 0, .Expected_Unsigned_Long
+	}
 	mapped, found := offset_map_get(c.offset_map, node_offset) or_return
 	if found {
 		return mapped, nil
