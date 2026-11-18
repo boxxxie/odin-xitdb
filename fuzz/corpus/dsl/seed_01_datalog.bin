@@ -1,0 +1,7 @@
+find ?dept, count(?id), sum(?age)
+where
+  $username->id[?name] = ?id
+  starts_with(?name, "al")
+  .users[?id].dept = ?dept
+  .users[?id].age = ?age
+  not .users[?id].roles%"suspended"

@@ -1,0 +1,8 @@
+db:run_context(function(root)
+  local hist = xitdb.write_array_list(root)
+  hist:append_context(xitdb.slot(), function(cur)
+    local sm = xitdb.write_sorted_map(cur)
+    sm:put("k1", "v1")
+    sm:put("k2", xitdb.int(-7))
+  end)
+end)

@@ -1,0 +1,14 @@
+branch @-1 {
+  doc "mutate"
+  meta "ticket" = "XIT-1"
+  fork .fruits -> .fruits_bak
+  savepoint
+  put .users["103"].age = 40u
+  put .delta = -5i
+  put .ratio = 2.5
+  put .notes = "# Hi"^^md
+  append .fruits = "mango"
+  insert .todos 0 = "test"
+  slice .fruits 1
+  rm .deprecated
+}

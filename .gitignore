@@ -18,6 +18,13 @@ bin/
 zig-out/
 __pycache__/
 
+# Fuzzing artifacts
+crash-*
+oom-*
+timeout-*
+slow-unit-*
+!fuzz/corpus/**/*.bin
+
 # OS & Editor artifacts
 .DS_Store
 Thumbs.db
