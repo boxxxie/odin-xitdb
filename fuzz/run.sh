@@ -79,7 +79,7 @@ run_target() {
 			cmd+=(-max_len=16384)
 			;;
 		lua)
-			cmd+=(-max_len=2048)
+			cmd+=(-max_len=2048 "-dict=fuzz/corpus/lua.dict")
 			;;
 	esac
 

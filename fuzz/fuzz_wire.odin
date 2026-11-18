@@ -56,5 +56,19 @@ LLVMFuzzerTestOneInput :: proc "c" (data: [^]u8, size: uint) -> i32 {
 	}
 	_, _ = xitdb.database_compact(&db, &target_core)
 
+	// Exercise write-path truncation/recovery & commit guards on the mutated buffer.
+	tx := xitdb.tx_init(&db, base_moment = -1, track_changes = false, allocator = context.temp_allocator)
+	if xitdb.tx_put(&tx, ".fuzz_w", "ok") == nil &&
+	   xitdb.tx_append(&tx, ".fuzz_arr", u64(1)) == nil &&
+	   xitdb.tx_put(&tx, "$fuzz_sm[\"k\"]", i64(-1)) == nil {
+		if _, cerr := xitdb.tx_commit(&tx); cerr == nil {
+			if mc2, merr2 := xitdb.select_cursor(&db, "@-1"); merr2 == nil {
+				if cur2, ok2 := mc2.?; ok2 {
+					_, _ = xitdb.pull(cur2, "*", context.temp_allocator)
+				}
+			}
+		}
+	}
+
 	return 0
 }
