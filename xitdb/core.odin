@@ -317,10 +317,11 @@ _overlay_write_at :: proc(o: ^Core_Overlay, pos: i64, p: []u8) -> Error {
 
 @(private)
 _overlay_slice_at :: proc(o: ^Core_Overlay, pos: i64, n: int) -> (slice: []u8, in_mem: bool, err: Error) {
-	end := pos + i64(n)
-	if pos < 0 || end > _overlay_length(o) {
+	ov_len := _overlay_length(o)
+	if pos < 0 || n < 0 || pos > ov_len || i64(n) > ov_len - pos {
 		return nil, true, Xitdb_Error.Unexpected_EOF
 	}
+	end := pos + i64(n)
 	if pos >= o.base_size {
 		rel := int(pos - o.base_size)
 		return o.tail.buf[rel:rel + n], true, nil
@@ -711,15 +712,16 @@ core_read_exact_at :: proc(c: ^Core, pos: i64, p: []u8) -> Error {
 	}
 	#partial switch &v in c {
 	case Core_Memory:
-		end_pos := pos + i64(len(p))
-		if end_pos > i64(len(v.buf)) {
+		buf_len := i64(len(v.buf))
+		if pos > buf_len || i64(len(p)) > buf_len - pos {
 			return Xitdb_Error.Unexpected_EOF
 		}
+		end_pos := pos + i64(len(p))
 		copy(p, v.buf[int(pos):int(end_pos)])
 		return nil
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
-		if buf_len > 0 && pos >= v.memory_pos && pos + i64(len(p)) <= v.memory_pos + buf_len {
+		if buf_len > 0 && pos >= v.memory_pos && pos <= v.memory_pos + buf_len && i64(len(p)) <= (v.memory_pos + buf_len) - pos {
 			mem_off := int(pos - v.memory_pos)
 			copy(p, v.memory.buf[mem_off : mem_off + len(p)])
 			return nil
@@ -727,6 +729,9 @@ core_read_exact_at :: proc(c: ^Core, pos: i64, p: []u8) -> Error {
 	}
 	total := 0
 	for total < len(p) {
+		if pos > max(i64) - i64(total) {
+			return Xitdb_Error.Unexpected_EOF
+		}
 		n, err := core_read_at(c, pos + i64(total), p[total:])
 		total += n
 		if err != nil {
@@ -934,16 +939,20 @@ core_write_all :: proc(c: ^Core, p: []u8) -> Error {
 // Returns a read-only slice of `n` bytes at `pos` when backed by an in-memory buffer,
 // or `(nil, false, nil)` when file I/O is required.
 core_slice_at :: #force_inline proc(c: ^Core, pos: i64, n: int) -> (slice: []u8, in_mem: bool, err: Error) {
+	if pos < 0 || n < 0 {
+		return nil, true, Xitdb_Error.Unexpected_EOF
+	}
 	#partial switch &v in c {
 	case Core_Memory:
-		p := int(pos)
-		if p < 0 || p + n > len(v.buf) {
+		buf_len := i64(len(v.buf))
+		if pos > buf_len || i64(n) > buf_len - pos {
 			return nil, true, Xitdb_Error.Unexpected_EOF
 		}
+		p := int(pos)
 		return v.buf[p : p + n], true, nil
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
-		if buf_len > 0 && pos >= v.memory_pos && pos + i64(n) <= v.memory_pos + buf_len {
+		if buf_len > 0 && pos >= v.memory_pos && pos <= v.memory_pos + buf_len && i64(n) <= (v.memory_pos + buf_len) - pos {
 			mem_off := int(pos - v.memory_pos)
 			return v.memory.buf[mem_off : mem_off + n], true, nil
 		}

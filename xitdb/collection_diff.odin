@@ -119,7 +119,10 @@ _diff_hash_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 }
 
 @(private = "file")
-_diff_index_blocks :: proc(ctx: ^Diff_Ctx, pos_a, pos_b: i64) -> Error {
+_diff_index_blocks :: proc(ctx: ^Diff_Ctx, pos_a, pos_b: i64, depth: int = 0) -> Error {
+	if depth > 64 {
+		return .Key_Offset_Exceeded
+	}
 	if pos_a == pos_b && ctx.db_a == ctx.db_b {
 		return nil
 	}
@@ -136,37 +139,43 @@ _diff_index_blocks :: proc(ctx: ^Diff_Ctx, pos_a, pos_b: i64) -> Error {
 			continue
 		}
 		if sa.tag == .Index && sb.tag == .Index {
-			_diff_index_blocks(ctx, sa.value, sb.value) or_return
+			_diff_index_blocks(ctx, sa.value, sb.value, depth + 1) or_return
 			continue
 		}
 		// Mixed / leaf-level difference: materialize both (small) subtrees and diff them by hash.
 		ea := make([dynamic]Map_Entry, 0, 4, context.temp_allocator)
 		eb := make([dynamic]Map_Entry, 0, 4, context.temp_allocator)
-		_collect_slot(ctx.db_a, sa, pos_a + i64(i * SLOT_LENGTH), &ea) or_return
-		_collect_slot(ctx.db_b, sb, pos_b + i64(i * SLOT_LENGTH), &eb) or_return
+		_collect_slot(ctx.db_a, sa, pos_a + i64(i * SLOT_LENGTH), &ea, depth + 1) or_return
+		_collect_slot(ctx.db_b, sb, pos_b + i64(i * SLOT_LENGTH), &eb, depth + 1) or_return
 		_diff_entry_sets(ctx, ea[:], eb[:]) or_return
 	}
 	return nil
 }
 
 @(private = "file")
-_collect_index_block :: proc(db: ^Database, pos: i64, out: ^[dynamic]Map_Entry) -> Error {
+_collect_index_block :: proc(db: ^Database, pos: i64, out: ^[dynamic]Map_Entry, depth: int = 0) -> Error {
+	if depth > 64 {
+		return .Key_Offset_Exceeded
+	}
 	block: [INDEX_BLOCK_SIZE]u8 = ---
 	core_read_exact_at(db.core, pos, block[:]) or_return
 	for i in 0 ..< SLOT_COUNT {
 		s := slot_from_slice(block[i * SLOT_LENGTH:(i + 1) * SLOT_LENGTH]) or_return
-		_collect_slot(db, s, pos + i64(i * SLOT_LENGTH), out) or_return
+		_collect_slot(db, s, pos + i64(i * SLOT_LENGTH), out, depth + 1) or_return
 	}
 	return nil
 }
 
 @(private = "file")
-_collect_slot :: proc(db: ^Database, s: Slot, slot_pos: i64, out: ^[dynamic]Map_Entry) -> Error {
+_collect_slot :: proc(db: ^Database, s: Slot, slot_pos: i64, out: ^[dynamic]Map_Entry, depth: int = 0) -> Error {
+	if depth > 64 {
+		return .Key_Offset_Exceeded
+	}
 	#partial switch s.tag {
 	case .None:
 		return nil
 	case .Index:
-		return _collect_index_block(db, s.value, out)
+		return _collect_index_block(db, s.value, out, depth + 1)
 	case .KV_Pair:
 		hash_size := int(db.header.hash_size)
 		hash := make([]u8, hash_size, context.temp_allocator)

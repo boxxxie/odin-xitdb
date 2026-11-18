@@ -104,14 +104,30 @@ _write_escaped_step_key :: proc(b: ^strings.Builder, key: string) {
 	needs_quotes := len(key) == 0
 	for i in 0 ..< len(key) {
 		ch := key[i]
-		if ch == '.' || ch == '[' || ch == ']' || ch == '$' || ch == '#' || ch == '%' || ch == '^' || ch == ' ' || ch == '"' {
+		if ch <= ' ' || ch >= 0x7f || ch == '.' || ch == '[' || ch == ']' || ch == '$' || ch == '#' || ch == '%' || ch == '^' || ch == '@' || ch == '"' || ch == '\'' || ch == '\\' || ch == '{' || ch == '}' || ch == ',' {
 			needs_quotes = true
 			break
 		}
 	}
 	if needs_quotes {
 		strings.write_string(b, "[\"")
-		strings.write_string(b, key)
+		for i in 0 ..< len(key) {
+			ch := key[i]
+			switch ch {
+			case '\\':
+				strings.write_string(b, "\\\\")
+			case '"':
+				strings.write_string(b, "\\\"")
+			case '\n':
+				strings.write_string(b, "\\n")
+			case '\r':
+				strings.write_string(b, "\\r")
+			case '\t':
+				strings.write_string(b, "\\t")
+			case:
+				strings.write_byte(b, ch)
+			}
+		}
 		strings.write_string(b, "\"]")
 	} else {
 		strings.write_string(b, key)
@@ -151,9 +167,31 @@ parse_selector :: proc(selector: string, allocator := context.temp_allocator) ->
 	return res, nil
 }
 
+@(private = "file")
+_is_subslice_of :: proc(sub, parent: string) -> bool {
+	if len(sub) == 0 {
+		return true
+	}
+	if len(parent) == 0 {
+		return false
+	}
+	p_start := uintptr(raw_data(parent))
+	p_end := p_start + uintptr(len(parent))
+	s_ptr := uintptr(raw_data(sub))
+	return s_ptr >= p_start && s_ptr < p_end
+}
+
 parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (res: []Path_Step, err: Error) {
 	s := strings.trim_space(path_str)
 	steps := make([dynamic]Path_Step, 0, 8, allocator)
+	defer if err != nil {
+		for st in steps {
+			if !_is_subslice_of(st.key, path_str) {
+				delete(st.key, allocator)
+			}
+		}
+		delete(steps)
+	}
 	i := 0
 
 	for i < len(s) {
@@ -161,7 +199,7 @@ parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (r
 		switch ch {
 		case '.':
 			i += 1
-			key, next_i := _parse_step_ident_or_bracket(s, i) or_return
+			key, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
 			append(&steps, Path_Step{kind = .Hash_Map_Key, key = key})
 			i = next_i
 
@@ -169,30 +207,30 @@ parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (r
 			i += 1
 			if i < len(s) && s[i] == '%' {
 				i += 1
-				key, next_i := _parse_step_ident_or_bracket(s, i) or_return
+				key, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
 				append(&steps, Path_Step{kind = .Counted_Set_Member, key = key})
 				i = next_i
 			} else {
-				key, next_i := _parse_step_ident_or_bracket(s, i) or_return
+				key, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
 				append(&steps, Path_Step{kind = .Counted_Hash_Map_Key, key = key})
 				i = next_i
 			}
 
 		case '$':
 			i += 1
-			key, next_i := _parse_step_ident_or_bracket(s, i) or_return
+			key, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
 			append(&steps, Path_Step{kind = .Sorted_Map_Key, key = key})
 			i = next_i
 
 		case '%':
 			i += 1
-			key, next_i := _parse_step_ident_or_bracket(s, i) or_return
+			key, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
 			append(&steps, Path_Step{kind = .Hash_Set_Member, key = key})
 			i = next_i
 
 		case '^':
 			i += 1
-			key, next_i := _parse_step_ident_or_bracket(s, i) or_return
+			key, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
 			append(&steps, Path_Step{kind = .Sorted_Set_Member, key = key})
 			i = next_i
 
@@ -216,7 +254,7 @@ parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (r
 				i += 2
 			} else if i + 1 < len(s) && (s[i + 1] == '"' || s[i + 1] == '\'') {
 				// Bracketed map key: ["key"] — inherits collection kind if preceded by $key or #key
-				key, next_i := _parse_bracketed_string(s, i) or_return
+				key, next_i := _parse_bracketed_string(s, i, allocator) or_return
 				step_kind := Step_Kind.Hash_Map_Key
 				if len(steps) == 1 {
 					if steps[0].kind == .Counted_Hash_Map_Key {
@@ -250,7 +288,7 @@ parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (r
 
 		case:
 			// Bare leading identifier defaults to Hash_Map_Key
-			key, next_i := _parse_step_ident_or_bracket(s, i) or_return
+			key, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
 			append(&steps, Path_Step{kind = .Hash_Map_Key, key = key})
 			i = next_i
 		}
@@ -260,24 +298,60 @@ parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (r
 }
 
 @(private = "file")
-_parse_step_ident_or_bracket :: proc(s: string, start_i: int) -> (key: string, next_i: int, err: Error) {
+_unescape_quoted_key :: proc(raw: string, allocator: runtime.Allocator) -> string {
+	b := strings.builder_make(0, len(raw), allocator)
+	i := 0
+	for i < len(raw) {
+		if raw[i] == '\\' && i + 1 < len(raw) {
+			i += 1
+			switch raw[i] {
+			case '\\', '"', '\'':
+				strings.write_byte(&b, raw[i])
+			case 'n':
+				strings.write_byte(&b, '\n')
+			case 'r':
+				strings.write_byte(&b, '\r')
+			case 't':
+				strings.write_byte(&b, '\t')
+			case:
+				strings.write_byte(&b, raw[i])
+			}
+		} else {
+			strings.write_byte(&b, raw[i])
+		}
+		i += 1
+	}
+	return strings.to_string(b)
+}
+
+@(private = "file")
+_parse_step_ident_or_bracket :: proc(s: string, start_i: int, allocator: runtime.Allocator) -> (key: string, next_i: int, err: Error) {
 	if start_i >= len(s) {
 		return "", start_i, .Invalid_Range
 	}
 	if s[start_i] == '[' {
-		return _parse_bracketed_string(s, start_i)
+		return _parse_bracketed_string(s, start_i, allocator)
 	}
 	if s[start_i] == '"' || s[start_i] == '\'' {
 		quote := s[start_i]
 		i := start_i + 1
 		key_start := i
+		has_escape := false
 		for i < len(s) && s[i] != quote {
+			if s[i] == '\\' {
+				has_escape = true
+				i += 1
+				if i >= len(s) {
+					return "", start_i, .Invalid_Range
+				}
+			}
 			i += 1
 		}
 		if i >= len(s) || s[i] != quote {
 			return "", start_i, .Invalid_Range
 		}
-		return s[key_start:i], i + 1, nil
+		parsed := _unescape_quoted_key(s[key_start:i], allocator) if has_escape else s[key_start:i]
+		return parsed, i + 1, nil
 	}
 	i := start_i
 	for i < len(s) {
@@ -294,7 +368,7 @@ _parse_step_ident_or_bracket :: proc(s: string, start_i: int) -> (key: string, n
 }
 
 @(private = "file")
-_parse_bracketed_string :: proc(s: string, start_i: int) -> (key: string, next_i: int, err: Error) {
+_parse_bracketed_string :: proc(s: string, start_i: int, allocator: runtime.Allocator) -> (key: string, next_i: int, err: Error) {
 	if start_i + 2 >= len(s) || s[start_i] != '[' {
 		return "", start_i, .Invalid_Range
 	}
@@ -304,13 +378,22 @@ _parse_bracketed_string :: proc(s: string, start_i: int) -> (key: string, next_i
 	}
 	i := start_i + 2
 	key_start := i
+	has_escape := false
 	for i < len(s) && s[i] != quote {
+		if s[i] == '\\' {
+			has_escape = true
+			i += 1
+			if i >= len(s) {
+				return "", start_i, .Invalid_Range
+			}
+		}
 		i += 1
 	}
 	if i + 1 >= len(s) || s[i] != quote || s[i + 1] != ']' {
 		return "", start_i, .Invalid_Range
 	}
-	return s[key_start:i], i + 2, nil
+	parsed := _unescape_quoted_key(s[key_start:i], allocator) if has_escape else s[key_start:i]
+	return parsed, i + 2, nil
 }
 
 // Resolve a `Read_Cursor` by walking `steps` from `start`.
@@ -612,6 +695,7 @@ Tx :: struct {
 	meta:          [dynamic]Tx_Meta_Entry,
 	ops:           [dynamic]Tx_Op,
 	index_rules:   [dynamic]Secondary_Index_Rule,
+	owned_strs:    [dynamic]string,
 	allocator:     runtime.Allocator,
 }
 
@@ -632,6 +716,7 @@ tx_init :: proc(db: ^Database, base_moment: Maybe(i64) = -1, track_changes := fa
 		meta          = make([dynamic]Tx_Meta_Entry, 0, 4, allocator),
 		ops           = make([dynamic]Tx_Op, 0, 8, allocator),
 		index_rules   = make([dynamic]Secondary_Index_Rule, 0, 2, allocator),
+		owned_strs    = make([dynamic]string, 0, 0, allocator),
 		allocator     = allocator,
 	}
 }
@@ -646,6 +731,10 @@ tx_destroy :: proc(tx: ^Tx) {
 			delete(op.from_steps, tx.allocator)
 		}
 	}
+	for s in tx.owned_strs {
+		delete(s, tx.allocator)
+	}
+	delete(tx.owned_strs)
 	delete(tx.meta)
 	delete(tx.ops)
 	delete(tx.index_rules)
@@ -689,6 +778,17 @@ tx_index_on :: proc(tx: ^Tx, source_map_key: string, field_key: string, into_sor
 	})
 }
 
+@(private = "file")
+_tx_parse_steps :: proc(tx: ^Tx, path_str: string) -> (res: []Path_Step, err: Error) {
+	steps := parse_steps(path_str, tx.allocator) or_return
+	for st in steps {
+		if !_is_subslice_of(st.key, path_str) {
+			append(&tx.owned_strs, st.key)
+		}
+	}
+	return steps, nil
+}
+
 tx_put_steps :: proc(tx: ^Tx, steps: []Path_Step, val: Writeable_Data) {
 	cloned := make([]Path_Step, len(steps), tx.allocator)
 	copy(cloned, steps)
@@ -696,7 +796,7 @@ tx_put_steps :: proc(tx: ^Tx, steps: []Path_Step, val: Writeable_Data) {
 }
 
 tx_put :: proc(tx: ^Tx, path_str: string, val: Writeable_Data) -> Error {
-	steps := parse_steps(path_str, tx.allocator) or_return
+	steps := _tx_parse_steps(tx, path_str) or_return
 	append(&tx.ops, Tx_Op{kind = .Put, steps = steps, val = val})
 	return nil
 }
@@ -708,13 +808,13 @@ tx_append_steps :: proc(tx: ^Tx, steps: []Path_Step, val: Writeable_Data) {
 }
 
 tx_append :: proc(tx: ^Tx, path_str: string, val: Writeable_Data) -> Error {
-	steps := parse_steps(path_str, tx.allocator) or_return
+	steps := _tx_parse_steps(tx, path_str) or_return
 	append(&tx.ops, Tx_Op{kind = .Append, steps = steps, val = val})
 	return nil
 }
 
 tx_insert :: proc(tx: ^Tx, path_str: string, index: i64, val: Writeable_Data) -> Error {
-	steps := parse_steps(path_str, tx.allocator) or_return
+	steps := _tx_parse_steps(tx, path_str) or_return
 	append(&tx.ops, Tx_Op{kind = .Insert, steps = steps, offset = index, val = val})
 	return nil
 }
@@ -726,21 +826,25 @@ tx_rm_steps :: proc(tx: ^Tx, steps: []Path_Step) {
 }
 
 tx_rm :: proc(tx: ^Tx, path_str: string) -> Error {
-	steps := parse_steps(path_str, tx.allocator) or_return
+	steps := _tx_parse_steps(tx, path_str) or_return
 	append(&tx.ops, Tx_Op{kind = .Remove, steps = steps})
 	return nil
 }
 
 tx_slice :: proc(tx: ^Tx, path_str: string, size: i64, offset: i64 = 0) -> Error {
-	steps := parse_steps(path_str, tx.allocator) or_return
+	steps := _tx_parse_steps(tx, path_str) or_return
 	append(&tx.ops, Tx_Op{kind = .Slice, steps = steps, offset = offset, size = size})
 	return nil
 }
 
 // Zero-copy collection clone within a transaction with automatic `cursor_freeze` isolation.
 tx_fork :: proc(tx: ^Tx, from_path: string, to_path: string) -> Error {
-	src := parse_steps(from_path, tx.allocator) or_return
-	dst := parse_steps(to_path, tx.allocator) or_return
+	src := _tx_parse_steps(tx, from_path) or_return
+	dst, dst_err := _tx_parse_steps(tx, to_path)
+	if dst_err != nil {
+		delete(src, tx.allocator)
+		return dst_err
+	}
 	append(&tx.ops, Tx_Op{kind = .Fork, from_steps = src, steps = dst})
 	return nil
 }
@@ -1039,10 +1143,15 @@ tx_commit :: proc(tx: ^Tx) -> (report: Tx_Report, err: Error) {
 
 	ectx := _Tx_Exec_Ctx{
 		tx       = tx,
-		recorded = make([dynamic]Tx_Change, 0, len(tx.ops), tx.allocator),
+		recorded = make([dynamic]Tx_Change, 0, len(tx.ops) if tx.track_changes else 0, tx.allocator),
 	}
 	defer if err != nil {
-		diff_changes_destroy(ectx.recorded[:], tx.allocator)
+		for chg in ectx.recorded {
+			if len(chg.path_str) > 0 {
+				delete(chg.path_str, tx.allocator)
+			}
+		}
+		delete(ectx.recorded)
 	}
 
 	if bm, has_bm := tx.base_moment.?; has_bm && hist_count > 0 {
@@ -1847,6 +1956,13 @@ _eval_pull_spec :: proc(cursor: Read_Cursor, spec: string, visited: ^map[i64]boo
 
 @(private = "file")
 _pull_range :: proc(cursor: Read_Cursor, start_idx, end_idx: i64, sub_pattern: string, visited: ^map[i64]bool, allocator: runtime.Allocator) -> (res: Pull_Value, err: Error) {
+	if start_idx < 0 {
+		return nil, .Invalid_Range
+	}
+	if end_idx <= start_idx {
+		return Pull_List(make([]Pull_Value, 0, allocator)), nil
+	}
+
 	slot := cursor_slot(cursor) or_return
 	it: Cursor_Iterator
 	#partial switch slot.tag {
@@ -1860,9 +1976,9 @@ _pull_range :: proc(cursor: Read_Cursor, start_idx, end_idx: i64, sub_pattern: s
 		return nil, .Unexpected_Tag
 	}
 
-	limit := end_idx - start_idx
-	items := make([dynamic]Pull_Value, 0, max(0, int(limit)), allocator)
-	for i: i64 = 0; i < limit; i += 1 {
+	limit := u64(end_idx) - u64(start_idx)
+	items := make([dynamic]Pull_Value, 0, int(min(limit, u64(64))), allocator)
+	for count: u64 = 0; count < limit; count += 1 {
 		c_maybe := cursor_iterator_next(&it) or_return
 		c, ok := c_maybe.?
 		if !ok {
@@ -2090,7 +2206,8 @@ _diff_recursive :: proc(
 		for i: i64 = 0; i < cnt_b; i += 1 {
 			step := ll(i) if is_linked else al(i)
 			eb_maybe := read_steps_cursor(cur_b, []Path_Step{step}) or_return
-			eb_slot := cursor_slot(eb_maybe.?) or_return
+			eb_cur := eb_maybe.? or_else empty_cur
+			eb_slot := cursor_slot(eb_cur) or_return
 			child_path := fmt.aprintf(is_linked ? "%s[[%d]]" : "%s[%d]", prefix, i, allocator = allocator)
 			append(changes, Tx_Change{op = .Append, path_str = child_path, old_slot = Slot{}, new_slot = eb_slot})
 		}
@@ -2197,14 +2314,17 @@ _diff_recursive :: proc(
 				step := ll(i) if is_linked else al(i)
 				ea_maybe := read_steps_cursor(cur_a, []Path_Step{step}) or_return
 				eb_maybe := read_steps_cursor(cur_b, []Path_Step{step}) or_return
+				ea_cur := ea_maybe.? or_else empty_cur
+				eb_cur := eb_maybe.? or_else empty_cur
 				sub_prefix := fmt.aprintf(is_linked ? "%s[[%d]]" : "%s[%d]", prefix, i, allocator = context.temp_allocator)
-				_diff_recursive(ea_maybe.?, eb_maybe.?, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
+				_diff_recursive(ea_cur, eb_cur, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
 			}
 			if cnt_b > cnt_a {
 				for i := cnt_a; i < cnt_b; i += 1 {
 					step := ll(i) if is_linked else al(i)
 					eb_maybe := read_steps_cursor(cur_b, []Path_Step{step}) or_return
-					eb_slot := cursor_slot(eb_maybe.?) or_return
+					eb_cur := eb_maybe.? or_else empty_cur
+					eb_slot := cursor_slot(eb_cur) or_return
 					child_path := fmt.aprintf(is_linked ? "%s[[%d]]" : "%s[%d]", prefix, i, allocator = allocator)
 					append(changes, Tx_Change{op = .Append, path_str = child_path, old_slot = Slot{}, new_slot = eb_slot})
 				}
@@ -2479,7 +2599,7 @@ parse_datalog :: proc(query_str: string, allocator := context.temp_allocator) ->
 	q = datalog_query_init(allocator)
 	s := strings.trim_space(query_str)
 	where_idx := strings.index(s, "where")
-	if !strings.has_prefix(s, "where") && (!strings.has_prefix(s, "find ") || where_idx < 0) {
+	if !strings.has_prefix(s, "find ") || where_idx < len("find ") {
 		return {}, .Invalid_Range
 	}
 
@@ -2654,7 +2774,10 @@ _parse_datalog_find_item :: proc(q: ^Datalog_Query, token: string) -> (item: Dat
 }
 
 @(private = "file")
-_parse_datalog_clause :: proc(q: ^Datalog_Query, line: string, allocator: runtime.Allocator) -> (clause: Datalog_Clause, err: Error) {
+_parse_datalog_clause :: proc(q: ^Datalog_Query, line: string, allocator: runtime.Allocator, depth: int = 0) -> (clause: Datalog_Clause, err: Error) {
+	if depth > 16 {
+		return {}, .Invalid_Range
+	}
 	s := strings.trim_space(line)
 	is_negated := false
 	if strings.has_prefix(s, "not ") {
@@ -2684,7 +2807,7 @@ _parse_datalog_clause :: proc(q: ^Datalog_Query, line: string, allocator: runtim
 			edge_str = args[3]
 		}
 		edge_clause := new(Datalog_Clause, allocator)
-		edge_clause^ = _parse_datalog_clause(q, edge_str, allocator) or_return
+		edge_clause^ = _parse_datalog_clause(q, edge_str, allocator, depth + 1) or_return
 		return Datalog_Clause{
 			kind            = .Reach,
 			reach_from_var  = from_var,
@@ -2928,7 +3051,7 @@ _parse_datalog_steps :: proc(q: ^Datalog_Query, path_str: string, allocator: run
 				kind = .Sorted_Set_Member
 			}
 			i += 1
-			step, next_i := _parse_datalog_key_or_var(q, s, i, kind) or_return
+			step, next_i := _parse_datalog_key_or_var(q, s, i, kind, allocator) or_return
 			append(&steps, step)
 			i = next_i
 
@@ -2956,7 +3079,7 @@ _parse_datalog_steps :: proc(q: ^Datalog_Query, path_str: string, allocator: run
 				}
 				i += 2
 			} else if i + 1 < len(s) && (s[i + 1] == '"' || s[i + 1] == '\'') {
-				key, next_i := _parse_bracketed_string(s, i) or_return
+				key, next_i := _parse_bracketed_string(s, i, allocator) or_return
 				append(&steps, Datalog_Step{kind = .Hash_Map_Key, is_var = false, lit_key = key})
 				i = next_i
 			} else {
@@ -2984,7 +3107,7 @@ _parse_datalog_steps :: proc(q: ^Datalog_Query, path_str: string, allocator: run
 			}
 
 		case:
-			step, next_i := _parse_datalog_key_or_var(q, s, i, .Hash_Map_Key) or_return
+			step, next_i := _parse_datalog_key_or_var(q, s, i, .Hash_Map_Key, allocator) or_return
 			append(&steps, step)
 			i = next_i
 		}
@@ -2994,7 +3117,7 @@ _parse_datalog_steps :: proc(q: ^Datalog_Query, path_str: string, allocator: run
 }
 
 @(private = "file")
-_parse_datalog_key_or_var :: proc(q: ^Datalog_Query, s: string, start_i: int, kind: Step_Kind) -> (step: Datalog_Step, next_i: int, err: Error) {
+_parse_datalog_key_or_var :: proc(q: ^Datalog_Query, s: string, start_i: int, kind: Step_Kind, allocator: runtime.Allocator) -> (step: Datalog_Step, next_i: int, err: Error) {
 	if start_i >= len(s) {
 		return {}, start_i, .Invalid_Range
 	}
@@ -3011,7 +3134,7 @@ _parse_datalog_key_or_var :: proc(q: ^Datalog_Query, s: string, start_i: int, ki
 			v_idx := _intern_datalog_var(q, vname) or_return
 			return Datalog_Step{kind = kind, is_var = true, var_idx = v_idx}, end_b + 1, nil
 		}
-		key, ni := _parse_bracketed_string(s, start_i) or_return
+		key, ni := _parse_bracketed_string(s, start_i, allocator) or_return
 		return Datalog_Step{kind = kind, is_var = false, lit_key = key}, ni, nil
 	}
 	if s[start_i] == '?' {
@@ -3026,7 +3149,7 @@ _parse_datalog_key_or_var :: proc(q: ^Datalog_Query, s: string, start_i: int, ki
 		v_idx := _intern_datalog_var(q, s[start_i:i]) or_return
 		return Datalog_Step{kind = kind, is_var = true, var_idx = v_idx}, i, nil
 	}
-	key, ni := _parse_step_ident_or_bracket(s, start_i) or_return
+	key, ni := _parse_step_ident_or_bracket(s, start_i, allocator) or_return
 	return Datalog_Step{kind = kind, is_var = false, lit_key = key}, ni, nil
 }
 

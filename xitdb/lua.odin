@@ -2020,7 +2020,16 @@ _l_db_compact :: proc "c" (L: ^lua.State) -> c.int {
 	}
 	if var_target_h == nil {
 		var_target_h = new(Lua_Db_Handle, context.allocator)
-		var_target_h.core = core_memory_init(context.allocator)
+		if src_mem, is_mem := src_db.core.(Core_Memory); is_mem && src_mem.vmem_reserved == 0 {
+			var_target_h.core = core_memory_init(context.allocator, reserve_size = 0)
+			if max_sz, has_max := src_mem.max_size.?; has_max {
+				if cm, ok_cm := &var_target_h.core.(Core_Memory); ok_cm {
+					cm.max_size = max_sz
+				}
+			}
+		} else {
+			var_target_h.core = core_memory_init(context.allocator)
+		}
 		var_target_h.owns_core = true
 		ud := (^Lua_Db_UD)(lua.newuserdatauv(L, size_of(Lua_Db_UD), 0))
 		ud^ = Lua_Db_UD{
@@ -2048,8 +2057,8 @@ _l_db_compact :: proc "c" (L: ^lua.State) -> c.int {
 		comp_db, err = database_compact(src_db, target_core, &om_ud.om)
 	} else {
 		temp_om: Offset_Map = memory_offset_map_init(context.temp_allocator)
-		defer offset_map_destroy(&temp_om)
 		comp_db, err = database_compact(src_db, target_core, &temp_om)
+		offset_map_destroy(&temp_om)
 	}
 	if err != nil {
 		return _raise_err(L, err, "db:compact")
@@ -2791,32 +2800,35 @@ _l_tx_commit :: proc "c" (L: ^lua.State) -> c.int {
 	if ud.committed {
 		return _raise_msg(L, "tx:commit called on already-committed Tx")
 	}
-	// Release any Lua function references registered via `with_cursor` after commit
-	defer {
+	rep, err := tx_commit(&ud.tx)
+	if err != nil {
+		cb_err_msg: string
 		for op in ud.tx.ops {
 			if op.kind == .Callback && op.user_data != nil {
 				cb := (^_Tx_Lua_Callback)(op.user_data)
+				if len(cb_err_msg) == 0 && len(cb.err_msg) > 0 {
+					cb_err_msg = cb.err_msg
+				}
 				lua.L_unref(L, lua.REGISTRYINDEX, cb.fn_ref)
 			}
 		}
+		tx_report_destroy(&rep, ud.tx.allocator)
 		_tx_cleanup(ud)
-	}
-
-	rep, err := tx_commit(&ud.tx)
-	defer tx_report_destroy(&rep, ud.tx.allocator)
-	if err != nil {
-		for op in ud.tx.ops {
-			if op.kind == .Callback && op.user_data != nil {
-				cb := (^_Tx_Lua_Callback)(op.user_data)
-				if len(cb.err_msg) > 0 {
-					return _raise_msg(L, cb.err_msg)
-				}
-			}
+		if len(cb_err_msg) > 0 {
+			return _raise_msg(L, cb_err_msg)
 		}
 		return _raise_err(L, err, "tx:commit")
 	}
+	for op in ud.tx.ops {
+		if op.kind == .Callback && op.user_data != nil {
+			cb := (^_Tx_Lua_Callback)(op.user_data)
+			lua.L_unref(L, lua.REGISTRYINDEX, cb.fn_ref)
+		}
+	}
+	_tx_cleanup(ud)
 	ud.committed = true
 	_push_tx_report(L, rep)
+	tx_report_destroy(&rep, ud.tx.allocator)
 	return 1
 }
 

@@ -1167,6 +1167,7 @@ driver_verify_expired_and_nested_transaction_guards :: proc(ctx: ^Suite_Ctx) {
 		ctx:            ^Suite_Ctx,
 		history:        ^xitdb.Write_Array_List,
 		escaped_map:    xitdb.Write_Hash_Map,
+		escaped_cursor: xitdb.Write_Cursor,
 		escaped_writer: xitdb.Cursor_Writer,
 	}
 	st := Guard_State{ctx = ctx, history = &history}
@@ -1178,8 +1179,8 @@ driver_verify_expired_and_nested_transaction_guards :: proc(ctx: ^Suite_Ctx) {
 		xitdb.hash_map_put(&m, "v", i64(1)) or_return
 		s.escaped_map = m
 
-		bc := xitdb.hash_map_put_cursor(&m, "bytes") or_return
-		w := xitdb.cursor_writer(&bc) or_return
+		s.escaped_cursor = xitdb.hash_map_put_cursor(&m, "bytes") or_return
+		w := xitdb.cursor_writer(&s.escaped_cursor) or_return
 		_, _ = xitdb.cursor_writer_write(&w, []u8{1, 2, 3, 4})
 		xitdb.cursor_writer_finish(&w) or_return
 		s.escaped_writer = w

@@ -320,7 +320,14 @@ _compactor_remap_bytes :: proc(c: ^_Compactor, slot: Slot) -> (res: i64, err: Er
 		return mapped, nil
 	}
 	length := core_read_long_at(c.source_core, slot.value) or_return
+	if length < 0 {
+		return 0, .Expected_Unsigned_Long
+	}
 	format_tag_size: i64 = 2 if slot.full else 0
+	src_len := core_length(c.source_core) or_return
+	if slot.value > src_len || 8 + format_tag_size > src_len - slot.value || length > src_len - slot.value - 8 - format_tag_size {
+		return 0, Xitdb_Error.Unexpected_EOF
+	}
 	total_payload := length + format_tag_size
 
 	new_offset := core_length(c.target_core) or_return

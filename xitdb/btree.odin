@@ -106,7 +106,12 @@ descend_by_rank :: proc(db: ^Database, root_ptr, rank: i64, $BRANCH_BLOCK_SIZE: 
 	node_ptr := root_ptr
 	rem := rank
 	buf: [BRANCH_BLOCK_SIZE]u8 = ---
+	depth := 0
 	for {
+		if depth >= ITERATOR_STACK_SIZE * 2 {
+			return {}, .Max_Shift_Exceeded
+		}
+		depth += 1
 		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
 		if len(block) < BTREE_LEAF_BLOCK_SIZE {
 			return {}, Xitdb_Error.Unexpected_EOF
@@ -116,12 +121,12 @@ descend_by_rank :: proc(db: ^Database, root_ptr, rank: i64, $BRANCH_BLOCK_SIZE: 
 			return {}, .Invalid_BTree_Node_Kind
 		}
 		num := int(block[1])
-		if num > BTREE_SLOT_COUNT {
+		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
 			return {}, .Invalid_BTree_Node
 		}
 		body := block[BTREE_NODE_HEADER_SIZE:]
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			if rem >= i64(num) {
+			if rem < 0 || rem >= i64(num) {
 				return {}, .Invalid_BTree_Node
 			}
 			slot_off := int(rem) * SLOT_LENGTH
@@ -717,6 +722,9 @@ btree_height :: proc(db: ^Database, root_ptr: i64) -> (res: int, err: Error) {
 	ptr := root_ptr
 	height := 0
 	for {
+		if height >= ITERATOR_STACK_SIZE * 2 {
+			return 0, .Max_Shift_Exceeded
+		}
 		buf: [BTREE_NODE_HEADER_SIZE + SLOT_LENGTH]u8
 		core_read_exact_at(db.core, ptr, buf[:]) or_return
 		kind_int := buf[0]
@@ -725,6 +733,9 @@ btree_height :: proc(db: ^Database, root_ptr: i64) -> (res: int, err: Error) {
 		}
 		if BTree_Node_Kind(kind_int) == .Leaf {
 			return height, nil
+		}
+		if buf[1] == 0 {
+			return 0, .Invalid_BTree_Node
 		}
 		height += 1
 		child_slot := slot_from_slice(buf[BTREE_NODE_HEADER_SIZE:]) or_return
@@ -1134,22 +1145,23 @@ compare_key :: proc(db: ^Database, key_slot: Slot, target: []u8) -> (res: int, e
 	case .Bytes:
 		#partial switch &v in db.core {
 		case Core_Memory:
+			buf_len := i64(len(v.buf))
+			if key_slot.value < 0 || key_slot.value > buf_len || 8 > buf_len - key_slot.value {
+				return 0, Xitdb_Error.Unexpected_EOF
+			}
 			p := int(key_slot.value)
-			if p < 0 || p + 8 > len(v.buf) {
+			raw_len := i64(endian.unchecked_get_u64be(v.buf[p : p + 8]))
+			if raw_len < 0 || raw_len > buf_len - key_slot.value - 8 {
 				return 0, Xitdb_Error.Unexpected_EOF
 			}
-			length := int(endian.unchecked_get_u64be(v.buf[p : p + 8]))
-			if length < 0 || p + 8 + length > len(v.buf) {
-				return 0, Xitdb_Error.Unexpected_EOF
-			}
-			return bytes.compare(v.buf[p + 8 : p + 8 + length], target), nil
+			return bytes.compare(v.buf[p + 8 : p + 8 + int(raw_len)], target), nil
 		case Core_Buffered_File:
 			buf_len := i64(len(v.memory.buf))
-			if buf_len > 0 && key_slot.value >= v.memory_pos && key_slot.value + 8 <= v.memory_pos + buf_len {
+			if buf_len > 0 && key_slot.value >= v.memory_pos && key_slot.value <= v.memory_pos + buf_len && 8 <= (v.memory_pos + buf_len) - key_slot.value {
 				mem_off := int(key_slot.value - v.memory_pos)
-				length := int(endian.unchecked_get_u64be(v.memory.buf[mem_off : mem_off + 8]))
-				if length >= 0 && mem_off + 8 + length <= int(buf_len) {
-					return bytes.compare(v.memory.buf[mem_off + 8 : mem_off + 8 + length], target), nil
+				raw_len := i64(endian.unchecked_get_u64be(v.memory.buf[mem_off : mem_off + 8]))
+				if raw_len >= 0 && raw_len <= (v.memory_pos + buf_len) - key_slot.value - 8 {
+					return bytes.compare(v.memory.buf[mem_off + 8 : mem_off + 8 + int(raw_len)], target), nil
 				}
 			}
 		}
@@ -1158,10 +1170,15 @@ compare_key :: proc(db: ^Database, key_slot: Slot, target: []u8) -> (res: int, e
 		if len(first) < 8 {
 			return 0, Xitdb_Error.Unexpected_EOF
 		}
-		stored_len := int(endian.unchecked_get_u64be(first[:8]))
-		if stored_len < 0 {
+		raw_stored_len := i64(endian.unchecked_get_u64be(first[:8]))
+		if raw_stored_len < 0 {
 			return 0, Xitdb_Error.Unexpected_EOF
 		}
+		core_len := core_length(db.core) or_return
+		if key_slot.value > core_len || 8 > core_len - key_slot.value || raw_stored_len > core_len - key_slot.value - 8 {
+			return 0, Xitdb_Error.Unexpected_EOF
+		}
+		stored_len := int(raw_stored_len)
 		avail := len(first) - 8
 		if avail < min(stored_len, len(first_buf) - 8) {
 			return 0, Xitdb_Error.Unexpected_EOF
@@ -1235,7 +1252,12 @@ sorted_branch_search :: proc(db: ^Database, node: ^Sorted_Node, key: []u8) -> (i
 sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Slot), err: Error) {
 	node_ptr := root_ptr
 	buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
+	depth := 0
 	for {
+		if depth >= ITERATOR_STACK_SIZE * 2 {
+			return nil, .Max_Shift_Exceeded
+		}
+		depth += 1
 		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
 		if len(block) < SORTED_LEAF_BLOCK_SIZE {
 			return nil, Xitdb_Error.Unexpected_EOF
@@ -1245,7 +1267,7 @@ sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Slot)
 			return nil, .Invalid_BTree_Node_Kind
 		}
 		num := int(block[1])
-		if num > BTREE_SLOT_COUNT {
+		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
 			return nil, .Invalid_BTree_Node
 		}
 		body := block[BTREE_NODE_HEADER_SIZE:]
@@ -1293,7 +1315,12 @@ sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: 
 	node_ptr := root_ptr
 	rank: i64 = 0
 	buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
+	depth := 0
 	for {
+		if depth >= ITERATOR_STACK_SIZE * 2 {
+			return 0, .Max_Shift_Exceeded
+		}
+		depth += 1
 		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
 		if len(block) < SORTED_LEAF_BLOCK_SIZE {
 			return 0, Xitdb_Error.Unexpected_EOF
@@ -1303,7 +1330,7 @@ sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: 
 			return 0, .Invalid_BTree_Node_Kind
 		}
 		num := int(block[1])
-		if num > BTREE_SLOT_COUNT {
+		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
 			return 0, .Invalid_BTree_Node
 		}
 		body := block[BTREE_NODE_HEADER_SIZE:]
