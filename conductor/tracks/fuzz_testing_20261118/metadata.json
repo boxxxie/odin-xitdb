@@ -1,0 +1,8 @@
+{
+  "track_id": "fuzz_testing_20261118",
+  "type": "chore",
+  "status": "new",
+  "created_at": "2026-11-18T13:22:00+08:00",
+  "updated_at": "2026-11-18T13:22:00+08:00",
+  "description": "Combined libFuzzer + ASan coverage-guided fuzzing (LLVM IR) and deterministic differential simulation testing for xitdb-odin"
+}

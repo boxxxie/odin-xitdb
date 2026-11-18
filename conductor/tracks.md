@@ -16,3 +16,8 @@ This file tracks all major tracks for the `xitdb-odin` project. Each track has i
 
 - [x] **Track: Native Reverse & Upper-Bound Range Iterators for B-Tree, B+Tree, and Radix-Trie Collections (`cursor_iterator_reverse`, `cursor_iterator_prev`, `sorted_map_iterator_reverse_from`)**
   *Link: [./tracks/reverse_iterators_20261106/](./tracks/reverse_iterators_20261106/)*
+
+---
+
+- [ ] **Track: Combined `libFuzzer` + ASan Coverage-Guided Fuzzing & Deterministic Differential Simulation Testing (`fuzz_testing_20261118`)**
+  *Link: [./tracks/fuzz_testing_20261118/](./tracks/fuzz_testing_20261118/)*
