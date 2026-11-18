@@ -32,13 +32,16 @@ Following Dave Farley's Acceptance Testing architecture, the test suite is stric
 
 ```text
 tests/
-├── spec_xitdb.odin          # Layer 1: Core Executable Specifications (What the system does)
-├── spec_dsl_xitdb.odin      # Layer 1: 5-Layer DSL & Datalog Executable Specifications
-├── unit_user_dsl.odin       # Direct Unit & Integration Tests for the User DSL (`xitdb/dsl.odin`)
-├── dsl_xitdb.odin           # Layer 2: Domain-Specific Language (Given / Upon / Then steps)
-├── driver_xitdb.odin        # Layer 3: Protocol Drivers (How xitdb APIs & cursors are invoked)
+├── spec_xitdb.odin             # Layer 1: Core Executable Specifications (What the system does)
+├── spec_dsl_xitdb.odin         # Layer 1: 5-Layer DSL & Datalog Executable Specifications
+├── unit_user_dsl.odin          # Direct Unit & Integration Tests for the User DSL (`xitdb/dsl.odin`)
+├── unit_lua.odin               # Unit Tests for the LuaJIT bridge (`xitdb/lua.odin`)
+├── unit_fuzz_regressions.odin  # Deterministic regressions promoted from libFuzzer & simulation runs
+├── fuzz_sim_xitdb.odin         # Seeded PRNG differential simulation against pure-Odin models
+├── dsl_xitdb.odin              # Layer 2: Domain-Specific Language (Given / Upon / Then steps)
+├── driver_xitdb.odin           # Layer 3: Protocol Drivers (How xitdb APIs & cursors are invoked)
 └── testdata/
-    └── test.db              # Upstream v1 reference database fixture for cross-language parity
+    └── test.db                 # Upstream v1 reference database fixture for cross-language parity
 ```
 
 ### Layer 1: Executable Specifications (`spec_xitdb.odin`)
@@ -76,6 +79,30 @@ tests/
 | **Lock-Free Concurrency & Virtual Memory (`core_read_at` & `vmem.reserve`)** | `spec_lock_free_concurrent_cursors_and_resumable_iterators`, `spec_virtual_memory_base_pointer_stability_under_concurrent_appends`, `spec_concurrent_compaction_and_replication_with_parallel_readers`, `spec_concurrent_dsl_selectors_pull_diff_and_datalog_queries`, `spec_virtual_memory_reservation_cap_shrink_regrow_and_init_from_bytes`. |
 | **5-Layer DSL & Datalog Engine** | `spec_datomic_tx_metadata_path_selectors_and_temporal_history`, `spec_struct_marshal_unmarshal_and_datomic_pull_projection`, `spec_datalog_unification_across_btree_indexes_hash_maps_and_negated_sets`, `spec_temporal_datalog_unification_across_moments_and_tx_metadata`, `spec_datalog_grouped_and_global_aggregations`, `spec_datalog_transitive_reach_and_cycle_safe_graph_traversal`, `spec_dsl_error_guards_savepoint_survival_and_counted_collections`. |
 | **User DSL Direct Unit Tests (`unit_user_dsl.odin`)** | `unit_user_dsl_selector_sigils_combinators_and_nested_resolution`, `unit_user_dsl_tx_wants_tx_meta_gating_fork_and_savepoint`, `unit_user_dsl_transact_script_literals_and_ops`, `unit_user_dsl_marshal_unmarshal_types_and_pull_ranges`, `unit_user_dsl_diff_moments_history_of_and_btree_queries`, `unit_user_dsl_datalog_predicates_pushdown_aggregations_and_reach`, `unit_user_dsl_secondary_index_stale_key_eviction_and_heap_allocator_cleanup`. |
+| **Fuzzing & Differential Simulation (`fuzz_sim_xitdb.odin`, `unit_fuzz_regressions.odin`)** | `fuzz_sim_differential_collections_iterators_overlay_and_compaction`, `fuzz_sim_multi_seed_sha256_and_branching_histories`, `unit_fuzz_regression_dsl_selector_roundtrip_escaping`, `unit_fuzz_regression_datalog_leading_where_and_deep_reach_no_panic`, `unit_fuzz_regression_dsl_pull_huge_range_no_oom`, `unit_fuzz_regression_tx_invalid_selector_and_escaped_keys_zero_leaks`, `unit_fuzz_regression_wire_corrupt_bytes_length_and_cyclic_nodes_no_oom`. |
+
+---
+
+## Fuzzing & Differential Simulation
+
+Two complementary fuzzing layers cover `xitdb`:
+
+1. **Deterministic Differential Simulation (`tests/fuzz_sim_xitdb.odin`):**
+   * Runs fast smoke seeds inside default `odin test tests`.
+   * Scale up operation counts or pin a specific seed under AddressSanitizer:
+     ```bash
+     odin test tests -sanitize:address -define:ODIN_FUZZ_OPS=2000
+     odin test tests -sanitize:address -define:ODIN_FUZZ_SEED=42 -define:ODIN_FUZZ_OPS=2000
+     ```
+
+2. **Coverage-Guided `libFuzzer` + ASan / LSan Harnesses (`fuzz/`):**
+   * Builds Odin targets via `-build-mode:llvm-ir` and links with `clang -fsanitize=fuzzer,address` (writing binaries, corpora, and crash artifacts under git-ignored `.tmp/fuzz/`; run from the repository root):
+     ```bash
+     ./fuzz/run.sh all -runs=2000          # smoke check all targets
+     ./fuzz/run.sh dsl -max_total_time=30   # fuzz selectors, Datalog, Pull, and transact_script
+     ./fuzz/run.sh wire -max_total_time=30  # fuzz corrupted .xit wire blobs & compaction
+     ./fuzz/run.sh lua -max_total_time=30   # fuzz sandboxed LuaJIT bridge + leak detection
+     ```
 
 ---
 

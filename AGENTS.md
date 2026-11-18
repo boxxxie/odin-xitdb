@@ -18,7 +18,8 @@ This document provides repository architecture, build/test commands, and develop
   * **`dsl.odin`**: 5-layer DSL (Selectors, Datomic `Tx` & `transact_script`, `marshal`/`unmarshal`/`pull`, `diff_moments`/`history_of`, and Datalog engine).
   * **`lua.odin` & `luajit/luajit.odin`**: Embedded LuaJIT 2.1 (`system:luajit-5.1`) userdata bindings, 5-layer DSL Lua bridge, and `\x1bLJ` bytecode compilation/storage.
 * **`cmd/xit/main.odin`** — Standalone CLI and interactive REPL binary.
-* **`tests/`** — 3-layer ATDD executable specification and unit test suite (`package xitdb_tests`).
+* **`tests/`** — 3-layer ATDD executable specification, unit test, differential simulation (`fuzz_sim_xitdb.odin`), and fuzz regression (`unit_fuzz_regressions.odin`) suite (`package xitdb_tests`).
+* **`fuzz/`** — `libFuzzer` + AddressSanitizer/LeakSanitizer harnesses (`fuzz_dsl.odin`, `fuzz_wire.odin`, `fuzz_lua.odin`), curated seed corpora/dictionaries, and the LLVM-IR build/run driver ([`fuzz/run.sh`](fuzz/run.sh)).
 
 ---
 
@@ -26,17 +27,23 @@ This document provides repository architecture, build/test commands, and develop
 
 ```bash
 # 1. Typecheck library, CLI, and test packages
-odin check xitdb
-odin check cmd/xit
-odin check tests
+odin check xitdb/luajit -no-entry-point
+odin check xitdb -no-entry-point -vet -warnings-as-errors
+odin check cmd/xit -vet -warnings-as-errors
+odin check tests -no-entry-point -warnings-as-errors
 
-# 2. Run the full ATDD specification and unit test suite
+# 2. Run the full ATDD specification, unit, and default differential simulation suite
 odin test tests
 
 # 3. Run a single test by name
 odin test tests -define:ODIN_TEST_NAMES=xitdb_tests.spec_reference_database_wire_compatibility
 
-# 4. Build and run the CLI / interactive REPL
+# 4. Run deep ASan differential simulation & coverage-guided libFuzzer harnesses
+odin test tests -sanitize:address -define:ODIN_FUZZ_OPS=2000
+./fuzz/run.sh all -runs=2000
+./fuzz/run.sh dsl -max_total_time=30
+
+# 5. Build and run the CLI / interactive REPL
 odin build cmd/xit -out:xit -o:speed
 ./xit --memory
 ```

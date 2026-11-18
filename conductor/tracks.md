@@ -19,5 +19,5 @@ This file tracks all major tracks for the `xitdb-odin` project. Each track has i
 
 ---
 
-- [ ] **Track: Combined `libFuzzer` + ASan Coverage-Guided Fuzzing & Deterministic Differential Simulation Testing (`fuzz_testing_20261118`)**
+- [~] **Track: Combined `libFuzzer` + ASan Coverage-Guided Fuzzing & Deterministic Differential Simulation Testing (`fuzz_testing_20261118`)**
   *Link: [./tracks/fuzz_testing_20261118/](./tracks/fuzz_testing_20261118/)*
