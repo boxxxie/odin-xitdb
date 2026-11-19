@@ -1,6 +1,6 @@
 # #22. `Linked_Array_List (B-Tree) iterator scan` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 02: LinkedArrayList Batch Node I/O & Direct Leaf Seek**](../zig-guide/02_btree_node_batch_io_and_leaf_seek.md) · [Odin Harness (`bench_xitdb.odin#L985-L1002`)](../bench_xitdb.odin#L985-L1002) · [Zig Harness (`bench_xitdb.zig#L1004-L1018`)](../bench_xitdb.zig#L1004-L1018)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 02: LinkedArrayList Batch Node I/O & Direct Leaf Seek**](../zig-guide/02_btree_node_batch_io_and_leaf_seek.md) · [Odin Harness (`bench_xitdb.odin#L1015-L1032`)](../bench_xitdb.odin#L1015-L1032) · [Zig Harness (`bench_xitdb.zig#L1004-L1018`)](../bench_xitdb.zig#L1004-L1018)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -30,27 +30,27 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L985-L1002`](../bench_xitdb.odin#L985-L1002))
+### Odin ([`benchmarks/bench_xitdb.odin#L1015-L1032`](../bench_xitdb.odin#L1015-L1032))
 
 ```odin
- 985 | 		t2 := time.now()
- 986 | 		it, _ := xitdb.linked_array_list_iterator(rlist)
- 987 | 		cnt := 0
- 988 | 		for {
- 989 | 			c_maybe, _ := xitdb.cursor_iterator_next(&it)
- 990 | 			c, ok := c_maybe.?
- 991 | 			if !ok do break
- 992 | 			_, _ = xitdb.cursor_read_uint(c)
- 993 | 			cnt += 1
- 994 | 		}
- 995 | 		assert(cnt == n)
- 996 | 		elapsed_iter := time.since(t2)
- 997 | 
- 998 | 		print_result(Bench_Result{
- 999 | 			name    = "Linked_Array_List (B-Tree) iterator scan",
-1000 | 			ops     = n,
-1001 | 			elapsed = elapsed_iter,
-1002 | 		})
+1015 | 		t2 := time.now()
+1016 | 		it, _ := xitdb.linked_array_list_iterator(rlist)
+1017 | 		cnt := 0
+1018 | 		for {
+1019 | 			c_maybe, _ := xitdb.cursor_iterator_next(&it)
+1020 | 			c, ok := c_maybe.?
+1021 | 			if !ok do break
+1022 | 			_, _ = xitdb.cursor_read_uint(c)
+1023 | 			cnt += 1
+1024 | 		}
+1025 | 		assert(cnt == n)
+1026 | 		elapsed_iter := time.since(t2)
+1027 | 
+1028 | 		print_result(Bench_Result{
+1029 | 			name    = "Linked_Array_List (B-Tree) iterator scan",
+1030 | 			ops     = n,
+1031 | 			elapsed = elapsed_iter,
+1032 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1004-L1018`](../bench_xitdb.zig#L1004-L1018))

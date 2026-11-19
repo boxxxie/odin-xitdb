@@ -1,6 +1,6 @@
 # #29. `Sorted_Map (B+Tree) key lookup` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1162-L1177`)](../bench_xitdb.odin#L1162-L1177) · [Zig Harness (`bench_xitdb.zig#L1176-L1191`)](../bench_xitdb.zig#L1176-L1191)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1192-L1207`)](../bench_xitdb.odin#L1192-L1207) · [Zig Harness (`bench_xitdb.zig#L1176-L1191`)](../bench_xitdb.zig#L1176-L1191)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,25 +31,25 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1162-L1177`](../bench_xitdb.odin#L1162-L1177))
+### Odin ([`benchmarks/bench_xitdb.odin#L1192-L1207`](../bench_xitdb.odin#L1192-L1207))
 
 ```odin
-1162 | 	sm_cur, _ := xitdb.array_list_get_cursor(history, 0)
-1163 | 	sm, _ := xitdb.read_sorted_map_init(sm_cur.?)
-1164 | 
-1165 | 	t1 := time.now()
-1166 | 	for k, idx in keys {
-1167 | 		vc, _ := xitdb.sorted_map_get_cursor(sm, k)
-1168 | 		v, _ := xitdb.cursor_read_uint(vc.?)
-1169 | 		assert(v == u64(idx))
-1170 | 	}
-1171 | 	elapsed_get := time.since(t1)
-1172 | 
-1173 | 	print_result(Bench_Result{
-1174 | 		name    = "Sorted_Map (B+Tree) key lookup",
-1175 | 		ops     = n,
-1176 | 		elapsed = elapsed_get,
-1177 | 	})
+1192 | 	sm_cur, _ := xitdb.array_list_get_cursor(history, 0)
+1193 | 	sm, _ := xitdb.read_sorted_map_init(sm_cur.?)
+1194 | 
+1195 | 	t1 := time.now()
+1196 | 	for k, idx in keys {
+1197 | 		vc, _ := xitdb.sorted_map_get_cursor(sm, k)
+1198 | 		v, _ := xitdb.cursor_read_uint(vc.?)
+1199 | 		assert(v == u64(idx))
+1200 | 	}
+1201 | 	elapsed_get := time.since(t1)
+1202 | 
+1203 | 	print_result(Bench_Result{
+1204 | 		name    = "Sorted_Map (B+Tree) key lookup",
+1205 | 		ops     = n,
+1206 | 		elapsed = elapsed_get,
+1207 | 	})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1176-L1191`](../bench_xitdb.zig#L1176-L1191))
@@ -112,13 +112,13 @@
 | `xitdb/core.odin` | `core_read_slot_raw_at` | `depth 3` (from `read_slot_pointer`, `core_read_slot_at`) | 24 | [`xitdb/core.odin#L1179-L1202`](../../xitdb/core.odin#L1179-L1202) |
 | `xitdb/database.odin` | `_exec_path_part` | `depth 3` (from `read_slot_pointer`) | 743 | [`xitdb/database.odin#L663-L1405`](../../xitdb/database.odin#L663-L1405) |
 | `xitdb/core.odin` | `core_read_exact_at` | `depth 4` (from `_exec_path_part`, `core_read_slot_raw_at`, `core_read_i64_at`) | 46 | [`xitdb/core.odin#L710-L755`](../../xitdb/core.odin#L710-L755) |
+| `xitdb/types.odin` | `array_list_header_from_bytes` | `depth 4` (from `_exec_path_part`) | 9 | [`xitdb/types.odin#L1091-L1099`](../../xitdb/types.odin#L1091-L1099) |
+| `xitdb/types.odin` | `radix_shift` | `depth 4` (from `_exec_path_part`) | 6 | [`xitdb/types.odin#L1475-L1480`](../../xitdb/types.odin#L1475-L1480) |
+| `xitdb/hamt.odin` | `read_array_list_slot` | `depth 4` (from `_exec_path_part`) | 67 | [`xitdb/hamt.odin#L382-L448`](../../xitdb/hamt.odin#L382-L448) |
 | `xitdb/types.odin` | `btree_header_from_bytes` | `depth 4` (from `_exec_path_part`) | 9 | [`xitdb/types.odin#L1114-L1122`](../../xitdb/types.odin#L1114-L1122) |
 | `xitdb/btree.odin` | `sorted_get` | `depth 4` (from `_exec_path_part`) | 61 | [`xitdb/btree.odin#L1315-L1375`](../../xitdb/btree.odin#L1315-L1375) |
 | `xitdb/btree.odin` | `sorted_target_slot` | `depth 4` (from `_exec_path_part`) | 17 | [`xitdb/btree.odin#L2087-L2103`](../../xitdb/btree.odin#L2087-L2103) |
 | `xitdb/types.odin` | `btree_header_to_bytes` | `depth 4` (from `_exec_path_part`) | 6 | [`xitdb/types.odin#L1107-L1112`](../../xitdb/types.odin#L1107-L1112) |
-| `xitdb/types.odin` | `array_list_header_from_bytes` | `depth 4` (from `_exec_path_part`) | 9 | [`xitdb/types.odin#L1091-L1099`](../../xitdb/types.odin#L1091-L1099) |
-| `xitdb/types.odin` | `radix_shift` | `depth 4` (from `_exec_path_part`) | 6 | [`xitdb/types.odin#L1475-L1480`](../../xitdb/types.odin#L1475-L1480) |
-| `xitdb/hamt.odin` | `read_array_list_slot` | `depth 4` (from `_exec_path_part`) | 67 | [`xitdb/hamt.odin#L382-L448`](../../xitdb/hamt.odin#L382-L448) |
 | `xitdb/database.odin` | `database_file_size_start` | `depth 3` (from `database_read_root_header`) | 3 | [`xitdb/database.odin#L404-L406`](../../xitdb/database.odin#L404-L406) |
 | `xitdb/core.odin` | `core_read_i64_at` | `depth 3` (from `database_read_root_header`) | 24 | [`xitdb/core.odin#L1146-L1169`](../../xitdb/core.odin#L1146-L1169) |
 | `xitdb/core.odin` | `core_length` | `depth 3` (from `database_read_root_header`, `read_array_list_slot`, `compare_key`) | 23 | [`xitdb/core.odin#L411-L433`](../../xitdb/core.odin#L411-L433) |
@@ -126,17 +126,17 @@
 | `xitdb/types.odin` | `slot_from_slice_raw` | `depth 4` (from `core_read_slot_raw_at`, `slot_from_slice`) | 10 | [`xitdb/types.odin#L895-L904`](../../xitdb/types.odin#L895-L904) |
 | `xitdb/types.odin` | `slot_from_bytes_raw` | `depth 4` (from `core_read_slot_raw_at`, `root_trailer_from_bytes`) | 11 | [`xitdb/types.odin#L883-L893`](../../xitdb/types.odin#L883-L893) |
 | `xitdb/core.odin` | `core_read_at` | `depth 5` (from `core_read_exact_at`, `core_read_short_at`) | 47 | [`xitdb/core.odin#L661-L707`](../../xitdb/core.odin#L661-L707) |
+| `xitdb/core.odin` | `core_read_slot_at` | `depth 5` (from `read_array_list_slot`, `sorted_target_slot`, `sorted_entry_key_slot`) | 5 | [`xitdb/core.odin#L1204-L1208`](../../xitdb/core.odin#L1204-L1208) |
+| `xitdb/types.odin` | `slot_to_bytes` | `depth 5` (from `read_array_list_slot`, `compute_root_trailer_checksum`) | 7 | [`xitdb/types.odin#L874-L880`](../../xitdb/types.odin#L874-L880) |
 | `xitdb/core.odin` | `core_read_block_at` | `depth 5` (from `sorted_get`) | 24 | [`xitdb/core.odin#L808-L831`](../../xitdb/core.odin#L808-L831) |
 | `xitdb/types.odin` | `slot_from_slice` | `depth 5` (from `sorted_get`) | 5 | [`xitdb/types.odin#L912-L916`](../../xitdb/types.odin#L912-L916) |
 | `xitdb/btree.odin` | `sorted_entry_key_slot` | `depth 5` (from `sorted_get`, `sorted_target_slot`) | 6 | [`xitdb/btree.odin#L1180-L1185`](../../xitdb/btree.odin#L1180-L1185) |
 | `xitdb/btree.odin` | `compare_key` | `depth 5` (from `sorted_get`) | 84 | [`xitdb/btree.odin#L1194-L1277`](../../xitdb/btree.odin#L1194-L1277) |
 | `xitdb/types.odin` | `is_key_only_entry` | `depth 5` (from `sorted_target_slot`, `sorted_entry_key_slot`) | 3 | [`xitdb/types.odin#L1388-L1390`](../../xitdb/types.odin#L1388-L1390) |
 | `xitdb/database.odin` | `database_kv_key_offset` | `depth 5` (from `sorted_target_slot`) | 6 | [`xitdb/database.odin#L573-L578`](../../xitdb/database.odin#L573-L578) |
-| `xitdb/core.odin` | `core_read_slot_at` | `depth 5` (from `sorted_target_slot`, `read_array_list_slot`, `sorted_entry_key_slot`) | 5 | [`xitdb/core.odin#L1204-L1208`](../../xitdb/core.odin#L1204-L1208) |
-| `xitdb/types.odin` | `slot_to_bytes` | `depth 5` (from `read_array_list_slot`, `compute_root_trailer_checksum`) | 7 | [`xitdb/types.odin#L874-L880`](../../xitdb/types.odin#L874-L880) |
 | `xitdb/core.odin` | `_overlay_length` | `depth 4` (from `core_length`, `_overlay_read_at`) | 4 | [`xitdb/core.odin#L257-L260`](../../xitdb/core.odin#L257-L260) |
 | `xitdb/types.odin` | `root_trailer_from_bytes` | `depth 4` (from `database_read_root_trailer`) | 13 | [`xitdb/types.odin#L1054-L1066`](../../xitdb/types.odin#L1054-L1066) |
 | `xitdb/types.odin` | `compute_root_trailer_checksum` | `depth 4` (from `database_read_root_trailer`) | 9 | [`xitdb/types.odin#L1027-L1035`](../../xitdb/types.odin#L1027-L1035) |
-| `xitdb/types.odin` | `tag_validate` | `depth 4` (from `database_read_root_trailer`, `slot_from_slice`, `core_read_slot_at`) | 6 | [`xitdb/types.odin#L70-L75`](../../xitdb/types.odin#L70-L75) |
+| `xitdb/types.odin` | `tag_validate` | `depth 4` (from `database_read_root_trailer`, `core_read_slot_at`, `slot_from_slice`) | 6 | [`xitdb/types.odin#L70-L75`](../../xitdb/types.odin#L70-L75) |
 | `xitdb/core.odin` | `_overlay_read_at` | `depth 6` (from `core_read_at`) | 34 | [`xitdb/core.odin#L262-L295`](../../xitdb/core.odin#L262-L295) |
 | `xitdb/core.odin` | `core_read_short_at` | `depth 6` (from `core_read_block_at`, `compare_key`) | 46 | [`xitdb/core.odin#L759-L804`](../../xitdb/core.odin#L759-L804) |

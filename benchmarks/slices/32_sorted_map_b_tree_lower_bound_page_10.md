@@ -1,6 +1,6 @@
 # #32. `Sorted_Map (B+Tree) lower-bound page(10)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1209-L1224`)](../bench_xitdb.odin#L1209-L1224) · [Zig Harness (`bench_xitdb.zig#L1221-L1235`)](../bench_xitdb.zig#L1221-L1235)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1239-L1254`)](../bench_xitdb.odin#L1239-L1254) · [Zig Harness (`bench_xitdb.zig#L1221-L1235`)](../bench_xitdb.zig#L1221-L1235)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,25 +31,25 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1209-L1224`](../bench_xitdb.odin#L1209-L1224))
+### Odin ([`benchmarks/bench_xitdb.odin#L1239-L1254`](../bench_xitdb.odin#L1239-L1254))
 
 ```odin
-1209 | 	// 3b. Lower-bound range seek (`sorted_map_iterator_from_string`) + 10-item page read
-1210 | 	t4 := time.now()
-1211 | 	for k in keys {
-1212 | 		rit, _ := xitdb.sorted_map_iterator_from_string(sm, k)
-1213 | 		for _ in 0 ..< 10 {
-1214 | 			c_maybe, _ := xitdb.cursor_iterator_next(&rit)
-1215 | 			if c_maybe == nil do break
-1216 | 		}
-1217 | 	}
-1218 | 	elapsed_range_seek := time.since(t4)
-1219 | 
-1220 | 	print_result(Bench_Result{
-1221 | 		name    = "Sorted_Map (B+Tree) lower-bound page(10)",
-1222 | 		ops     = n,
-1223 | 		elapsed = elapsed_range_seek,
-1224 | 	})
+1239 | 	// 3b. Lower-bound range seek (`sorted_map_iterator_from_string`) + 10-item page read
+1240 | 	t4 := time.now()
+1241 | 	for k in keys {
+1242 | 		rit, _ := xitdb.sorted_map_iterator_from_string(sm, k)
+1243 | 		for _ in 0 ..< 10 {
+1244 | 			c_maybe, _ := xitdb.cursor_iterator_next(&rit)
+1245 | 			if c_maybe == nil do break
+1246 | 		}
+1247 | 	}
+1248 | 	elapsed_range_seek := time.since(t4)
+1249 | 
+1250 | 	print_result(Bench_Result{
+1251 | 		name    = "Sorted_Map (B+Tree) lower-bound page(10)",
+1252 | 		ops     = n,
+1253 | 		elapsed = elapsed_range_seek,
+1254 | 	})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1221-L1235`](../bench_xitdb.zig#L1221-L1235))

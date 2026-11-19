@@ -1,6 +1,6 @@
 # #51. `Stream: Cursor_Writer (256 x 4KB = 1MB)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1682-L1719`)](../bench_xitdb.odin#L1682-L1719) · [Zig Harness (`bench_xitdb.zig#L1801-L1836`)](../bench_xitdb.zig#L1801-L1836)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1712-L1749`)](../bench_xitdb.odin#L1712-L1749) · [Zig Harness (`bench_xitdb.zig#L1801-L1836`)](../bench_xitdb.zig#L1801-L1836)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,47 +31,47 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1682-L1719`](../bench_xitdb.odin#L1682-L1719))
+### Odin ([`benchmarks/bench_xitdb.odin#L1712-L1749`](../bench_xitdb.odin#L1712-L1749))
 
 ```odin
-1682 | 	// 5c. Streaming `Cursor_Writer` & `Cursor_Reader` (1 MB payload in 4 KB chunks)
-1683 | 	{
-1684 | 		core: xitdb.Core = xitdb.core_memory_init()
-1685 | 		defer xitdb.core_destroy(&core)
-1686 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
-1687 | 
-1688 | 		chunks_count := 256 // 256 * 4 KB = 1 MB
-1689 | 		Stream_Ctx :: struct {
-1690 | 			chunks_count: int,
-1691 | 			blob_rc:      xitdb.Read_Cursor,
-1692 | 		}
-1693 | 		sctx := Stream_Ctx{chunks_count = chunks_count}
-1694 | 
-1695 | 		stream_write_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
-1696 | 			c := (^Stream_Ctx)(user_data)
-1697 | 			w := xitdb.cursor_writer(cursor) or_return
-1698 | 			chunk: [4096]u8
-1699 | 			for i in 0 ..< c.chunks_count {
-1700 | 				chunk[0] = u8(i)
-1701 | 				_, err := xitdb.cursor_writer_write(&w, chunk[:])
-1702 | 				if err != nil do return err
-1703 | 			}
-1704 | 			xitdb.cursor_writer_finish(&w) or_return
-1705 | 			c.blob_rc = cursor.read_cursor
-1706 | 			return nil
-1707 | 		}
-1708 | 
-1709 | 		t_sw := time.now()
-1710 | 		_ = xitdb.database_run_context(&db, stream_write_cb, &sctx)
-1711 | 		elapsed_sw := time.since(t_sw)
-1712 | 		sz_sw, _ := xitdb.database_committed_size(&db)
-1713 | 
-1714 | 		print_result(Bench_Result{
-1715 | 			name       = "Stream: Cursor_Writer (256 x 4KB = 1MB)",
-1716 | 			ops        = chunks_count,
-1717 | 			elapsed    = elapsed_sw,
-1718 | 			bytes_used = sz_sw,
-1719 | 		})
+1712 | 	// 5c. Streaming `Cursor_Writer` & `Cursor_Reader` (1 MB payload in 4 KB chunks)
+1713 | 	{
+1714 | 		core: xitdb.Core = xitdb.core_memory_init()
+1715 | 		defer xitdb.core_destroy(&core)
+1716 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
+1717 | 
+1718 | 		chunks_count := 256 // 256 * 4 KB = 1 MB
+1719 | 		Stream_Ctx :: struct {
+1720 | 			chunks_count: int,
+1721 | 			blob_rc:      xitdb.Read_Cursor,
+1722 | 		}
+1723 | 		sctx := Stream_Ctx{chunks_count = chunks_count}
+1724 | 
+1725 | 		stream_write_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+1726 | 			c := (^Stream_Ctx)(user_data)
+1727 | 			w := xitdb.cursor_writer(cursor) or_return
+1728 | 			chunk: [4096]u8
+1729 | 			for i in 0 ..< c.chunks_count {
+1730 | 				chunk[0] = u8(i)
+1731 | 				_, err := xitdb.cursor_writer_write(&w, chunk[:])
+1732 | 				if err != nil do return err
+1733 | 			}
+1734 | 			xitdb.cursor_writer_finish(&w) or_return
+1735 | 			c.blob_rc = cursor.read_cursor
+1736 | 			return nil
+1737 | 		}
+1738 | 
+1739 | 		t_sw := time.now()
+1740 | 		_ = xitdb.database_run_context(&db, stream_write_cb, &sctx)
+1741 | 		elapsed_sw := time.since(t_sw)
+1742 | 		sz_sw, _ := xitdb.database_committed_size(&db)
+1743 | 
+1744 | 		print_result(Bench_Result{
+1745 | 			name       = "Stream: Cursor_Writer (256 x 4KB = 1MB)",
+1746 | 			ops        = chunks_count,
+1747 | 			elapsed    = elapsed_sw,
+1748 | 			bytes_used = sz_sw,
+1749 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1801-L1836`](../bench_xitdb.zig#L1801-L1836))

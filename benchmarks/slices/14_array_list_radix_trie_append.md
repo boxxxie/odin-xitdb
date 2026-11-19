@@ -1,6 +1,6 @@
 # #14. `Array_List (Radix Trie) append` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 01: Zero-Vtable CoreMemory Reads & takeInt Fast Path**](../zig-guide/01_core_memory_zero_vtable_io.md) · [Odin Harness (`bench_xitdb.odin#L807-L840`)](../bench_xitdb.odin#L807-L840) · [Zig Harness (`bench_xitdb.zig#L834-L863`)](../bench_xitdb.zig#L834-L863)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 01: Zero-Vtable CoreMemory Reads & takeInt Fast Path**](../zig-guide/01_core_memory_zero_vtable_io.md) · [Odin Harness (`bench_xitdb.odin#L837-L870`)](../bench_xitdb.odin#L837-L870) · [Zig Harness (`bench_xitdb.zig#L834-L863`)](../bench_xitdb.zig#L834-L863)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -28,43 +28,43 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L807-L840`](../bench_xitdb.odin#L807-L840))
+### Odin ([`benchmarks/bench_xitdb.odin#L837-L870`](../bench_xitdb.odin#L837-L870))
 
 ```odin
- 807 | 	// 2a. Array_List (16-way Radix Trie)
- 808 | 	{
- 809 | 		core: xitdb.Core = xitdb.core_memory_init()
- 810 | 		defer xitdb.core_destroy(&core)
- 811 | 
- 812 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
- 813 | 		rc := xitdb.database_root_cursor(&db)
- 814 | 		history, _ := xitdb.write_array_list_init(rc)
- 815 | 
- 816 | 		List_Ctx :: struct {
- 817 | 			n: int,
- 818 | 		}
- 819 | 		lctx := List_Ctx{n = n}
- 820 | 
- 821 | 		append_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
- 822 | 			c := (^List_Ctx)(user_data)
- 823 | 			list := xitdb.write_array_list_init(cursor^) or_return
- 824 | 			for i in 0 ..< c.n {
- 825 | 				xitdb.array_list_append(&list, u64(i)) or_return
- 826 | 			}
- 827 | 			return nil
- 828 | 		}
- 829 | 
- 830 | 		t0 := time.now()
- 831 | 		_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, append_cb, &lctx)
- 832 | 		elapsed_append := time.since(t0)
- 833 | 		sz, _ := xitdb.database_committed_size(&db)
- 834 | 
- 835 | 		print_result(Bench_Result{
- 836 | 			name       = "Array_List (Radix Trie) append",
- 837 | 			ops        = n,
- 838 | 			elapsed    = elapsed_append,
- 839 | 			bytes_used = sz,
- 840 | 		})
+ 837 | 	// 2a. Array_List (16-way Radix Trie)
+ 838 | 	{
+ 839 | 		core: xitdb.Core = xitdb.core_memory_init()
+ 840 | 		defer xitdb.core_destroy(&core)
+ 841 | 
+ 842 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
+ 843 | 		rc := xitdb.database_root_cursor(&db)
+ 844 | 		history, _ := xitdb.write_array_list_init(rc)
+ 845 | 
+ 846 | 		List_Ctx :: struct {
+ 847 | 			n: int,
+ 848 | 		}
+ 849 | 		lctx := List_Ctx{n = n}
+ 850 | 
+ 851 | 		append_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+ 852 | 			c := (^List_Ctx)(user_data)
+ 853 | 			list := xitdb.write_array_list_init(cursor^) or_return
+ 854 | 			for i in 0 ..< c.n {
+ 855 | 				xitdb.array_list_append(&list, u64(i)) or_return
+ 856 | 			}
+ 857 | 			return nil
+ 858 | 		}
+ 859 | 
+ 860 | 		t0 := time.now()
+ 861 | 		_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, append_cb, &lctx)
+ 862 | 		elapsed_append := time.since(t0)
+ 863 | 		sz, _ := xitdb.database_committed_size(&db)
+ 864 | 
+ 865 | 		print_result(Bench_Result{
+ 866 | 			name       = "Array_List (Radix Trie) append",
+ 867 | 			ops        = n,
+ 868 | 			elapsed    = elapsed_append,
+ 869 | 			bytes_used = sz,
+ 870 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L834-L863`](../bench_xitdb.zig#L834-L863))

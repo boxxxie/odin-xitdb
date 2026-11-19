@@ -1,6 +1,6 @@
 # #52. `Stream: Cursor_Reader (256 x 4KB = 1MB)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1721-L1737`)](../bench_xitdb.odin#L1721-L1737) · [Zig Harness (`bench_xitdb.zig#L1838-L1854`)](../bench_xitdb.zig#L1838-L1854)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1751-L1767`)](../bench_xitdb.odin#L1751-L1767) · [Zig Harness (`bench_xitdb.zig#L1838-L1854`)](../bench_xitdb.zig#L1838-L1854)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,26 +31,26 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1721-L1737`](../bench_xitdb.odin#L1721-L1737))
+### Odin ([`benchmarks/bench_xitdb.odin#L1751-L1767`](../bench_xitdb.odin#L1751-L1767))
 
 ```odin
-1721 | 		t_sr := time.now()
-1722 | 		reader, _ := xitdb.cursor_reader(sctx.blob_rc)
-1723 | 		read_buf: [4096]u8
-1724 | 		read_chunks := 0
-1725 | 		for {
-1726 | 			nr, _ := xitdb.cursor_reader_read(&reader, read_buf[:])
-1727 | 			if nr == 0 do break
-1728 | 			read_chunks += 1
-1729 | 		}
-1730 | 		assert(read_chunks == chunks_count)
-1731 | 		elapsed_sr := time.since(t_sr)
-1732 | 
-1733 | 		print_result(Bench_Result{
-1734 | 			name    = "Stream: Cursor_Reader (256 x 4KB = 1MB)",
-1735 | 			ops     = chunks_count,
-1736 | 			elapsed = elapsed_sr,
-1737 | 		})
+1751 | 		t_sr := time.now()
+1752 | 		reader, _ := xitdb.cursor_reader(sctx.blob_rc)
+1753 | 		read_buf: [4096]u8
+1754 | 		read_chunks := 0
+1755 | 		for {
+1756 | 			nr, _ := xitdb.cursor_reader_read(&reader, read_buf[:])
+1757 | 			if nr == 0 do break
+1758 | 			read_chunks += 1
+1759 | 		}
+1760 | 		assert(read_chunks == chunks_count)
+1761 | 		elapsed_sr := time.since(t_sr)
+1762 | 
+1763 | 		print_result(Bench_Result{
+1764 | 			name    = "Stream: Cursor_Reader (256 x 4KB = 1MB)",
+1765 | 			ops     = chunks_count,
+1766 | 			elapsed = elapsed_sr,
+1767 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1838-L1854`](../bench_xitdb.zig#L1838-L1854))

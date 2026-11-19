@@ -6,6 +6,7 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import hugi "hugi:."
 import xitdb "../xitdb"
 
 Bench_Result :: struct {
@@ -19,12 +20,13 @@ MAX_GROUP_BENCHES :: 32
 MAX_RUNS          :: 256
 
 Bench_Accum :: struct {
-	name:       string,
-	ops:        int,
-	bytes_used: i64,
-	samples_ns: [MAX_RUNS]f64,
-	samples_ms: [MAX_RUNS]f64,
-	count:      int,
+	name:             string,
+	ops:              int,
+	bytes_used:       i64,
+	samples_batch_ns: [MAX_RUNS]u64,
+	samples_ns:       [MAX_RUNS]f64,
+	samples_ms:       [MAX_RUNS]f64,
+	count:            int,
 }
 
 g_jsonl_file:     ^os.File
@@ -38,15 +40,22 @@ g_append_primary: bool = false
 g_save_history:   bool = true
 g_jsonl_path:     string = "benchmarks/odin.jsonl"
 g_history_path:   string = "benchmarks/history.jsonl"
+g_packet_out:     string = ""
+g_quiet:          bool = false
+g_output_set:     bool = false
+g_history_set:    bool = false
 g_lang:           string = "odin"
 g_groups_filter:  string = ""
 g_name_filter:    string = ""
 
-g_is_warmup:      bool = false
+g_is_warmup:       bool = false
 g_group_base_rank: int = 0
-g_group_slot:     int = 0
-g_group_count:    int = 0
-g_group_accum:    [MAX_GROUP_BENCHES]Bench_Accum
+g_group_name:      string = ""
+g_group_slot:      int = 0
+g_group_count:     int = 0
+g_group_accum:     [MAX_GROUP_BENCHES]Bench_Accum
+g_packet:          hugi.Run_Packet
+g_has_packet:      bool = false
 
 MAX_TOTAL_RANKS :: 128
 g_selective_run:  bool = false
@@ -54,46 +63,12 @@ g_existing_lines: [MAX_TOTAL_RANKS]string
 g_updated_lines:  [MAX_TOTAL_RANKS]string
 
 resolve_git_commit :: proc(allocator := context.allocator) -> string {
-	head_bytes, err := os.read_entire_file(".git/HEAD", allocator)
-	if err != nil {
-		return "unknown"
-	}
-	head_str := strings.trim_space(string(head_bytes))
-	if strings.has_prefix(head_str, "ref: ") {
-		ref_rel := strings.trim_space(head_str[5:])
-		ref_path := fmt.aprintf(".git/%s", ref_rel, allocator = allocator)
-		if ref_bytes, r_err := os.read_entire_file(ref_path, allocator); r_err == nil {
-			sha := strings.trim_space(string(ref_bytes))
-			if len(sha) > 12 {
-				return sha[:12]
-			}
-			return sha
-		}
-		if packed_bytes, p_err := os.read_entire_file(".git/packed-refs", allocator); p_err == nil {
-			lines := strings.split_lines(string(packed_bytes), allocator)
-			suffix := fmt.aprintf(" %s", ref_rel, allocator = allocator)
-			for line in lines {
-				trimmed := strings.trim_space(line)
-				if len(trimmed) == 0 || strings.has_prefix(trimmed, "#") || strings.has_prefix(trimmed, "^") {
-					continue
-				}
-				if strings.has_suffix(trimmed, suffix) && len(trimmed) >= 12 {
-					return trimmed[:12]
-				}
-			}
-		}
-		return "unknown"
-	}
-	if len(head_str) > 12 {
-		return head_str[:12]
-	}
-	return head_str
+	return hugi.resolve_git_commit(".", allocator)
 }
 
 parse_cli_args :: proc() {
 	g_commit_sha = resolve_git_commit()
-	unix_sec := i64(time.to_unix_nanoseconds(time.now())) / 1_000_000_000
-	g_run_id = fmt.aprintf("run-%d", unix_sec)
+	g_run_id = hugi.default_run_id()
 
 	args := os.args[1:]
 	i := 0
@@ -103,6 +78,8 @@ parse_cli_args :: proc() {
 			g_append_primary = true
 		} else if arg == "--no-history" || arg == "-no-history" {
 			g_save_history = false
+		} else if arg == "--quiet" || arg == "-quiet" {
+			g_quiet = true
 		} else if (arg == "--runs" || arg == "-runs") && i + 1 < len(args) {
 			if v, ok := strconv.parse_int(args[i + 1]); ok && v > 0 {
 				g_runs = clamp(v, 1, MAX_RUNS)
@@ -137,10 +114,26 @@ parse_cli_args :: proc() {
 			g_run_id = arg[eq + 1:]
 		} else if (arg == "--output" || arg == "-output") && i + 1 < len(args) {
 			g_jsonl_path = args[i + 1]
+			g_output_set = true
 			i += 1
+		} else if strings.has_prefix(arg, "--output=") || strings.has_prefix(arg, "-output:") {
+			eq := strings.index_any(arg, "=:")
+			g_jsonl_path = arg[eq + 1:]
+			g_output_set = true
 		} else if (arg == "--history" || arg == "-history") && i + 1 < len(args) {
 			g_history_path = args[i + 1]
+			g_history_set = true
 			i += 1
+		} else if strings.has_prefix(arg, "--history=") || strings.has_prefix(arg, "-history:") {
+			eq := strings.index_any(arg, "=:")
+			g_history_path = arg[eq + 1:]
+			g_history_set = true
+		} else if (arg == "--packet-out" || arg == "-packet-out") && i + 1 < len(args) {
+			g_packet_out = args[i + 1]
+			i += 1
+		} else if strings.has_prefix(arg, "--packet-out=") || strings.has_prefix(arg, "-packet-out:") {
+			eq := strings.index_any(arg, "=:")
+			g_packet_out = arg[eq + 1:]
 		} else if (arg == "--groups" || arg == "-groups" || arg == "--group" || arg == "-group") && i + 1 < len(args) {
 			g_groups_filter = args[i + 1]
 			i += 1
@@ -283,14 +276,16 @@ print_result :: proc(r: Bench_Result) {
 	}
 	acc := &g_group_accum[slot]
 	if acc.count == 0 {
-		acc.name = r.name
+		acc.name = strings.clone(r.name, context.allocator)
 		acc.ops = r.ops
 		acc.bytes_used = r.bytes_used
 	} else if r.bytes_used > 0 {
 		acc.bytes_used = r.bytes_used
 	}
 	if acc.count < MAX_RUNS {
-		total_ns := f64(max(time.duration_nanoseconds(r.elapsed), 0))
+		batch_ns := u64(max(time.duration_nanoseconds(r.elapsed), 0))
+		total_ns := f64(batch_ns)
+		acc.samples_batch_ns[acc.count] = batch_ns
 		acc.samples_ms[acc.count] = total_ns / 1e6
 		acc.samples_ns[acc.count] = total_ns / f64(max(r.ops, 1))
 		acc.count += 1
@@ -345,42 +340,70 @@ flush_group_results :: proc() {
 		cv_pct := (stddev_ns / max(mean_ns, 1e-9)) * 100.0
 		ops_per_sec := (f64(acc.ops) * 1e9) / max(median_ns * f64(max(acc.ops, 1)), 1.0)
 
-		mean_sd_str := fmt.tprintf("%s ± %s", fmt.tprintf("%.0f", mean_ns), fmt.tprintf("%.1f", stddev_ns))
-		cv_str := fmt.tprintf("%.1f%%", cv_pct)
-		iqr_str := fmt.tprintf("%.1f", iqr_ns)
-		p95_str := fmt.tprintf("%.0f", p95_ns)
-		minmax_str := fmt.tprintf("%.0f..%.0f", min_ns, max_ns)
+		if !g_quiet {
+			mean_sd_str := fmt.tprintf("%s ± %s", fmt.tprintf("%.0f", mean_ns), fmt.tprintf("%.1f", stddev_ns))
+			cv_str := fmt.tprintf("%.1f%%", cv_pct)
+			iqr_str := fmt.tprintf("%.1f", iqr_ns)
+			p95_str := fmt.tprintf("%.0f", p95_ns)
+			minmax_str := fmt.tprintf("%.0f..%.0f", min_ns, max_ns)
 
-		if acc.bytes_used > 0 {
-			kb := f64(acc.bytes_used) / 1024.0
-			fmt.printf(
-				"%-48s | % 8d | % 10.2f | % 10.0f | %16s | %6s | %8s | %8s | %13s | % 11.0f  (%.1f KB)\n",
-				acc.name,
-				acc.ops,
-				median_ms,
-				median_ns,
-				mean_sd_str,
-				cv_str,
-				iqr_str,
-				p95_str,
-				minmax_str,
-				ops_per_sec,
-				kb,
-			)
-		} else {
-			fmt.printf(
-				"%-48s | % 8d | % 10.2f | % 10.0f | %16s | %6s | %8s | %8s | %13s | % 11.0f\n",
-				acc.name,
-				acc.ops,
-				median_ms,
-				median_ns,
-				mean_sd_str,
-				cv_str,
-				iqr_str,
-				p95_str,
-				minmax_str,
-				ops_per_sec,
-			)
+			if acc.bytes_used > 0 {
+				kb := f64(acc.bytes_used) / 1024.0
+				fmt.printf(
+					"%-48s | % 8d | % 10.2f | % 10.0f | %16s | %6s | %8s | %8s | %13s | % 11.0f  (%.1f KB)\n",
+					acc.name,
+					acc.ops,
+					median_ms,
+					median_ns,
+					mean_sd_str,
+					cv_str,
+					iqr_str,
+					p95_str,
+					minmax_str,
+					ops_per_sec,
+					kb,
+				)
+			} else {
+				fmt.printf(
+					"%-48s | % 8d | % 10.2f | % 10.0f | %16s | %6s | %8s | %8s | %13s | % 11.0f\n",
+					acc.name,
+					acc.ops,
+					median_ms,
+					median_ns,
+					mean_sd_str,
+					cv_str,
+					iqr_str,
+					p95_str,
+					minmax_str,
+					ops_per_sec,
+				)
+			}
+		}
+
+		if g_has_packet {
+			ops := u64(max(acc.ops, 1))
+			samples_batch := make([dynamic]u64, n, context.allocator)
+			for i in 0 ..< n {
+				samples_batch[i] = acc.samples_batch_ns[i]
+			}
+			rec := hugi.Record {
+				rank               = rank,
+				group_name         = strings.clone(g_group_name, context.allocator),
+				name               = strings.clone(acc.name, context.allocator),
+				full_name          = strings.clone(acc.name, context.allocator),
+				ops_per_sample     = ops,
+				samples            = n,
+				warmup             = g_warmup,
+				footprint_bytes    = u64(max(acc.bytes_used, 0)),
+				allocs_per_op      = 0,
+				alloc_bytes_per_op = 0,
+				error              = strings.clone("", context.allocator),
+				metrics            = make([dynamic]hugi.Metric, context.allocator),
+				samples_batch_ns   = samples_batch,
+			}
+			hugi.recompute_record_stats_from_samples(&rec)
+			hugi.refresh_record_throughput(&rec, overwrite = true)
+			append(&g_packet.records, rec)
 		}
 
 		if g_jsonl_file != nil || g_history_file != nil {
@@ -431,6 +454,12 @@ flush_group_results :: proc() {
 			}
 		}
 	}
+	for slot in 0 ..< g_group_count {
+		if len(g_group_accum[slot].name) > 0 {
+			delete(g_group_accum[slot].name, context.allocator)
+			g_group_accum[slot].name = ""
+		}
+	}
 	free_all(context.temp_allocator)
 }
 
@@ -438,6 +467,7 @@ run_group :: proc(group_name: string, base_rank: int, group_fn: proc(int), param
 	if !should_run_group(group_name) {
 		return
 	}
+	g_group_name = group_name
 	g_group_base_rank = base_rank
 	g_is_warmup = true
 	for _ in 0 ..< g_warmup {
@@ -2419,19 +2449,24 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 main :: proc() {
 	parse_cli_args()
 
-	if g_selective_run && !g_append_primary {
+	write_jsonl := len(g_packet_out) == 0 || g_output_set
+	write_history := g_save_history && g_history_path != g_jsonl_path && (len(g_packet_out) == 0 || g_history_set)
+
+	if write_jsonl && g_selective_run && !g_append_primary {
 		load_existing_jsonl_ranks(g_jsonl_path)
 	}
 
-	primary_flags := os.File_Flags{.Write, .Create, .Append} if g_append_primary else os.File_Flags{.Write, .Create, .Trunc}
-	if f, err := os.open(g_jsonl_path, primary_flags, os.Permissions_Read_Write_All); err == nil {
-		g_jsonl_file = f
+	if write_jsonl {
+		primary_flags := os.File_Flags{.Write, .Create, .Append} if g_append_primary else os.File_Flags{.Write, .Create, .Trunc}
+		if f, err := os.open(g_jsonl_path, primary_flags, os.Permissions_Read_Write_All); err == nil {
+			g_jsonl_file = f
+		}
 	}
 	defer if g_jsonl_file != nil {
 		os.close(g_jsonl_file)
 	}
 
-	if g_save_history && g_history_path != g_jsonl_path {
+	if write_history {
 		if hf, err := os.open(g_history_path, {.Write, .Create, .Append}, os.Permissions_Read_Write_All); err == nil {
 			g_history_file = hf
 		}
@@ -2440,7 +2475,31 @@ main :: proc() {
 		os.close(g_history_file)
 	}
 
-	print_header()
+	if len(g_packet_out) > 0 {
+		ts_unix := i64(time.to_unix_nanoseconds(time.now())) / 1_000_000_000
+		g_packet = hugi.Run_Packet {
+			suite_name     = strings.clone("xitdb", context.allocator),
+			lang           = strings.clone(g_lang, context.allocator),
+			commit         = strings.clone(g_commit_sha, context.allocator),
+			run_id         = strings.clone(g_run_id, context.allocator),
+			os             = strings.clone(ODIN_OS_STRING, context.allocator),
+			arch           = strings.clone(ODIN_ARCH_STRING, context.allocator),
+			optimization   = strings.clone(fmt.tprintf("%v", ODIN_OPTIMIZATION_MODE), context.allocator),
+			odin_version   = strings.clone(ODIN_VERSION, context.allocator),
+			timestamp_unix = ts_unix,
+			selective      = g_selective_run,
+			records        = make([dynamic]hugi.Record, context.allocator),
+		}
+		g_has_packet = true
+	}
+	defer if g_has_packet {
+		hugi.packet_destroy(&g_packet, context.allocator)
+		g_has_packet = false
+	}
+
+	if !g_quiet {
+		print_header()
+	}
 	if g_lang == "lua" {
 		run_group("hamt", 0, bench_hamt_lua, 2_000)
 		run_group("lists", 13, bench_lists_lua, 2_000)
@@ -2459,7 +2518,7 @@ main :: proc() {
 		run_group("dsl", 63, run_dsl_benchmarks, 0)
 	}
 
-	if g_selective_run && !g_append_primary && g_jsonl_file != nil {
+	if write_jsonl && g_selective_run && !g_append_primary && g_jsonl_file != nil {
 		for r in 1 ..< MAX_TOTAL_RANKS {
 			if len(g_updated_lines[r]) > 0 {
 				_, _ = os.write_string(g_jsonl_file, g_updated_lines[r])
@@ -2469,5 +2528,14 @@ main :: proc() {
 		}
 	}
 
-	fmt.println("============================================================================================================================================")
+	if g_has_packet {
+		if err := hugi.write_packet_file(g_packet_out, g_packet); err != nil {
+			fmt.eprintfln("bench_xitdb: failed writing packet '%s' (%v)", g_packet_out, err)
+			os.exit(1)
+		}
+	}
+
+	if !g_quiet {
+		fmt.println("============================================================================================================================================")
+	}
 }

@@ -1,6 +1,6 @@
 # #34. `Sorted_Map (B+Tree) get_index select` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1254-L1266`)](../bench_xitdb.odin#L1254-L1266) · [Zig Harness (`bench_xitdb.zig#L1261-L1273`)](../bench_xitdb.zig#L1261-L1273)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1284-L1296`)](../bench_xitdb.odin#L1284-L1296) · [Zig Harness (`bench_xitdb.zig#L1261-L1273`)](../bench_xitdb.zig#L1261-L1273)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,22 +31,22 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1254-L1266`](../bench_xitdb.odin#L1254-L1266))
+### Odin ([`benchmarks/bench_xitdb.odin#L1284-L1296`](../bench_xitdb.odin#L1284-L1296))
 
 ```odin
-1254 | 	// 3d. Order-Statistic B+Tree positional select (`sorted_map_get_index_kv_pair`)
-1255 | 	t6 := time.now()
-1256 | 	for i in 0 ..< n {
-1257 | 		kv_maybe, _ := xitdb.sorted_map_get_index_kv_pair(sm, i64(i))
-1258 | 		assert(kv_maybe != nil)
-1259 | 	}
-1260 | 	elapsed_select := time.since(t6)
-1261 | 
-1262 | 	print_result(Bench_Result{
-1263 | 		name    = "Sorted_Map (B+Tree) get_index select",
-1264 | 		ops     = n,
-1265 | 		elapsed = elapsed_select,
-1266 | 	})
+1284 | 	// 3d. Order-Statistic B+Tree positional select (`sorted_map_get_index_kv_pair`)
+1285 | 	t6 := time.now()
+1286 | 	for i in 0 ..< n {
+1287 | 		kv_maybe, _ := xitdb.sorted_map_get_index_kv_pair(sm, i64(i))
+1288 | 		assert(kv_maybe != nil)
+1289 | 	}
+1290 | 	elapsed_select := time.since(t6)
+1291 | 
+1292 | 	print_result(Bench_Result{
+1293 | 		name    = "Sorted_Map (B+Tree) get_index select",
+1294 | 		ops     = n,
+1295 | 		elapsed = elapsed_select,
+1296 | 	})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1261-L1273`](../bench_xitdb.zig#L1261-L1273))

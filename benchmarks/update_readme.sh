@@ -5,30 +5,57 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ODIN_JSONL="${SCRIPT_DIR}/odin.jsonl"
 ZIG_JSONL="${SCRIPT_DIR}/zig.jsonl"
 HISTORY_JSONL="${SCRIPT_DIR}/history.jsonl"
+HISTORY_HUGIDB="${SCRIPT_DIR}/history.hugidb"
 README_MD="${SCRIPT_DIR}/README.md"
 TARGET_COMMIT="${1:-}"
 
-if [[ ! -f "${ODIN_JSONL}" ]]; then
-    echo "Error: ${ODIN_JSONL} not found. Run 'odin run benchmarks -o:speed -microarch:native' first." >&2
-    exit 1
+HUGI_BIN="${HUGI_BIN:-}"
+if [[ -z "${HUGI_BIN}" ]]; then
+    if [[ -x "/home/pauli/.local/bin/hugi" ]]; then
+        HUGI_BIN="/home/pauli/.local/bin/hugi"
+    elif command -v hugi >/dev/null 2>&1; then
+        HUGI_BIN="$(command -v hugi)"
+    fi
 fi
-
-if [[ ! -f "${ZIG_JSONL}" ]]; then
-    echo "Error: ${ZIG_JSONL} not found. Run 'zig build bench -Doptimize=ReleaseFast -Dcpu=native' first." >&2
-    exit 1
-fi
-
-INPUT_FILES=()
-if [[ -f "${HISTORY_JSONL}" ]]; then
-    INPUT_FILES+=("${HISTORY_JSONL}")
-fi
-INPUT_FILES+=("${ODIN_JSONL}" "${ZIG_JSONL}")
 
 PLAN_JSON="$("${SCRIPT_DIR}/compare_1v1.py" --plan-json)"
 "${SCRIPT_DIR}/compare_1v1.py" --generate-slices >/dev/null
 CODE_MAP_JSON="$("${SCRIPT_DIR}/compare_1v1.py" --code-map-json)"
 
-TABLES=$(jq -rn --arg target_commit "${TARGET_COMMIT}" --argjson plan "${PLAN_JSON}" --argjson code_map "${CODE_MAP_JSON}" '
+read -r -d '' JQ_SCRIPT <<'EOF' || true
+def normalize_rec:
+  (if (.name // "") != "" then .name else (.full_name // "") end) as $name |
+  (.p50_ns // .median_ns // .ns_per_op // 0) as $med_ns |
+  (.std_dev_ns // .stddev_ns // 0) as $sd_ns |
+  (.ops_per_sample // .ops // 1) as $ops |
+  (.footprint_bytes // .bytes_used // 0) as $bytes_used |
+  (.run_count // null) as $run_count |
+  (if $run_count != null then $run_count else 1 end) as $invocations |
+  (.samples // .runs // (if (.samples_ns | type) == "array" then (.samples_ns | length) else 1 end)) as $runs |
+  (if (.samples_ns | type) == "array" and (.samples_ns | length) > 0 then .samples_ns else [$med_ns] end) as $samples_ns |
+  . + {
+    name: $name,
+    full_name: (.full_name // $name),
+    ops: $ops,
+    bytes_used: $bytes_used,
+    median_ns: $med_ns,
+    p50_ns: $med_ns,
+    ns_per_op: (.ns_per_op // ($med_ns | round)),
+    mean_ns: (.mean_ns // $med_ns),
+    stddev_ns: $sd_ns,
+    std_dev_ns: $sd_ns,
+    min_ns: (.min_ns // $med_ns),
+    max_ns: (.max_ns // $med_ns),
+    iqr_ns: (.iqr_ns // 0),
+    p95_ns: (.p95_ns // $med_ns),
+    p99_ns: (.p99_ns // $med_ns),
+    cv_pct: (.cv_pct // 0),
+    ops_per_sec: (.ops_per_sec // 0),
+    run_count: $invocations,
+    runs: $runs,
+    samples_ns: $samples_ns
+  };
+
 def commify:
   tostring |
   if test("^-?[0-9]+$") then
@@ -176,7 +203,7 @@ def welch_med_z($a; $b):
 def pool_records($recs):
   ($recs | unique_by(.run_id // "run-0")) as $uniq_recs |
   ($uniq_recs[0]) as $first |
-  ([ $uniq_recs[] | if (.samples_ns | type) == "array" and (.samples_ns | length) > 0 then .samples_ns[] else .ns_per_op end ]) as $samples |
+  ([ $uniq_recs[] | if (.samples_ns | type) == "array" and (.samples_ns | length) > 0 then .samples_ns[] else (.p50_ns // .median_ns // .ns_per_op // 0) end ]) as $samples |
   ($samples | sort) as $sorted |
   ($sorted | length) as $n |
   percentile($sorted; 0.50) as $med |
@@ -191,15 +218,16 @@ def pool_records($recs):
   (($sd / ([$mean, 1e-9] | max)) * 100.0) as $cv |
   ($sorted[0] // 0) as $min_ns |
   ($sorted[$n - 1] // 0) as $max_ns |
-  (($med * ([$first.ops, 1] | max)) / 1e6) as $total_ms |
-  (($first.ops * 1e9) / ([($med * ([$first.ops, 1] | max)), 1.0] | max) | round) as $ops_sec |
+  ($first.ops_per_sample // $first.ops // 1) as $ops |
+  (($med * ([$ops, 1] | max)) / 1e6) as $total_ms |
+  (($ops * 1e9) / ([($med * ([$ops, 1] | max)), 1.0] | max) | round) as $ops_sec |
   {
     rank: $first.rank,
     lang: $first.lang,
     commit: ($first.commit // "unknown"),
-    invocations: ($uniq_recs | length),
-    name: $first.name,
-    ops: $first.ops,
+    invocations: ([$uniq_recs[].run_count // 1] | add),
+    name: ($first.name // $first.full_name),
+    ops: $ops,
     runs: $n,
     total_ms: $total_ms,
     ns_per_op: ($med | round),
@@ -214,7 +242,7 @@ def pool_records($recs):
     min_ns: ($min_ns | round),
     max_ns: ($max_ns | round),
     ops_per_sec: $ops_sec,
-    bytes_used: ([ $uniq_recs[].bytes_used ] | max)
+    bytes_used: ([ $uniq_recs[] | (.footprint_bytes // .bytes_used // 0) ] | max)
   };
 
 def distinct_commits($all; $lang):
@@ -337,7 +365,7 @@ def compare_commits_table($list; $prev_map; $prev_sha; $curr_sha; $unit):
     end
   );
 
-[inputs] as $all |
+[.[] | normalize_rec] as $all |
 distinct_commits($all; "odin") as $odin_commits |
 distinct_commits($all; "zig") as $zig_commits |
 (if $target_commit != "" then $target_commit else ($odin_commits | last // "unknown") end) as $odin_target |
@@ -398,7 +426,30 @@ compare_1v1_table($paired_heavy; $zig_map; "µs"),
 ($odin_list[] | select(.bytes_used > 0) | . as $o | ($zig_map[$o.name] // null) as $z |
   "| \($o.rank) | \(bench_link($o.name; "odin")) | \(fmt_ops_count($o.ops)) | \(fmt_kb($o.bytes_used)) | \(if $z != null and $z.bytes_used > 0 then fmt_kb($z.bytes_used) else "—" end) |"
 )
-' "${INPUT_FILES[@]}")
+EOF
+
+if [[ -f "${HISTORY_HUGIDB}" && -n "${HUGI_BIN}" && -x "${HUGI_BIN}" ]]; then
+    TABLES="$("${HUGI_BIN}" export --db "${HISTORY_HUGIDB}" --lang all --all-commits --format jsonl --out - | \
+        jq -rs --arg target_commit "${TARGET_COMMIT}" --argjson plan "${PLAN_JSON}" --argjson code_map "${CODE_MAP_JSON}" "${JQ_SCRIPT}")"
+else
+    if [[ ! -f "${ODIN_JSONL}" ]]; then
+        echo "Error: ${ODIN_JSONL} not found. Run 'hugi run benchmarks' or 'odin run benchmarks -o:speed -microarch:native' first." >&2
+        exit 1
+    fi
+
+    if [[ ! -f "${ZIG_JSONL}" ]]; then
+        echo "Error: ${ZIG_JSONL} not found. Run 'zig build bench -Doptimize=ReleaseFast -Dcpu=native' first." >&2
+        exit 1
+    fi
+
+    INPUT_FILES=()
+    if [[ -f "${HISTORY_JSONL}" ]]; then
+        INPUT_FILES+=("${HISTORY_JSONL}")
+    fi
+    INPUT_FILES+=("${ODIN_JSONL}" "${ZIG_JSONL}")
+
+    TABLES="$(jq -rs --arg target_commit "${TARGET_COMMIT}" --argjson plan "${PLAN_JSON}" --argjson code_map "${CODE_MAP_JSON}" "${JQ_SCRIPT}" "${INPUT_FILES[@]}")"
+fi
 
 AWK_SCRIPT='
 BEGIN { in_block = 0 }

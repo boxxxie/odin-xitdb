@@ -1,6 +1,6 @@
 # #56. `Path: 4-level nested cursor_read_path` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1844-L1865`)](../bench_xitdb.odin#L1844-L1865) · [Zig Harness (`bench_xitdb.zig#L1951-L1972`)](../bench_xitdb.zig#L1951-L1972)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1874-L1895`)](../bench_xitdb.odin#L1874-L1895) · [Zig Harness (`bench_xitdb.zig#L1951-L1972`)](../bench_xitdb.zig#L1951-L1972)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,31 +31,31 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1844-L1865`](../bench_xitdb.odin#L1844-L1865))
+### Odin ([`benchmarks/bench_xitdb.odin#L1874-L1895`](../bench_xitdb.odin#L1874-L1895))
 
 ```odin
-1844 | 		rc := xitdb.database_root_cursor(&db).read_cursor
-1845 | 		skey := transmute([]u8)string("deep-sorted-key")
-1846 | 		read_parts := []xitdb.Path_Part{
-1847 | 			xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = h_root}},
-1848 | 			xitdb.Array_List_Get{index = 0},
-1849 | 			xitdb.Linked_Array_List_Get{index = 0},
-1850 | 			xitdb.Sorted_Map_Get{target = xitdb.Sorted_Map_Get_Value{key = skey}},
-1851 | 		}
-1852 | 
-1853 | 		t_dr := time.now()
-1854 | 		for _ in 0 ..< path_ops {
-1855 | 			mc, _ := xitdb.cursor_read_path(rc, read_parts)
-1856 | 			v, _ := xitdb.cursor_read_uint(mc.?)
-1857 | 			assert(v == u64(path_ops - 1))
-1858 | 		}
-1859 | 		elapsed_dr := time.since(t_dr)
-1860 | 
-1861 | 		print_result(Bench_Result{
-1862 | 			name    = "Path: 4-level nested cursor_read_path",
-1863 | 			ops     = path_ops,
-1864 | 			elapsed = elapsed_dr,
-1865 | 		})
+1874 | 		rc := xitdb.database_root_cursor(&db).read_cursor
+1875 | 		skey := transmute([]u8)string("deep-sorted-key")
+1876 | 		read_parts := []xitdb.Path_Part{
+1877 | 			xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = h_root}},
+1878 | 			xitdb.Array_List_Get{index = 0},
+1879 | 			xitdb.Linked_Array_List_Get{index = 0},
+1880 | 			xitdb.Sorted_Map_Get{target = xitdb.Sorted_Map_Get_Value{key = skey}},
+1881 | 		}
+1882 | 
+1883 | 		t_dr := time.now()
+1884 | 		for _ in 0 ..< path_ops {
+1885 | 			mc, _ := xitdb.cursor_read_path(rc, read_parts)
+1886 | 			v, _ := xitdb.cursor_read_uint(mc.?)
+1887 | 			assert(v == u64(path_ops - 1))
+1888 | 		}
+1889 | 		elapsed_dr := time.since(t_dr)
+1890 | 
+1891 | 		print_result(Bench_Result{
+1892 | 			name    = "Path: 4-level nested cursor_read_path",
+1893 | 			ops     = path_ops,
+1894 | 			elapsed = elapsed_dr,
+1895 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1951-L1972`](../bench_xitdb.zig#L1951-L1972))

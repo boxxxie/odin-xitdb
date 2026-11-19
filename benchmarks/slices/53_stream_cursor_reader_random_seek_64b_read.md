@@ -1,6 +1,6 @@
 # #53. `Stream: Cursor_Reader random seek + 64B read` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1739-L1754`)](../bench_xitdb.odin#L1739-L1754) · [Zig Harness (`bench_xitdb.zig#L1856-L1871`)](../bench_xitdb.zig#L1856-L1871)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1769-L1784`)](../bench_xitdb.odin#L1769-L1784) · [Zig Harness (`bench_xitdb.zig#L1856-L1871`)](../bench_xitdb.zig#L1856-L1871)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,25 +31,25 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1739-L1754`](../bench_xitdb.odin#L1739-L1754))
+### Odin ([`benchmarks/bench_xitdb.odin#L1769-L1784`](../bench_xitdb.odin#L1769-L1784))
 
 ```odin
-1739 | 		// Random-access seek + 64B read across the 1 MB blob (`cursor_reader_seek_to`)
-1740 | 		seek_ops := n
-1741 | 		small_buf: [64]u8
-1742 | 		t_rseek := time.now()
-1743 | 		for i in 0 ..< seek_ops {
-1744 | 			off := i64((i * 4099) % (chunks_count * 4096 - 64))
-1745 | 			_ = xitdb.cursor_reader_seek_to(&reader, off)
-1746 | 			_ = xitdb.cursor_reader_read_fully(&reader, small_buf[:])
-1747 | 		}
-1748 | 		elapsed_rseek := time.since(t_rseek)
-1749 | 
-1750 | 		print_result(Bench_Result{
-1751 | 			name    = "Stream: Cursor_Reader random seek + 64B read",
-1752 | 			ops     = seek_ops,
-1753 | 			elapsed = elapsed_rseek,
-1754 | 		})
+1769 | 		// Random-access seek + 64B read across the 1 MB blob (`cursor_reader_seek_to`)
+1770 | 		seek_ops := n
+1771 | 		small_buf: [64]u8
+1772 | 		t_rseek := time.now()
+1773 | 		for i in 0 ..< seek_ops {
+1774 | 			off := i64((i * 4099) % (chunks_count * 4096 - 64))
+1775 | 			_ = xitdb.cursor_reader_seek_to(&reader, off)
+1776 | 			_ = xitdb.cursor_reader_read_fully(&reader, small_buf[:])
+1777 | 		}
+1778 | 		elapsed_rseek := time.since(t_rseek)
+1779 | 
+1780 | 		print_result(Bench_Result{
+1781 | 			name    = "Stream: Cursor_Reader random seek + 64B read",
+1782 | 			ops     = seek_ops,
+1783 | 			elapsed = elapsed_rseek,
+1784 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1856-L1871`](../bench_xitdb.zig#L1856-L1871))
