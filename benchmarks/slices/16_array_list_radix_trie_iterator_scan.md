@@ -1,6 +1,6 @@
 # #16. `Array_List (Radix Trie) iterator scan` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 01: Zero-Vtable CoreMemory Reads & takeInt Fast Path**](../zig-guide/01_core_memory_zero_vtable_io.md) · [Odin Harness (`bench_xitdb.odin#L889-L906`)](../bench_xitdb.odin#L889-L906) · [Zig Harness (`bench_xitdb.zig#L882-L896`)](../bench_xitdb.zig#L882-L896)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 01: Zero-Vtable CoreMemory Reads & takeInt Fast Path**](../zig-guide/01_core_memory_zero_vtable_io.md) · [Odin Harness (`bench_xitdb.odin#L893-L910`)](../bench_xitdb.odin#L893-L910) · [Zig Harness (`bench_xitdb.zig#L882-L896`)](../bench_xitdb.zig#L882-L896)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -28,27 +28,27 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L889-L906`](../bench_xitdb.odin#L889-L906))
+### Odin ([`benchmarks/bench_xitdb.odin#L893-L910`](../bench_xitdb.odin#L893-L910))
 
 ```odin
- 889 | 		t2 := time.now()
- 890 | 		it, _ := xitdb.array_list_iterator(rlist)
- 891 | 		cnt := 0
- 892 | 		for {
- 893 | 			c_maybe, _ := xitdb.cursor_iterator_next(&it)
- 894 | 			c, ok := c_maybe.?
- 895 | 			if !ok do break
- 896 | 			_, _ = xitdb.cursor_read_uint(c)
- 897 | 			cnt += 1
- 898 | 		}
- 899 | 		assert(cnt == n)
- 900 | 		elapsed_iter := time.since(t2)
- 901 | 
- 902 | 		print_result(Bench_Result{
- 903 | 			name    = "Array_List (Radix Trie) iterator scan",
- 904 | 			ops     = n,
- 905 | 			elapsed = elapsed_iter,
- 906 | 		})
+ 893 | 		t2 := time.now()
+ 894 | 		it, _ := xitdb.array_list_iterator(rlist)
+ 895 | 		cnt := 0
+ 896 | 		for {
+ 897 | 			c_maybe, _ := xitdb.cursor_iterator_next(&it)
+ 898 | 			c, ok := c_maybe.?
+ 899 | 			if !ok do break
+ 900 | 			_, _ = xitdb.cursor_read_uint(c)
+ 901 | 			cnt += 1
+ 902 | 		}
+ 903 | 		assert(cnt == n)
+ 904 | 		elapsed_iter := time.since(t2)
+ 905 | 
+ 906 | 		print_result(Bench_Result{
+ 907 | 			name    = "Array_List (Radix Trie) iterator scan",
+ 908 | 			ops     = n,
+ 909 | 			elapsed = elapsed_iter,
+ 910 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L882-L896`](../bench_xitdb.zig#L882-L896))

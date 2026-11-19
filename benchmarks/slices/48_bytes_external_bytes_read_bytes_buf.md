@@ -1,6 +1,6 @@
 # #48. `Bytes: External Bytes read_bytes_buf` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1671-L1680`)](../bench_xitdb.odin#L1671-L1680) · [Zig Harness (`bench_xitdb.zig#L1754-L1763`)](../bench_xitdb.zig#L1754-L1763)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1675-L1684`)](../bench_xitdb.odin#L1675-L1684) · [Zig Harness (`bench_xitdb.zig#L1754-L1763`)](../bench_xitdb.zig#L1754-L1763)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,19 +31,19 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1671-L1680`](../bench_xitdb.odin#L1671-L1680))
+### Odin ([`benchmarks/bench_xitdb.odin#L1675-L1684`](../bench_xitdb.odin#L1675-L1684))
 
 ```odin
-1671 | 		t_hp := time.now()
-1672 | 		for _ in 0 ..< reads {
-1673 | 			obj, _ := xitdb.cursor_read_bytes_buf(heap_cur.?, stack_buf[:])
-1674 | 			assert(len(obj.value) == 32)
-1675 | 		}
-1676 | 		print_result(Bench_Result{
-1677 | 			name    = "Bytes: External Bytes read_bytes_buf",
-1678 | 			ops     = reads,
-1679 | 			elapsed = time.since(t_hp),
-1680 | 		})
+1675 | 		t_hp := time.now()
+1676 | 		for _ in 0 ..< reads {
+1677 | 			obj, _ := xitdb.cursor_read_bytes_buf(heap_cur.?, stack_buf[:])
+1678 | 			assert(len(obj.value) == 32)
+1679 | 		}
+1680 | 		print_result(Bench_Result{
+1681 | 			name    = "Bytes: External Bytes read_bytes_buf",
+1682 | 			ops     = reads,
+1683 | 			elapsed = time.since(t_hp),
+1684 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1754-L1763`](../bench_xitdb.zig#L1754-L1763))

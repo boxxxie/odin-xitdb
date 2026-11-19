@@ -1,6 +1,6 @@
 # #29. `Sorted_Map (B+Tree) key lookup` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1192-L1207`)](../bench_xitdb.odin#L1192-L1207) · [Zig Harness (`bench_xitdb.zig#L1176-L1191`)](../bench_xitdb.zig#L1176-L1191)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1196-L1211`)](../bench_xitdb.odin#L1196-L1211) · [Zig Harness (`bench_xitdb.zig#L1176-L1191`)](../bench_xitdb.zig#L1176-L1191)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,25 +31,25 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1192-L1207`](../bench_xitdb.odin#L1192-L1207))
+### Odin ([`benchmarks/bench_xitdb.odin#L1196-L1211`](../bench_xitdb.odin#L1196-L1211))
 
 ```odin
-1192 | 	sm_cur, _ := xitdb.array_list_get_cursor(history, 0)
-1193 | 	sm, _ := xitdb.read_sorted_map_init(sm_cur.?)
-1194 | 
-1195 | 	t1 := time.now()
-1196 | 	for k, idx in keys {
-1197 | 		vc, _ := xitdb.sorted_map_get_cursor(sm, k)
-1198 | 		v, _ := xitdb.cursor_read_uint(vc.?)
-1199 | 		assert(v == u64(idx))
-1200 | 	}
-1201 | 	elapsed_get := time.since(t1)
-1202 | 
-1203 | 	print_result(Bench_Result{
-1204 | 		name    = "Sorted_Map (B+Tree) key lookup",
-1205 | 		ops     = n,
-1206 | 		elapsed = elapsed_get,
-1207 | 	})
+1196 | 	sm_cur, _ := xitdb.array_list_get_cursor(history, 0)
+1197 | 	sm, _ := xitdb.read_sorted_map_init(sm_cur.?)
+1198 | 
+1199 | 	t1 := time.now()
+1200 | 	for k, idx in keys {
+1201 | 		vc, _ := xitdb.sorted_map_get_cursor(sm, k)
+1202 | 		v, _ := xitdb.cursor_read_uint(vc.?)
+1203 | 		assert(v == u64(idx))
+1204 | 	}
+1205 | 	elapsed_get := time.since(t1)
+1206 | 
+1207 | 	print_result(Bench_Result{
+1208 | 		name    = "Sorted_Map (B+Tree) key lookup",
+1209 | 		ops     = n,
+1210 | 		elapsed = elapsed_get,
+1211 | 	})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1176-L1191`](../bench_xitdb.zig#L1176-L1191))

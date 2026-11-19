@@ -1,6 +1,6 @@
 # #30. `Sorted_Map (B+Tree) rank query` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1209-L1220`)](../bench_xitdb.odin#L1209-L1220) · [Zig Harness (`bench_xitdb.zig#L1193-L1204`)](../bench_xitdb.zig#L1193-L1204)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1213-L1224`)](../bench_xitdb.odin#L1213-L1224) · [Zig Harness (`bench_xitdb.zig#L1193-L1204`)](../bench_xitdb.zig#L1193-L1204)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,21 +31,21 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1209-L1220`](../bench_xitdb.odin#L1209-L1220))
+### Odin ([`benchmarks/bench_xitdb.odin#L1213-L1224`](../bench_xitdb.odin#L1213-L1224))
 
 ```odin
-1209 | 	t2 := time.now()
-1210 | 	for k in keys {
-1211 | 		rk, _ := xitdb.sorted_map_rank(sm, k)
-1212 | 		assert(rk >= 0 && rk < i64(n))
-1213 | 	}
-1214 | 	elapsed_rank := time.since(t2)
-1215 | 
-1216 | 	print_result(Bench_Result{
-1217 | 		name    = "Sorted_Map (B+Tree) rank query",
-1218 | 		ops     = n,
-1219 | 		elapsed = elapsed_rank,
-1220 | 	})
+1213 | 	t2 := time.now()
+1214 | 	for k in keys {
+1215 | 		rk, _ := xitdb.sorted_map_rank(sm, k)
+1216 | 		assert(rk >= 0 && rk < i64(n))
+1217 | 	}
+1218 | 	elapsed_rank := time.since(t2)
+1219 | 
+1220 | 	print_result(Bench_Result{
+1221 | 		name    = "Sorted_Map (B+Tree) rank query",
+1222 | 		ops     = n,
+1223 | 		elapsed = elapsed_rank,
+1224 | 	})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1193-L1204`](../bench_xitdb.zig#L1193-L1204))

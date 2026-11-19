@@ -1,6 +1,6 @@
 # #35. `Sorted_Map (B+Tree) index-seek page(10)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1298-L1313`)](../bench_xitdb.odin#L1298-L1313) · [Zig Harness (`bench_xitdb.zig#L1275-L1289`)](../bench_xitdb.zig#L1275-L1289)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1302-L1317`)](../bench_xitdb.odin#L1302-L1317) · [Zig Harness (`bench_xitdb.zig#L1275-L1289`)](../bench_xitdb.zig#L1275-L1289)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,25 +31,25 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1298-L1313`](../bench_xitdb.odin#L1298-L1313))
+### Odin ([`benchmarks/bench_xitdb.odin#L1302-L1317`](../bench_xitdb.odin#L1302-L1317))
 
 ```odin
-1298 | 	// 3e. Order-Statistic B+Tree positional index seek (`sorted_map_iterator_from_index`) + 10-item page
-1299 | 	t7 := time.now()
-1300 | 	for i in 0 ..< n {
-1301 | 		iit, _ := xitdb.sorted_map_iterator_from_index(sm, i64(i))
-1302 | 		for _ in 0 ..< 10 {
-1303 | 			c_maybe, _ := xitdb.cursor_iterator_next(&iit)
-1304 | 			if c_maybe == nil do break
-1305 | 		}
-1306 | 	}
-1307 | 	elapsed_index_seek := time.since(t7)
-1308 | 
-1309 | 	print_result(Bench_Result{
-1310 | 		name    = "Sorted_Map (B+Tree) index-seek page(10)",
-1311 | 		ops     = n,
-1312 | 		elapsed = elapsed_index_seek,
-1313 | 	})
+1302 | 	// 3e. Order-Statistic B+Tree positional index seek (`sorted_map_iterator_from_index`) + 10-item page
+1303 | 	t7 := time.now()
+1304 | 	for i in 0 ..< n {
+1305 | 		iit, _ := xitdb.sorted_map_iterator_from_index(sm, i64(i))
+1306 | 		for _ in 0 ..< 10 {
+1307 | 			c_maybe, _ := xitdb.cursor_iterator_next(&iit)
+1308 | 			if c_maybe == nil do break
+1309 | 		}
+1310 | 	}
+1311 | 	elapsed_index_seek := time.since(t7)
+1312 | 
+1313 | 	print_result(Bench_Result{
+1314 | 		name    = "Sorted_Map (B+Tree) index-seek page(10)",
+1315 | 		ops     = n,
+1316 | 		elapsed = elapsed_index_seek,
+1317 | 	})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1275-L1289`](../bench_xitdb.zig#L1275-L1289))

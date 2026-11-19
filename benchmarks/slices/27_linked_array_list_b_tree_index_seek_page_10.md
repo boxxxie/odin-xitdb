@@ -1,6 +1,6 @@
 # #27. `Linked_Array_List (B-Tree) index-seek page(10)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 02: LinkedArrayList Batch Node I/O & Direct Leaf Seek**](../zig-guide/02_btree_node_batch_io_and_leaf_seek.md) · [Odin Harness (`bench_xitdb.odin#L1129-L1143`)](../bench_xitdb.odin#L1129-L1143) · [Zig Harness (`bench_xitdb.zig#L1114-L1127`)](../bench_xitdb.zig#L1114-L1127)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 02: LinkedArrayList Batch Node I/O & Direct Leaf Seek**](../zig-guide/02_btree_node_batch_io_and_leaf_seek.md) · [Odin Harness (`bench_xitdb.odin#L1133-L1147`)](../bench_xitdb.odin#L1133-L1147) · [Zig Harness (`bench_xitdb.zig#L1114-L1127`)](../bench_xitdb.zig#L1114-L1127)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -30,24 +30,24 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1129-L1143`](../bench_xitdb.odin#L1129-L1143))
+### Odin ([`benchmarks/bench_xitdb.odin#L1133-L1147`](../bench_xitdb.odin#L1133-L1147))
 
 ```odin
-1129 | 		t7 := time.now()
-1130 | 		for i in 0 ..< n {
-1131 | 			lit, _ := xitdb.linked_array_list_iterator_from(rlist, i64(i))
-1132 | 			for _ in 0 ..< 10 {
-1133 | 				c_maybe, _ := xitdb.cursor_iterator_next(&lit)
-1134 | 				if c_maybe == nil do break
-1135 | 			}
-1136 | 		}
-1137 | 		elapsed_lal_seek := time.since(t7)
-1138 | 
-1139 | 		print_result(Bench_Result{
-1140 | 			name    = "Linked_Array_List (B-Tree) index-seek page(10)",
-1141 | 			ops     = n,
-1142 | 			elapsed = elapsed_lal_seek,
-1143 | 		})
+1133 | 		t7 := time.now()
+1134 | 		for i in 0 ..< n {
+1135 | 			lit, _ := xitdb.linked_array_list_iterator_from(rlist, i64(i))
+1136 | 			for _ in 0 ..< 10 {
+1137 | 				c_maybe, _ := xitdb.cursor_iterator_next(&lit)
+1138 | 				if c_maybe == nil do break
+1139 | 			}
+1140 | 		}
+1141 | 		elapsed_lal_seek := time.since(t7)
+1142 | 
+1143 | 		print_result(Bench_Result{
+1144 | 			name    = "Linked_Array_List (B-Tree) index-seek page(10)",
+1145 | 			ops     = n,
+1146 | 			elapsed = elapsed_lal_seek,
+1147 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1114-L1127`](../bench_xitdb.zig#L1114-L1127))

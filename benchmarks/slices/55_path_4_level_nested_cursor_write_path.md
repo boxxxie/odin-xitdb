@@ -1,6 +1,6 @@
 # #55. `Path: 4-level nested cursor_write_path` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1819-L1872`)](../bench_xitdb.odin#L1819-L1872) · [Zig Harness (`bench_xitdb.zig#L1903-L1949`)](../bench_xitdb.zig#L1903-L1949)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1823-L1876`)](../bench_xitdb.odin#L1823-L1876) · [Zig Harness (`bench_xitdb.zig#L1903-L1949`)](../bench_xitdb.zig#L1903-L1949)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,63 +31,63 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1819-L1872`](../bench_xitdb.odin#L1819-L1872))
+### Odin ([`benchmarks/bench_xitdb.odin#L1823-L1876`](../bench_xitdb.odin#L1823-L1876))
 
 ```odin
-1819 | 	// 5d. Deeply Nested Multi-Part Atomic Path Traversal (`cursor_write_path` & `cursor_read_path` across 4 nested collections)
-1820 | 	{
-1821 | 		core: xitdb.Core = xitdb.core_memory_init()
-1822 | 		defer xitdb.core_destroy(&core)
-1823 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
-1824 | 
-1825 | 		path_ops := 500
-1826 | 		h_root := xitdb.database_digest_string(&db, "tenant", context.temp_allocator)
-1827 | 		h_leaf := xitdb.database_digest_string(&db, "metric", context.temp_allocator)
+1823 | 	// 5d. Deeply Nested Multi-Part Atomic Path Traversal (`cursor_write_path` & `cursor_read_path` across 4 nested collections)
+1824 | 	{
+1825 | 		core: xitdb.Core = xitdb.core_memory_init()
+1826 | 		defer xitdb.core_destroy(&core)
+1827 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
 1828 | 
-1829 | 		Deep_Ctx :: struct {
-1830 | 			ops:    int,
-1831 | 			h_root: []u8,
-1832 | 			h_leaf: []u8,
-1833 | 		}
-1834 | 		dctx := Deep_Ctx{ops = path_ops, h_root = h_root, h_leaf = h_leaf}
-1835 | 
-1836 | 		deep_write_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
-1837 | 			c := (^Deep_Ctx)(user_data)
-1838 | 			// Initialize 4-level hierarchy: Hash_Map -> Array_List -> Linked_Array_List -> Sorted_Map
-1839 | 			_, err := xitdb.cursor_write_path(cursor, []xitdb.Path_Part{
-1840 | 				xitdb.Hash_Map_Init{counted = false, set = false},
-1841 | 				xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = c.h_root}},
-1842 | 				xitdb.Array_List_Init{},
-1843 | 				xitdb.Array_List_Append{},
-1844 | 				xitdb.Linked_Array_List_Init{},
-1845 | 				xitdb.Linked_Array_List_Append{},
-1846 | 				xitdb.Sorted_Map_Init{set = false},
-1847 | 			})
-1848 | 			if err != nil do return err
-1849 | 
-1850 | 			skey := transmute([]u8)string("deep-sorted-key")
-1851 | 			for i in 0 ..< c.ops {
-1852 | 				_, err = xitdb.cursor_write_path(cursor, []xitdb.Path_Part{
-1853 | 					xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = c.h_root}},
-1854 | 					xitdb.Array_List_Get{index = 0},
-1855 | 					xitdb.Linked_Array_List_Get{index = 0},
-1856 | 					xitdb.Sorted_Map_Get{target = xitdb.Sorted_Map_Get_Value{key = skey}},
-1857 | 					xitdb.Write_Data{data = u64(i)},
-1858 | 				})
-1859 | 				if err != nil do return err
-1860 | 			}
-1861 | 			return nil
-1862 | 		}
-1863 | 
-1864 | 		t_dw := time.now()
-1865 | 		_ = xitdb.database_run_context(&db, deep_write_cb, &dctx)
-1866 | 		elapsed_dw := time.since(t_dw)
+1829 | 		path_ops := 500
+1830 | 		h_root := xitdb.database_digest_string(&db, "tenant", context.temp_allocator)
+1831 | 		h_leaf := xitdb.database_digest_string(&db, "metric", context.temp_allocator)
+1832 | 
+1833 | 		Deep_Ctx :: struct {
+1834 | 			ops:    int,
+1835 | 			h_root: []u8,
+1836 | 			h_leaf: []u8,
+1837 | 		}
+1838 | 		dctx := Deep_Ctx{ops = path_ops, h_root = h_root, h_leaf = h_leaf}
+1839 | 
+1840 | 		deep_write_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+1841 | 			c := (^Deep_Ctx)(user_data)
+1842 | 			// Initialize 4-level hierarchy: Hash_Map -> Array_List -> Linked_Array_List -> Sorted_Map
+1843 | 			_, err := xitdb.cursor_write_path(cursor, []xitdb.Path_Part{
+1844 | 				xitdb.Hash_Map_Init{counted = false, set = false},
+1845 | 				xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = c.h_root}},
+1846 | 				xitdb.Array_List_Init{},
+1847 | 				xitdb.Array_List_Append{},
+1848 | 				xitdb.Linked_Array_List_Init{},
+1849 | 				xitdb.Linked_Array_List_Append{},
+1850 | 				xitdb.Sorted_Map_Init{set = false},
+1851 | 			})
+1852 | 			if err != nil do return err
+1853 | 
+1854 | 			skey := transmute([]u8)string("deep-sorted-key")
+1855 | 			for i in 0 ..< c.ops {
+1856 | 				_, err = xitdb.cursor_write_path(cursor, []xitdb.Path_Part{
+1857 | 					xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = c.h_root}},
+1858 | 					xitdb.Array_List_Get{index = 0},
+1859 | 					xitdb.Linked_Array_List_Get{index = 0},
+1860 | 					xitdb.Sorted_Map_Get{target = xitdb.Sorted_Map_Get_Value{key = skey}},
+1861 | 					xitdb.Write_Data{data = u64(i)},
+1862 | 				})
+1863 | 				if err != nil do return err
+1864 | 			}
+1865 | 			return nil
+1866 | 		}
 1867 | 
-1868 | 		print_result(Bench_Result{
-1869 | 			name    = "Path: 4-level nested cursor_write_path",
-1870 | 			ops     = path_ops,
-1871 | 			elapsed = elapsed_dw,
-1872 | 		})
+1868 | 		t_dw := time.now()
+1869 | 		_ = xitdb.database_run_context(&db, deep_write_cb, &dctx)
+1870 | 		elapsed_dw := time.since(t_dw)
+1871 | 
+1872 | 		print_result(Bench_Result{
+1873 | 			name    = "Path: 4-level nested cursor_write_path",
+1874 | 			ops     = path_ops,
+1875 | 			elapsed = elapsed_dw,
+1876 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1903-L1949`](../bench_xitdb.zig#L1903-L1949))

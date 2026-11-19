@@ -1,6 +1,6 @@
 # #61. `Tx: Mid-tx database_freeze + CoW clone` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 06: CoreBufferedFile Coherency & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) · [Odin Harness (`bench_xitdb.odin#L2063-L2104`)](../bench_xitdb.odin#L2063-L2104) · [Zig Harness (`bench_xitdb.zig#L2181-L2231`)](../bench_xitdb.zig#L2181-L2231)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 06: CoreBufferedFile Coherency & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) · [Odin Harness (`bench_xitdb.odin#L2067-L2108`)](../bench_xitdb.odin#L2067-L2108) · [Zig Harness (`bench_xitdb.zig#L2181-L2231`)](../bench_xitdb.zig#L2181-L2231)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -29,51 +29,51 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L2063-L2104`](../bench_xitdb.odin#L2063-L2104))
+### Odin ([`benchmarks/bench_xitdb.odin#L2067-L2108`](../bench_xitdb.odin#L2067-L2108))
 
 ```odin
-2063 | 	// 5d. Mid-transaction `database_freeze` + CoW subtree cloning & transaction rollback truncation
-2064 | 	{
-2065 | 		core: xitdb.Core = xitdb.core_memory_init()
-2066 | 		defer xitdb.core_destroy(&core)
-2067 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
-2068 | 
-2069 | 		Freeze_Ctx :: struct {
-2070 | 			db:    ^xitdb.Database,
-2071 | 			iters: int,
-2072 | 		}
-2073 | 		fctx := Freeze_Ctx{db = &db, iters = commits}
-2074 | 
-2075 | 		freeze_cow_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
-2076 | 			c := (^Freeze_Ctx)(user_data)
-2077 | 			top := xitdb.write_hash_map_init(cursor^) or_return
-2078 | 			base_wc := xitdb.hash_map_put_cursor(&top, "base") or_return
-2079 | 			base_map := xitdb.write_hash_map_init(base_wc) or_return
-2080 | 			for j in 0 ..< 16 {
-2081 | 				xitdb.hash_map_put(&base_map, fmt.tprintf("k-%02d", j), u64(j)) or_return
-2082 | 			}
-2083 | 			base_slot := xitdb.hash_map_slot(base_map.read_hash_map) or_return
-2084 | 
-2085 | 			for i in 0 ..< c.iters {
-2086 | 				xitdb.database_freeze(c.db) or_return
-2087 | 				fork_key := fmt.tprintf("fork-%04d", i)
-2088 | 				xitdb.hash_map_put(&top, fork_key, base_slot) or_return
-2089 | 				fork_wc := xitdb.hash_map_put_cursor(&top, fork_key) or_return
-2090 | 				fork_map := xitdb.write_hash_map_init(fork_wc) or_return
-2091 | 				xitdb.hash_map_put(&fork_map, "k-00", u64(1000 + i)) or_return
-2092 | 			}
-2093 | 			return nil
-2094 | 		}
-2095 | 
-2096 | 		t_fc := time.now()
-2097 | 		_ = xitdb.database_run_context(&db, freeze_cow_cb, &fctx)
-2098 | 		elapsed_fc := time.since(t_fc)
+2067 | 	// 5d. Mid-transaction `database_freeze` + CoW subtree cloning & transaction rollback truncation
+2068 | 	{
+2069 | 		core: xitdb.Core = xitdb.core_memory_init()
+2070 | 		defer xitdb.core_destroy(&core)
+2071 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
+2072 | 
+2073 | 		Freeze_Ctx :: struct {
+2074 | 			db:    ^xitdb.Database,
+2075 | 			iters: int,
+2076 | 		}
+2077 | 		fctx := Freeze_Ctx{db = &db, iters = commits}
+2078 | 
+2079 | 		freeze_cow_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+2080 | 			c := (^Freeze_Ctx)(user_data)
+2081 | 			top := xitdb.write_hash_map_init(cursor^) or_return
+2082 | 			base_wc := xitdb.hash_map_put_cursor(&top, "base") or_return
+2083 | 			base_map := xitdb.write_hash_map_init(base_wc) or_return
+2084 | 			for j in 0 ..< 16 {
+2085 | 				xitdb.hash_map_put(&base_map, fmt.tprintf("k-%02d", j), u64(j)) or_return
+2086 | 			}
+2087 | 			base_slot := xitdb.hash_map_slot(base_map.read_hash_map) or_return
+2088 | 
+2089 | 			for i in 0 ..< c.iters {
+2090 | 				xitdb.database_freeze(c.db) or_return
+2091 | 				fork_key := fmt.tprintf("fork-%04d", i)
+2092 | 				xitdb.hash_map_put(&top, fork_key, base_slot) or_return
+2093 | 				fork_wc := xitdb.hash_map_put_cursor(&top, fork_key) or_return
+2094 | 				fork_map := xitdb.write_hash_map_init(fork_wc) or_return
+2095 | 				xitdb.hash_map_put(&fork_map, "k-00", u64(1000 + i)) or_return
+2096 | 			}
+2097 | 			return nil
+2098 | 		}
 2099 | 
-2100 | 		print_result(Bench_Result{
-2101 | 			name    = "Tx: Mid-tx database_freeze + CoW clone",
-2102 | 			ops     = commits,
-2103 | 			elapsed = elapsed_fc,
-2104 | 		})
+2100 | 		t_fc := time.now()
+2101 | 		_ = xitdb.database_run_context(&db, freeze_cow_cb, &fctx)
+2102 | 		elapsed_fc := time.since(t_fc)
+2103 | 
+2104 | 		print_result(Bench_Result{
+2105 | 			name    = "Tx: Mid-tx database_freeze + CoW clone",
+2106 | 			ops     = commits,
+2107 | 			elapsed = elapsed_fc,
+2108 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L2181-L2231`](../bench_xitdb.zig#L2181-L2231))

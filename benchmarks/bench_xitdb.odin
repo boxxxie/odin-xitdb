@@ -1,5 +1,6 @@
 package xitdb_benchmarks
 
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:os"
@@ -56,6 +57,7 @@ g_group_count:     int = 0
 g_group_accum:     [MAX_GROUP_BENCHES]Bench_Accum
 g_packet:          hugi.Run_Packet
 g_has_packet:      bool = false
+g_host_allocator:  runtime.Allocator
 
 MAX_TOTAL_RANKS :: 128
 g_selective_run:  bool = false
@@ -276,7 +278,8 @@ print_result :: proc(r: Bench_Result) {
 	}
 	acc := &g_group_accum[slot]
 	if acc.count == 0 {
-		acc.name = strings.clone(r.name, context.allocator)
+		alloc := g_host_allocator if g_host_allocator.procedure != nil else context.allocator
+		acc.name = strings.clone(r.name, alloc)
 		acc.ops = r.ops
 		acc.bytes_used = r.bytes_used
 	} else if r.bytes_used > 0 {
@@ -456,7 +459,8 @@ flush_group_results :: proc() {
 	}
 	for slot in 0 ..< g_group_count {
 		if len(g_group_accum[slot].name) > 0 {
-			delete(g_group_accum[slot].name, context.allocator)
+			alloc := g_host_allocator if g_host_allocator.procedure != nil else context.allocator
+			delete(g_group_accum[slot].name, alloc)
 			g_group_accum[slot].name = ""
 		}
 	}
@@ -2163,7 +2167,9 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 	core := xitdb.core_memory_init()
 	defer xitdb.core_destroy(&core)
 
+	orig_alloc := context.allocator
 	context.allocator = context.temp_allocator
+	defer context.allocator = orig_alloc
 	db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
 	N :: 500
 
@@ -2447,6 +2453,7 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 }
 
 main :: proc() {
+	g_host_allocator = context.allocator
 	parse_cli_args()
 
 	write_jsonl := len(g_packet_out) == 0 || g_output_set

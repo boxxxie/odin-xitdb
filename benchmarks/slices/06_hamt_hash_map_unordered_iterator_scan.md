@@ -1,6 +1,6 @@
 # #6. `HAMT Hash_Map unordered iterator scan` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 04: 16-Way HAMT Single-Pass KV & Lazy Remove**](../zig-guide/04_hamt_single_pass_kv_and_lazy_remove.md) · [Odin Harness (`bench_xitdb.odin#L638-L654`)](../bench_xitdb.odin#L638-L654) · [Zig Harness (`bench_xitdb.zig#L632-L646`)](../bench_xitdb.zig#L632-L646)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 04: 16-Way HAMT Single-Pass KV & Lazy Remove**](../zig-guide/04_hamt_single_pass_kv_and_lazy_remove.md) · [Odin Harness (`bench_xitdb.odin#L642-L658`)](../bench_xitdb.odin#L642-L658) · [Zig Harness (`bench_xitdb.zig#L632-L646`)](../bench_xitdb.zig#L632-L646)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -32,26 +32,26 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L638-L654`](../bench_xitdb.odin#L638-L654))
+### Odin ([`benchmarks/bench_xitdb.odin#L642-L658`](../bench_xitdb.odin#L642-L658))
 
 ```odin
- 638 | 	// 1e. HAMT unordered full-tree iterator scan
- 639 | 	t4 := time.now()
- 640 | 	hit, _ := xitdb.hash_map_iterator(m0)
- 641 | 	hcnt := 0
- 642 | 	for {
- 643 | 		c_maybe, _ := xitdb.cursor_iterator_next(&hit)
- 644 | 		if c_maybe == nil do break
- 645 | 		hcnt += 1
- 646 | 	}
- 647 | 	assert(hcnt == n)
- 648 | 	elapsed_hiter := time.since(t4)
- 649 | 
- 650 | 	print_result(Bench_Result{
- 651 | 		name    = "HAMT Hash_Map unordered iterator scan",
- 652 | 		ops     = n,
- 653 | 		elapsed = elapsed_hiter,
- 654 | 	})
+ 642 | 	// 1e. HAMT unordered full-tree iterator scan
+ 643 | 	t4 := time.now()
+ 644 | 	hit, _ := xitdb.hash_map_iterator(m0)
+ 645 | 	hcnt := 0
+ 646 | 	for {
+ 647 | 		c_maybe, _ := xitdb.cursor_iterator_next(&hit)
+ 648 | 		if c_maybe == nil do break
+ 649 | 		hcnt += 1
+ 650 | 	}
+ 651 | 	assert(hcnt == n)
+ 652 | 	elapsed_hiter := time.since(t4)
+ 653 | 
+ 654 | 	print_result(Bench_Result{
+ 655 | 		name    = "HAMT Hash_Map unordered iterator scan",
+ 656 | 		ops     = n,
+ 657 | 		elapsed = elapsed_hiter,
+ 658 | 	})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L632-L646`](../bench_xitdb.zig#L632-L646))

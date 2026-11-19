@@ -1,6 +1,6 @@
 # #18. `Array_List (Radix Trie) index-seek page(10)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 01: Zero-Vtable CoreMemory Reads & takeInt Fast Path**](../zig-guide/01_core_memory_zero_vtable_io.md) · [Odin Harness (`bench_xitdb.odin#L928-L942`)](../bench_xitdb.odin#L928-L942) · [Zig Harness (`bench_xitdb.zig#L920-L933`)](../bench_xitdb.zig#L920-L933)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 01: Zero-Vtable CoreMemory Reads & takeInt Fast Path**](../zig-guide/01_core_memory_zero_vtable_io.md) · [Odin Harness (`bench_xitdb.odin#L932-L946`)](../bench_xitdb.odin#L932-L946) · [Zig Harness (`bench_xitdb.zig#L920-L933`)](../bench_xitdb.zig#L920-L933)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -28,24 +28,24 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L928-L942`](../bench_xitdb.odin#L928-L942))
+### Odin ([`benchmarks/bench_xitdb.odin#L932-L946`](../bench_xitdb.odin#L932-L946))
 
 ```odin
- 928 | 		t4 := time.now()
- 929 | 		for i in 0 ..< n {
- 930 | 			ait, _ := xitdb.array_list_iterator_from(rlist, i64(i))
- 931 | 			for _ in 0 ..< 10 {
- 932 | 				c_maybe, _ := xitdb.cursor_iterator_next(&ait)
- 933 | 				if c_maybe == nil do break
- 934 | 			}
- 935 | 		}
- 936 | 		elapsed_arr_seek := time.since(t4)
- 937 | 
- 938 | 		print_result(Bench_Result{
- 939 | 			name    = "Array_List (Radix Trie) index-seek page(10)",
- 940 | 			ops     = n,
- 941 | 			elapsed = elapsed_arr_seek,
- 942 | 		})
+ 932 | 		t4 := time.now()
+ 933 | 		for i in 0 ..< n {
+ 934 | 			ait, _ := xitdb.array_list_iterator_from(rlist, i64(i))
+ 935 | 			for _ in 0 ..< 10 {
+ 936 | 				c_maybe, _ := xitdb.cursor_iterator_next(&ait)
+ 937 | 				if c_maybe == nil do break
+ 938 | 			}
+ 939 | 		}
+ 940 | 		elapsed_arr_seek := time.since(t4)
+ 941 | 
+ 942 | 		print_result(Bench_Result{
+ 943 | 			name    = "Array_List (Radix Trie) index-seek page(10)",
+ 944 | 			ops     = n,
+ 945 | 			elapsed = elapsed_arr_seek,
+ 946 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L920-L933`](../bench_xitdb.zig#L920-L933))

@@ -1,6 +1,6 @@
 # #15. `Array_List (Radix Trie) random get` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 01: Zero-Vtable CoreMemory Reads & takeInt Fast Path**](../zig-guide/01_core_memory_zero_vtable_io.md) · [Odin Harness (`bench_xitdb.odin#L872-L887`)](../bench_xitdb.odin#L872-L887) · [Zig Harness (`bench_xitdb.zig#L865-L880`)](../bench_xitdb.zig#L865-L880)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 01: Zero-Vtable CoreMemory Reads & takeInt Fast Path**](../zig-guide/01_core_memory_zero_vtable_io.md) · [Odin Harness (`bench_xitdb.odin#L876-L891`)](../bench_xitdb.odin#L876-L891) · [Zig Harness (`bench_xitdb.zig#L865-L880`)](../bench_xitdb.zig#L865-L880)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -28,25 +28,25 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L872-L887`](../bench_xitdb.odin#L872-L887))
+### Odin ([`benchmarks/bench_xitdb.odin#L876-L891`](../bench_xitdb.odin#L876-L891))
 
 ```odin
- 872 | 		l_cur, _ := xitdb.array_list_get_cursor(history, 0)
- 873 | 		rlist, _ := xitdb.read_array_list_init(l_cur.?)
- 874 | 
- 875 | 		t1 := time.now()
- 876 | 		for i in 0 ..< n {
- 877 | 			ic, _ := xitdb.array_list_get_cursor(rlist, i64(i))
- 878 | 			v, _ := xitdb.cursor_read_uint(ic.?)
- 879 | 			assert(v == u64(i))
- 880 | 		}
- 881 | 		elapsed_get := time.since(t1)
- 882 | 
- 883 | 		print_result(Bench_Result{
- 884 | 			name    = "Array_List (Radix Trie) random get",
- 885 | 			ops     = n,
- 886 | 			elapsed = elapsed_get,
- 887 | 		})
+ 876 | 		l_cur, _ := xitdb.array_list_get_cursor(history, 0)
+ 877 | 		rlist, _ := xitdb.read_array_list_init(l_cur.?)
+ 878 | 
+ 879 | 		t1 := time.now()
+ 880 | 		for i in 0 ..< n {
+ 881 | 			ic, _ := xitdb.array_list_get_cursor(rlist, i64(i))
+ 882 | 			v, _ := xitdb.cursor_read_uint(ic.?)
+ 883 | 			assert(v == u64(i))
+ 884 | 		}
+ 885 | 		elapsed_get := time.since(t1)
+ 886 | 
+ 887 | 		print_result(Bench_Result{
+ 888 | 			name    = "Array_List (Radix Trie) random get",
+ 889 | 			ops     = n,
+ 890 | 			elapsed = elapsed_get,
+ 891 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L865-L880`](../bench_xitdb.zig#L865-L880))

@@ -1,6 +1,6 @@
 # #57. `Cursor: Full KV-pair scan (read_kv_pair)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1898-L1931`)](../bench_xitdb.odin#L1898-L1931) · [Zig Harness (`bench_xitdb.zig#L1975-L2018`)](../bench_xitdb.zig#L1975-L2018)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1902-L1935`)](../bench_xitdb.odin#L1902-L1935) · [Zig Harness (`bench_xitdb.zig#L1975-L2018`)](../bench_xitdb.zig#L1975-L2018)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,43 +31,43 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1898-L1931`](../bench_xitdb.odin#L1898-L1931))
+### Odin ([`benchmarks/bench_xitdb.odin#L1902-L1935`](../bench_xitdb.odin#L1902-L1935))
 
 ```odin
-1898 | 	// 5e. Full KV-Pair Inspection Scan (`cursor_read_kv_pair` decoding both key and value cursors across `n` entries)
-1899 | 	{
-1900 | 		core: xitdb.Core = xitdb.core_memory_init()
-1901 | 		defer xitdb.core_destroy(&core)
-1902 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
-1903 | 		rc := xitdb.database_root_cursor(&db)
-1904 | 		history, _ := xitdb.write_array_list_init(rc)
-1905 | 		_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, put_cb, &hctx)
-1906 | 
-1907 | 		mc, _ := xitdb.array_list_get_cursor(history.read_array_list, 0)
-1908 | 		rm, _ := xitdb.read_hash_map_init(mc.?)
-1909 | 
-1910 | 		key_buf: [64]u8
-1911 | 		kv_cnt := 0
-1912 | 		t_kv := time.now()
-1913 | 		it, _ := xitdb.hash_map_iterator(rm)
-1914 | 		for {
-1915 | 			cur_maybe, _ := xitdb.cursor_iterator_next(&it)
-1916 | 			cur, ok := cur_maybe.?
-1917 | 			if !ok do break
-1918 | 			kv, _ := xitdb.cursor_read_kv_pair(cur, context.temp_allocator)
-1919 | 			k_obj, _ := xitdb.cursor_read_bytes_buf(kv.key_cursor, key_buf[:])
-1920 | 			v_uint, _ := xitdb.cursor_read_uint(kv.value_cursor)
-1921 | 			assert(len(k_obj.value) > 0 && v_uint < u64(n))
-1922 | 			kv_cnt += 1
-1923 | 		}
-1924 | 		assert(kv_cnt == n)
-1925 | 		elapsed_kv := time.since(t_kv)
-1926 | 
-1927 | 		print_result(Bench_Result{
-1928 | 			name    = "Cursor: Full KV-pair scan (read_kv_pair)",
-1929 | 			ops     = n,
-1930 | 			elapsed = elapsed_kv,
-1931 | 		})
+1902 | 	// 5e. Full KV-Pair Inspection Scan (`cursor_read_kv_pair` decoding both key and value cursors across `n` entries)
+1903 | 	{
+1904 | 		core: xitdb.Core = xitdb.core_memory_init()
+1905 | 		defer xitdb.core_destroy(&core)
+1906 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
+1907 | 		rc := xitdb.database_root_cursor(&db)
+1908 | 		history, _ := xitdb.write_array_list_init(rc)
+1909 | 		_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, put_cb, &hctx)
+1910 | 
+1911 | 		mc, _ := xitdb.array_list_get_cursor(history.read_array_list, 0)
+1912 | 		rm, _ := xitdb.read_hash_map_init(mc.?)
+1913 | 
+1914 | 		key_buf: [64]u8
+1915 | 		kv_cnt := 0
+1916 | 		t_kv := time.now()
+1917 | 		it, _ := xitdb.hash_map_iterator(rm)
+1918 | 		for {
+1919 | 			cur_maybe, _ := xitdb.cursor_iterator_next(&it)
+1920 | 			cur, ok := cur_maybe.?
+1921 | 			if !ok do break
+1922 | 			kv, _ := xitdb.cursor_read_kv_pair(cur, context.temp_allocator)
+1923 | 			k_obj, _ := xitdb.cursor_read_bytes_buf(kv.key_cursor, key_buf[:])
+1924 | 			v_uint, _ := xitdb.cursor_read_uint(kv.value_cursor)
+1925 | 			assert(len(k_obj.value) > 0 && v_uint < u64(n))
+1926 | 			kv_cnt += 1
+1927 | 		}
+1928 | 		assert(kv_cnt == n)
+1929 | 		elapsed_kv := time.since(t_kv)
+1930 | 
+1931 | 		print_result(Bench_Result{
+1932 | 			name    = "Cursor: Full KV-pair scan (read_kv_pair)",
+1933 | 			ops     = n,
+1934 | 			elapsed = elapsed_kv,
+1935 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1975-L2018`](../bench_xitdb.zig#L1975-L2018))
@@ -227,24 +227,24 @@
 | `xitdb/core.odin` | `core_read_slot_at` | `depth 3` (from `cursor_reload_slot`, `read_array_list_slot`) | 5 | [`xitdb/core.odin#L1204-L1208`](../../xitdb/core.odin#L1204-L1208) |
 | `xitdb/types.odin` | `slot_pointer_with_slot` | `depth 3` (from `cursor_reload_slot`, `read_array_list_slot_append`) | 3 | [`xitdb/types.odin#L924-L926`](../../xitdb/types.odin#L924-L926) |
 | `xitdb/database.odin` | `_database_truncate_with_header` | `depth 3` (from `read_slot_pointer`, `database_truncate`) | 20 | [`xitdb/database.odin#L375-L394`](../../xitdb/database.odin#L375-L394) |
-| `xitdb/core.odin` | `core_write_slot` | `depth 3` (from `read_slot_pointer`, `_exec_path_part`, `read_map_slot`) | 15 | [`xitdb/core.odin#L1097-L1111`](../../xitdb/core.odin#L1097-L1111) |
+| `xitdb/core.odin` | `core_write_slot` | `depth 3` (from `read_slot_pointer`, `_exec_path_part`, `read_array_list_slot_append`) | 15 | [`xitdb/core.odin#L1097-L1111`](../../xitdb/core.odin#L1097-L1111) |
 | `xitdb/database.odin` | `init_part_for` | `depth 3` (from `read_slot_pointer`) | 21 | [`xitdb/database.odin#L484-L504`](../../xitdb/database.odin#L484-L504) |
 | `xitdb/core.odin` | `core_read_slot_raw_at` | `depth 3` (from `read_slot_pointer`, `core_read_slot_at`, `read_map_slot`) | 24 | [`xitdb/core.odin#L1179-L1202`](../../xitdb/core.odin#L1179-L1202) |
 | `xitdb/database.odin` | `_exec_path_part` | `depth 3` (from `read_slot_pointer`) | 743 | [`xitdb/database.odin#L663-L1405`](../../xitdb/database.odin#L663-L1405) |
 | `xitdb/database.odin` | `database_copy_collection_if_frozen` | `depth 4` (from `_exec_path_part`) | 12 | [`xitdb/database.odin#L560-L571`](../../xitdb/database.odin#L560-L571) |
+| `xitdb/hamt.odin` | `read_array_list_slot_append` | `depth 4` (from `_exec_path_part`) | 38 | [`xitdb/hamt.odin#L343-L380`](../../xitdb/hamt.odin#L343-L380) |
+| `xitdb/types.odin` | `array_list_header_to_bytes` | `depth 4` (from `_exec_path_part`) | 6 | [`xitdb/types.odin#L1084-L1089`](../../xitdb/types.odin#L1084-L1089) |
+| `xitdb/database.odin` | `transaction_is_scratch_position` | `depth 4` (from `_exec_path_part`) | 6 | [`xitdb/database.odin#L20-L25`](../../xitdb/database.odin#L20-L25) |
 | `xitdb/database.odin` | `database_check_hash_target` | `depth 4` (from `_exec_path_part`) | 11 | [`xitdb/database.odin#L534-L544`](../../xitdb/database.odin#L534-L544) |
 | `xitdb/hamt.odin` | `read_map_slot` | `depth 4` (from `_exec_path_part`) | 224 | [`xitdb/hamt.odin#L15-L238`](../../xitdb/hamt.odin#L15-L238) |
 | `xitdb/core.odin` | `core_write_long` | `depth 4` (from `_exec_path_part`, `_encode_bytes_slot`) | 6 | [`xitdb/core.odin#L1015-L1020`](../../xitdb/core.odin#L1015-L1020) |
-| `xitdb/types.odin` | `array_list_header_to_bytes` | `depth 4` (from `_exec_path_part`) | 6 | [`xitdb/types.odin#L1084-L1089`](../../xitdb/types.odin#L1084-L1089) |
-| `xitdb/database.odin` | `database_is_old` | `depth 4` (from `_exec_path_part`, `read_map_slot`, `database_copy_index_block_if_old`) | 7 | [`xitdb/database.odin#L506-L512`](../../xitdb/database.odin#L506-L512) |
-| `xitdb/types.odin` | `array_list_header_with_ptr` | `depth 4` (from `_exec_path_part`) | 3 | [`xitdb/types.odin#L1080-L1082`](../../xitdb/types.odin#L1080-L1082) |
-| `xitdb/hamt.odin` | `read_array_list_slot_append` | `depth 4` (from `_exec_path_part`) | 38 | [`xitdb/hamt.odin#L343-L380`](../../xitdb/hamt.odin#L343-L380) |
-| `xitdb/database.odin` | `transaction_is_scratch_position` | `depth 4` (from `_exec_path_part`) | 6 | [`xitdb/database.odin#L20-L25`](../../xitdb/database.odin#L20-L25) |
 | `xitdb/database.odin` | `_try_encode_inline_data` | `depth 4` (from `_exec_path_part`) | 54 | [`xitdb/database.odin#L1420-L1473`](../../xitdb/database.odin#L1420-L1473) |
 | `xitdb/database.odin` | `_extract_bytes_data` | `depth 4` (from `_exec_path_part`) | 12 | [`xitdb/database.odin#L1407-L1418`](../../xitdb/database.odin#L1407-L1418) |
 | `xitdb/types.odin` | `bytes_is_short` | `depth 4` (from `_exec_path_part`, `_try_encode_inline_data`, `_encode_bytes_slot`) | 12 | [`xitdb/types.odin#L1398-L1409`](../../xitdb/types.odin#L1398-L1409) |
 | `xitdb/types.odin` | `slot_with_full` | `depth 4` (from `_exec_path_part`, `_try_encode_inline_data`, `_encode_writeable_data`) | 5 | [`xitdb/types.odin#L868-L872`](../../xitdb/types.odin#L868-L872) |
 | `xitdb/database.odin` | `_encode_writeable_data` | `depth 4` (from `_exec_path_part`) | 32 | [`xitdb/database.odin#L1475-L1506`](../../xitdb/database.odin#L1475-L1506) |
+| `xitdb/database.odin` | `database_is_old` | `depth 4` (from `_exec_path_part`, `read_map_slot`, `database_copy_index_block_if_old`) | 7 | [`xitdb/database.odin#L506-L512`](../../xitdb/database.odin#L506-L512) |
+| `xitdb/types.odin` | `array_list_header_with_ptr` | `depth 4` (from `_exec_path_part`) | 3 | [`xitdb/types.odin#L1080-L1082`](../../xitdb/types.odin#L1080-L1082) |
 | `xitdb/types.odin` | `radix_shift` | `depth 4` (from `_exec_path_part`, `read_array_list_slot_append`) | 6 | [`xitdb/types.odin#L1475-L1480`](../../xitdb/types.odin#L1475-L1480) |
 | `xitdb/hamt.odin` | `read_array_list_slot` | `depth 4` (from `_exec_path_part`, `read_array_list_slot_append`) | 67 | [`xitdb/hamt.odin#L382-L448`](../../xitdb/hamt.odin#L382-L448) |
 | `xitdb/cursor.odin` | `_fill_slot_block_from` | `depth 3` (from `_init_iter_level`, `_init_btree_iter_level`) | 27 | [`xitdb/cursor.odin#L730-L756`](../../xitdb/cursor.odin#L730-L756) |

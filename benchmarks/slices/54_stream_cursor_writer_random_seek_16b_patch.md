@@ -1,6 +1,6 @@
 # #54. `Stream: Cursor_Writer random seek + 16B patch` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1786-L1816`)](../bench_xitdb.odin#L1786-L1816) · [Zig Harness (`bench_xitdb.zig#L1873-L1900`)](../bench_xitdb.zig#L1873-L1900)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1790-L1820`)](../bench_xitdb.odin#L1790-L1820) · [Zig Harness (`bench_xitdb.zig#L1873-L1900`)](../bench_xitdb.zig#L1873-L1900)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,40 +31,40 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1786-L1816`](../bench_xitdb.odin#L1786-L1816))
+### Odin ([`benchmarks/bench_xitdb.odin#L1790-L1820`](../bench_xitdb.odin#L1790-L1820))
 
 ```odin
-1786 | 		// Random-access in-place patch via `cursor_writer_seek_to`
-1787 | 		Patch_Ctx :: struct {
-1788 | 			ops: int,
-1789 | 		}
-1790 | 		pctx := Patch_Ctx{ops = seek_ops}
-1791 | 
-1792 | 		stream_patch_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
-1793 | 			c := (^Patch_Ctx)(user_data)
-1794 | 			w := xitdb.cursor_writer(cursor) or_return
-1795 | 			init_buf: [65536]u8
-1796 | 			_, _ = xitdb.cursor_writer_write(&w, init_buf[:])
-1797 | 			patch: [16]u8
-1798 | 			for i in 0 ..< c.ops {
-1799 | 				off := i64((i * 1031) % (65536 - 16))
-1800 | 				xitdb.cursor_writer_seek_to(&w, off) or_return
-1801 | 				patch[0] = u8(i)
-1802 | 				_, err := xitdb.cursor_writer_write(&w, patch[:])
-1803 | 				if err != nil do return err
-1804 | 			}
-1805 | 			return xitdb.cursor_writer_finish(&w)
-1806 | 		}
-1807 | 
-1808 | 		t_wseek := time.now()
-1809 | 		_ = xitdb.database_run_context(&db, stream_patch_cb, &pctx)
-1810 | 		elapsed_wseek := time.since(t_wseek)
+1790 | 		// Random-access in-place patch via `cursor_writer_seek_to`
+1791 | 		Patch_Ctx :: struct {
+1792 | 			ops: int,
+1793 | 		}
+1794 | 		pctx := Patch_Ctx{ops = seek_ops}
+1795 | 
+1796 | 		stream_patch_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+1797 | 			c := (^Patch_Ctx)(user_data)
+1798 | 			w := xitdb.cursor_writer(cursor) or_return
+1799 | 			init_buf: [65536]u8
+1800 | 			_, _ = xitdb.cursor_writer_write(&w, init_buf[:])
+1801 | 			patch: [16]u8
+1802 | 			for i in 0 ..< c.ops {
+1803 | 				off := i64((i * 1031) % (65536 - 16))
+1804 | 				xitdb.cursor_writer_seek_to(&w, off) or_return
+1805 | 				patch[0] = u8(i)
+1806 | 				_, err := xitdb.cursor_writer_write(&w, patch[:])
+1807 | 				if err != nil do return err
+1808 | 			}
+1809 | 			return xitdb.cursor_writer_finish(&w)
+1810 | 		}
 1811 | 
-1812 | 		print_result(Bench_Result{
-1813 | 			name    = "Stream: Cursor_Writer random seek + 16B patch",
-1814 | 			ops     = seek_ops,
-1815 | 			elapsed = elapsed_wseek,
-1816 | 		})
+1812 | 		t_wseek := time.now()
+1813 | 		_ = xitdb.database_run_context(&db, stream_patch_cb, &pctx)
+1814 | 		elapsed_wseek := time.since(t_wseek)
+1815 | 
+1816 | 		print_result(Bench_Result{
+1817 | 			name    = "Stream: Cursor_Writer random seek + 16B patch",
+1818 | 			ops     = seek_ops,
+1819 | 			elapsed = elapsed_wseek,
+1820 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1873-L1900`](../bench_xitdb.zig#L1873-L1900))

@@ -1,6 +1,6 @@
 # #38. `Sorted_Set (B+Tree) contains lookup` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1358-L1372`)](../bench_xitdb.odin#L1358-L1372) · [Zig Harness (`bench_xitdb.zig#L1338-L1352`)](../bench_xitdb.zig#L1338-L1352)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 03: SortedMap & SortedSet Binary Search & Index Select**](../zig-guide/03_sorted_bptree_binary_search.md) · [Odin Harness (`bench_xitdb.odin#L1362-L1376`)](../bench_xitdb.odin#L1362-L1376) · [Zig Harness (`bench_xitdb.zig#L1338-L1352`)](../bench_xitdb.zig#L1338-L1352)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,24 +31,24 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1358-L1372`](../bench_xitdb.odin#L1358-L1372))
+### Odin ([`benchmarks/bench_xitdb.odin#L1362-L1376`](../bench_xitdb.odin#L1362-L1376))
 
 ```odin
-1358 | 	ss_cur, _ := xitdb.array_list_get_cursor(history, -1)
-1359 | 	rss, _ := xitdb.read_sorted_set_init(ss_cur.?)
-1360 | 
-1361 | 	t10 := time.now()
-1362 | 	for k in keys {
-1363 | 		ok, _ := xitdb.sorted_set_contains(rss, k)
-1364 | 		assert(ok)
-1365 | 	}
-1366 | 	elapsed_sset_contains := time.since(t10)
-1367 | 
-1368 | 	print_result(Bench_Result{
-1369 | 		name    = "Sorted_Set (B+Tree) contains lookup",
-1370 | 		ops     = n,
-1371 | 		elapsed = elapsed_sset_contains,
-1372 | 	})
+1362 | 	ss_cur, _ := xitdb.array_list_get_cursor(history, -1)
+1363 | 	rss, _ := xitdb.read_sorted_set_init(ss_cur.?)
+1364 | 
+1365 | 	t10 := time.now()
+1366 | 	for k in keys {
+1367 | 		ok, _ := xitdb.sorted_set_contains(rss, k)
+1368 | 		assert(ok)
+1369 | 	}
+1370 | 	elapsed_sset_contains := time.since(t10)
+1371 | 
+1372 | 	print_result(Bench_Result{
+1373 | 		name    = "Sorted_Set (B+Tree) contains lookup",
+1374 | 		ops     = n,
+1375 | 		elapsed = elapsed_sset_contains,
+1376 | 	})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1338-L1352`](../bench_xitdb.zig#L1338-L1352))

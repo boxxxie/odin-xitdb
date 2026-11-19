@@ -1,6 +1,6 @@
 # #13. `HAMT Counted_Hash_Set membership check` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 04: 16-Way HAMT Single-Pass KV & Lazy Remove**](../zig-guide/04_hamt_single_pass_kv_and_lazy_remove.md) · [Odin Harness (`bench_xitdb.odin#L811-L827`)](../bench_xitdb.odin#L811-L827) · [Zig Harness (`bench_xitdb.zig#L808-L824`)](../bench_xitdb.zig#L808-L824)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 04: 16-Way HAMT Single-Pass KV & Lazy Remove**](../zig-guide/04_hamt_single_pass_kv_and_lazy_remove.md) · [Odin Harness (`bench_xitdb.odin#L815-L831`)](../bench_xitdb.odin#L815-L831) · [Zig Harness (`bench_xitdb.zig#L808-L824`)](../bench_xitdb.zig#L808-L824)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -32,26 +32,26 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L811-L827`](../bench_xitdb.odin#L811-L827))
+### Odin ([`benchmarks/bench_xitdb.odin#L815-L831`](../bench_xitdb.odin#L815-L831))
 
 ```odin
- 811 | 	cset_cur, _ := xitdb.array_list_get_cursor(history, -1)
- 812 | 	rcset, _ := xitdb.read_counted_hash_set_init(cset_cur.?)
- 813 | 	cset_cnt, _ := xitdb.counted_hash_set_count(rcset)
- 814 | 	assert(cset_cnt == i64(n))
- 815 | 
- 816 | 	t11 := time.now()
- 817 | 	for k in keys {
- 818 | 		kc, _ := xitdb.hash_set_get_cursor(rcset.read_hash_set, k)
- 819 | 		assert(kc != nil)
- 820 | 	}
- 821 | 	elapsed_cset_get := time.since(t11)
- 822 | 
- 823 | 	print_result(Bench_Result{
- 824 | 		name    = "HAMT Counted_Hash_Set membership check",
- 825 | 		ops     = n,
- 826 | 		elapsed = elapsed_cset_get,
- 827 | 	})
+ 815 | 	cset_cur, _ := xitdb.array_list_get_cursor(history, -1)
+ 816 | 	rcset, _ := xitdb.read_counted_hash_set_init(cset_cur.?)
+ 817 | 	cset_cnt, _ := xitdb.counted_hash_set_count(rcset)
+ 818 | 	assert(cset_cnt == i64(n))
+ 819 | 
+ 820 | 	t11 := time.now()
+ 821 | 	for k in keys {
+ 822 | 		kc, _ := xitdb.hash_set_get_cursor(rcset.read_hash_set, k)
+ 823 | 		assert(kc != nil)
+ 824 | 	}
+ 825 | 	elapsed_cset_get := time.since(t11)
+ 826 | 
+ 827 | 	print_result(Bench_Result{
+ 828 | 		name    = "HAMT Counted_Hash_Set membership check",
+ 829 | 		ops     = n,
+ 830 | 		elapsed = elapsed_cset_get,
+ 831 | 	})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L808-L824`](../bench_xitdb.zig#L808-L824))

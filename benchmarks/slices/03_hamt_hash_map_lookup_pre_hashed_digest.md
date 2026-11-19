@@ -1,6 +1,6 @@
 # #3. `HAMT Hash_Map lookup (pre-hashed digest)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 04: 16-Way HAMT Single-Pass KV & Lazy Remove**](../zig-guide/04_hamt_single_pass_kv_and_lazy_remove.md) · [Odin Harness (`bench_xitdb.odin#L558-L575`)](../bench_xitdb.odin#L558-L575) · [Zig Harness (`bench_xitdb.zig#L557-L574`)](../bench_xitdb.zig#L557-L574)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 04: 16-Way HAMT Single-Pass KV & Lazy Remove**](../zig-guide/04_hamt_single_pass_kv_and_lazy_remove.md) · [Odin Harness (`bench_xitdb.odin#L562-L579`)](../bench_xitdb.odin#L562-L579) · [Zig Harness (`bench_xitdb.zig#L557-L574`)](../bench_xitdb.zig#L557-L574)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -32,27 +32,27 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L558-L575`](../bench_xitdb.odin#L558-L575))
+### Odin ([`benchmarks/bench_xitdb.odin#L562-L579`](../bench_xitdb.odin#L562-L579))
 
 ```odin
- 558 | 	digests := make([][]u8, n, context.temp_allocator)
- 559 | 	for k, idx in keys {
- 560 | 		digests[idx] = xitdb.database_digest_string(&db, k, context.temp_allocator)
- 561 | 	}
- 562 | 
- 563 | 	t1_pre := time.now()
- 564 | 	for d, idx in digests {
- 565 | 		vc, _ := xitdb.hash_map_get_cursor_by_hash(m0, d)
- 566 | 		v, _ := xitdb.cursor_read_uint(vc.?)
- 567 | 		assert(v == u64(idx))
- 568 | 	}
- 569 | 	elapsed_get_pre := time.since(t1_pre)
- 570 | 
- 571 | 	print_result(Bench_Result{
- 572 | 		name    = "HAMT Hash_Map lookup (pre-hashed digest)",
- 573 | 		ops     = n,
- 574 | 		elapsed = elapsed_get_pre,
- 575 | 	})
+ 562 | 	digests := make([][]u8, n, context.temp_allocator)
+ 563 | 	for k, idx in keys {
+ 564 | 		digests[idx] = xitdb.database_digest_string(&db, k, context.temp_allocator)
+ 565 | 	}
+ 566 | 
+ 567 | 	t1_pre := time.now()
+ 568 | 	for d, idx in digests {
+ 569 | 		vc, _ := xitdb.hash_map_get_cursor_by_hash(m0, d)
+ 570 | 		v, _ := xitdb.cursor_read_uint(vc.?)
+ 571 | 		assert(v == u64(idx))
+ 572 | 	}
+ 573 | 	elapsed_get_pre := time.since(t1_pre)
+ 574 | 
+ 575 | 	print_result(Bench_Result{
+ 576 | 		name    = "HAMT Hash_Map lookup (pre-hashed digest)",
+ 577 | 		ops     = n,
+ 578 | 		elapsed = elapsed_get_pre,
+ 579 | 	})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L557-L574`](../bench_xitdb.zig#L557-L574))
