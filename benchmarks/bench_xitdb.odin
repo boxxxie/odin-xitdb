@@ -33,7 +33,7 @@ Bench_Accum :: struct {
 g_jsonl_file:     ^os.File
 g_history_file:   ^os.File
 g_bench_rank:     int
-g_runs:           int = 5
+g_runs:           int = 7
 g_warmup:         int = 1
 g_commit_sha:     string = "unknown"
 g_run_id:         string = "run-0"

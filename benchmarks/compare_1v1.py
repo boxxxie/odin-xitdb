@@ -43,6 +43,42 @@ def find_zig() -> str:
     raise RuntimeError("Could not find 'zig' binary. Set ZIG=/path/to/zig (0.17.0).")
 
 
+MIN_ZIG_VERSION = (0, 17)
+
+
+def get_zig_version(zig_bin: str) -> Tuple[Optional[Tuple[int, int]], str]:
+    try:
+        raw = subprocess.check_output(
+            [zig_bin, "version"],
+            stderr=subprocess.STDOUT,
+            text=True,
+        ).strip()
+    except Exception as exc:
+        return None, f"unknown ({exc})"
+    m = re.match(r"^(\d+)\.(\d+)", raw)
+    if not m:
+        return None, raw
+    return (int(m.group(1)), int(m.group(2))), raw
+
+
+def find_compatible_zig(
+    min_version: Tuple[int, int] = MIN_ZIG_VERSION,
+) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        zig_bin = find_zig()
+    except RuntimeError as exc:
+        return None, str(exc)
+    ver, raw = get_zig_version(zig_bin)
+    req_str = f"{min_version[0]}.{min_version[1]}"
+    if ver is None or ver < min_version:
+        return (
+            None,
+            f"Skipping xitdb-zig: found Zig '{raw}' at '{zig_bin}', "
+            f"but build.zig requires Zig >= {req_str} (set ZIG=/path/to/zig-{req_str}+ to enable).",
+        )
+    return zig_bin, None
+
+
 def current_git_commit() -> str:
     try:
         out = subprocess.check_output(
@@ -2050,18 +2086,21 @@ def main() -> None:
                         + (f", filter={bench_filter})" if bench_filter else ")"),
                     )
                 if zig_groups:
-                    zig_bin = find_zig()
-                    zig_build_args = [zig_bin, "build", "bench", "-Doptimize=ReleaseFast", "-Dcpu=native"]
-                    if args.patched:
-                        zig_build_args.append("-Dpatched=true")
-                    zig_flags = list(common_flags) + ["--groups", ",".join(zig_groups)]
-                    if bench_filter:
-                        zig_flags += ["--filter", bench_filter]
-                    run_cmd(
-                        zig_build_args + ["--"] + zig_flags,
-                        f"xitdb-zig{' (patched)' if args.patched else ''} (selective: groups={','.join(zig_groups)}"
-                        + (f", filter={bench_filter})" if bench_filter else ")"),
-                    )
+                    zig_bin, zig_skip_reason = find_compatible_zig()
+                    if zig_bin is None:
+                        print(f"==> WARNING: {zig_skip_reason}", file=sys.stderr)
+                    else:
+                        zig_build_args = [zig_bin, "build", "bench", "-Doptimize=ReleaseFast", "-Dcpu=native"]
+                        if args.patched:
+                            zig_build_args.append("-Dpatched=true")
+                        zig_flags = list(common_flags) + ["--groups", ",".join(zig_groups)]
+                        if bench_filter:
+                            zig_flags += ["--filter", bench_filter]
+                        run_cmd(
+                            zig_build_args + ["--"] + zig_flags,
+                            f"xitdb-zig{' (patched)' if args.patched else ''} (selective: groups={','.join(zig_groups)}"
+                            + (f", filter={bench_filter})" if bench_filter else ")"),
+                        )
         else:
             extra_flags: List[str] = []
             if args.groups:
@@ -2079,14 +2118,19 @@ def main() -> None:
                     "xitdb-odin (-o:speed -microarch:native)",
                 )
             if run_zig:
-                zig_bin = find_zig()
-                zig_build_args = [zig_bin, "build", "bench", "-Doptimize=ReleaseFast", "-Dcpu=native"]
-                if args.patched:
-                    zig_build_args.append("-Dpatched=true")
-                run_cmd(
-                    zig_build_args + ["--"] + common_flags + extra_flags,
-                    f"xitdb-zig (-Doptimize=ReleaseFast -Dcpu=native{' -Dpatched=true' if args.patched else ''})",
-                )
+                zig_bin, zig_skip_reason = find_compatible_zig()
+                if zig_bin is None:
+                    print(f"==> WARNING: {zig_skip_reason}", file=sys.stderr)
+                    if args.lang == "zig":
+                        sys.exit(1)
+                else:
+                    zig_build_args = [zig_bin, "build", "bench", "-Doptimize=ReleaseFast", "-Dcpu=native"]
+                    if args.patched:
+                        zig_build_args.append("-Dpatched=true")
+                    run_cmd(
+                        zig_build_args + ["--"] + common_flags + extra_flags,
+                        f"xitdb-zig (-Doptimize=ReleaseFast -Dcpu=native{' -Dpatched=true' if args.patched else ''})",
+                    )
             if run_lua:
                 run_cmd(
                     ["odin", "run", "benchmarks", "-o:speed", "-microarch:native", "--", "--lang", "lua"] + common_flags + extra_flags,
