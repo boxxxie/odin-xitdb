@@ -53,6 +53,24 @@ selector_destroy :: proc(sel: ^Parsed_Selector, allocator := context.allocator) 
 	sel.steps = nil
 }
 
+// Free a `[]Path_Step` slice produced by `parse_steps_buf`, skipping slice deletion when backed by `buf`.
+steps_destroy_buf :: proc(steps: []Path_Step, buf: []Path_Step, allocator := context.allocator) {
+	for st in steps {
+		if st.owns_key && len(st.key) > 0 {
+			delete(st.key, allocator)
+		}
+	}
+	if steps != nil && (len(buf) == 0 || raw_data(steps) != raw_data(buf)) {
+		delete(steps, allocator)
+	}
+}
+
+// Free a `Parsed_Selector` produced by `parse_selector_buf`.
+selector_destroy_buf :: proc(sel: ^Parsed_Selector, buf: []Path_Step, allocator := context.allocator) {
+	steps_destroy_buf(sel.steps, buf, allocator)
+	sel.steps = nil
+}
+
 // Embedded Odin Path Step Combinators
 hm :: proc(key: string) -> Path_Step {
 	return Path_Step{kind = .Hash_Map_Key, key = key}
@@ -153,8 +171,32 @@ _write_escaped_step_key :: proc(b: ^strings.Builder, key: string) {
 	}
 }
 
+@(private = "file")
+_push_step_buf :: proc(
+	buf: []Path_Step,
+	buf_len: ^int,
+	dyn: ^[dynamic]Path_Step,
+	using_dyn: ^bool,
+	step: Path_Step,
+	allocator: runtime.Allocator,
+) {
+	if !using_dyn^ {
+		if buf_len^ < len(buf) {
+			buf[buf_len^] = step
+			buf_len^ += 1
+			return
+		}
+		dyn^ = make([dynamic]Path_Step, buf_len^, max(len(buf) * 2, 16), allocator)
+		if buf_len^ > 0 {
+			copy(dyn^[:], buf[:buf_len^])
+		}
+		using_dyn^ = true
+	}
+	append(dyn, step)
+}
+
 // Parse a selector string like "@-1.users[\"101\"].age", "$catalog[\"apple\"]", or ".todos[[0]]".
-parse_selector :: proc(selector: string, allocator := context.temp_allocator) -> (res: Parsed_Selector, err: Error) {
+parse_selector_buf :: proc(selector: string, buf: []Path_Step, allocator := context.temp_allocator) -> (res: Parsed_Selector, err: Error) {
 	s := strings.trim_space(selector)
 	if len(s) == 0 {
 		return {}, nil
@@ -181,16 +223,33 @@ parse_selector :: proc(selector: string, allocator := context.temp_allocator) ->
 		res.moment_index = m_idx
 	}
 
-	steps := parse_steps(s[i:], allocator) or_return
+	steps := parse_steps_buf(s[i:], buf, allocator) or_return
 	res.steps = steps
 	return res, nil
 }
 
+parse_selector :: proc(selector: string, allocator := context.temp_allocator) -> (res: Parsed_Selector, err: Error) {
+	return parse_selector_buf(selector, nil, allocator)
+}
+
 parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (res: []Path_Step, err: Error) {
+	return parse_steps_buf(path_str, nil, allocator)
+}
+
+parse_steps_buf :: proc(path_str: string, buf: []Path_Step, allocator := context.temp_allocator) -> (res: []Path_Step, err: Error) {
 	s := strings.trim_space(path_str)
-	steps := make([dynamic]Path_Step, 0, 8, allocator)
+	if len(s) == 0 {
+		return nil, nil
+	}
+	buf_len := 0
+	dyn: [dynamic]Path_Step
+	using_dyn := false
 	defer if err != nil {
-		steps_destroy(steps[:], allocator)
+		if using_dyn {
+			steps_destroy(dyn[:], allocator)
+		} else if buf_len > 0 {
+			steps_destroy_buf(buf[:buf_len], buf, allocator)
+		}
 	}
 	i := 0
 
@@ -200,7 +259,7 @@ parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (r
 		case '.':
 			i += 1
 			key, owns_k, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
-			append(&steps, Path_Step{kind = .Hash_Map_Key, key = key, owns_key = owns_k})
+			_push_step_buf(buf, &buf_len, &dyn, &using_dyn, Path_Step{kind = .Hash_Map_Key, key = key, owns_key = owns_k}, allocator)
 			i = next_i
 
 		case '#':
@@ -208,30 +267,30 @@ parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (r
 			if i < len(s) && s[i] == '%' {
 				i += 1
 				key, owns_k, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
-				append(&steps, Path_Step{kind = .Counted_Set_Member, key = key, owns_key = owns_k})
+				_push_step_buf(buf, &buf_len, &dyn, &using_dyn, Path_Step{kind = .Counted_Set_Member, key = key, owns_key = owns_k}, allocator)
 				i = next_i
 			} else {
 				key, owns_k, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
-				append(&steps, Path_Step{kind = .Counted_Hash_Map_Key, key = key, owns_key = owns_k})
+				_push_step_buf(buf, &buf_len, &dyn, &using_dyn, Path_Step{kind = .Counted_Hash_Map_Key, key = key, owns_key = owns_k}, allocator)
 				i = next_i
 			}
 
 		case '$':
 			i += 1
 			key, owns_k, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
-			append(&steps, Path_Step{kind = .Sorted_Map_Key, key = key, owns_key = owns_k})
+			_push_step_buf(buf, &buf_len, &dyn, &using_dyn, Path_Step{kind = .Sorted_Map_Key, key = key, owns_key = owns_k}, allocator)
 			i = next_i
 
 		case '%':
 			i += 1
 			key, owns_k, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
-			append(&steps, Path_Step{kind = .Hash_Set_Member, key = key, owns_key = owns_k})
+			_push_step_buf(buf, &buf_len, &dyn, &using_dyn, Path_Step{kind = .Hash_Set_Member, key = key, owns_key = owns_k}, allocator)
 			i = next_i
 
 		case '^':
 			i += 1
 			key, owns_k, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
-			append(&steps, Path_Step{kind = .Sorted_Set_Member, key = key, owns_key = owns_k})
+			_push_step_buf(buf, &buf_len, &dyn, &using_dyn, Path_Step{kind = .Sorted_Set_Member, key = key, owns_key = owns_k}, allocator)
 			i = next_i
 
 		case '[':
@@ -250,22 +309,24 @@ parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (r
 				if !ok {
 					return nil, .Invalid_Range
 				}
-				append(&steps, Path_Step{kind = .Linked_List_Idx, index = idx})
+				_push_step_buf(buf, &buf_len, &dyn, &using_dyn, Path_Step{kind = .Linked_List_Idx, index = idx}, allocator)
 				i += 2
 			} else if i + 1 < len(s) && (s[i + 1] == '"' || s[i + 1] == '\'') {
 				// Bracketed map key: ["key"] — inherits collection kind if preceded by $key or #key
 				key, owns_k, next_i := _parse_bracketed_string(s, i, allocator) or_return
 				step_kind := Step_Kind.Hash_Map_Key
-				if len(steps) == 1 {
-					if steps[0].kind == .Counted_Hash_Map_Key {
-						steps[0].kind = .Hash_Map_Key
+				total_len := len(dyn) if using_dyn else buf_len
+				if total_len == 1 {
+					first := &dyn[0] if using_dyn else &buf[0]
+					if first.kind == .Counted_Hash_Map_Key {
+						first.kind = .Hash_Map_Key
 						step_kind = .Counted_Hash_Map_Key
-					} else if steps[0].kind == .Sorted_Map_Key {
-						steps[0].kind = .Hash_Map_Key
+					} else if first.kind == .Sorted_Map_Key {
+						first.kind = .Hash_Map_Key
 						step_kind = .Sorted_Map_Key
 					}
 				}
-				append(&steps, Path_Step{kind = step_kind, key = key, owns_key = owns_k})
+				_push_step_buf(buf, &buf_len, &dyn, &using_dyn, Path_Step{kind = step_kind, key = key, owns_key = owns_k}, allocator)
 				i = next_i
 			} else {
 				// Array_List index: [i]
@@ -282,19 +343,25 @@ parse_steps :: proc(path_str: string, allocator := context.temp_allocator) -> (r
 				if !ok {
 					return nil, .Invalid_Range
 				}
-				append(&steps, Path_Step{kind = .Array_List_Idx, index = idx})
+				_push_step_buf(buf, &buf_len, &dyn, &using_dyn, Path_Step{kind = .Array_List_Idx, index = idx}, allocator)
 				i += 1
 			}
 
 		case:
 			// Bare leading identifier defaults to Hash_Map_Key
 			key, owns_k, next_i := _parse_step_ident_or_bracket(s, i, allocator) or_return
-			append(&steps, Path_Step{kind = .Hash_Map_Key, key = key, owns_key = owns_k})
+			_push_step_buf(buf, &buf_len, &dyn, &using_dyn, Path_Step{kind = .Hash_Map_Key, key = key, owns_key = owns_k}, allocator)
 			i = next_i
 		}
 	}
 
-	return steps[:], nil
+	if using_dyn {
+		return dyn[:], nil
+	}
+	if buf_len == 0 {
+		return nil, nil
+	}
+	return buf[:buf_len], nil
 }
 
 @(private = "file")
@@ -489,9 +556,136 @@ read_steps_cursor :: proc(start: Read_Cursor, steps: []Path_Step) -> (res: Maybe
 	return cur, nil
 }
 
+// Populate `step_hashes` for hash-keyed steps using `hash_bufs` (`len(hash_bufs) >= len(steps)` and `len(step_hashes) >= len(steps)`).
+precompute_step_hashes :: proc(db: ^Database, steps: []Path_Step, hash_bufs: [][64]u8, step_hashes: [][]u8) {
+	for step, i in steps {
+		#partial switch step.kind {
+		case .Hash_Map_Key, .Counted_Hash_Map_Key, .Sorted_Map_Key, .Hash_Set_Member, .Counted_Set_Member:
+			step_hashes[i] = database_digest_string_buf(db, step.key, hash_bufs[i][:])
+		case:
+			step_hashes[i] = nil
+		}
+	}
+}
+
+// Resolve a `Read_Cursor` by walking `steps` using pre-computed step digests from `precompute_step_hashes`.
+// When `strict_sigils` is `false`, `.Hash_Map_Key` dispatches across map/set collections and `.Sorted_Map_Key`
+// accepts `.Hash_Map`/`.Counted_Hash_Map` (matching `read_steps_cursor`); when `true`, `.Sorted_Map_Key` requires `.Sorted_Map`.
+read_prehashed_steps_cursor :: proc(
+	start_cur: Read_Cursor,
+	steps: []Path_Step,
+	step_hashes: [][]u8,
+	strict_sigils := false,
+) -> (res: Maybe(Read_Cursor), err: Error) {
+	cur := start_cur
+	for step, i in steps {
+		next_maybe: Maybe(Read_Cursor)
+		slot_ptr := cursor_resolved(cur) or_return
+		tag := slot_ptr.slot.tag
+		if tag == .None {
+			return nil, nil
+		}
+		switch step.kind {
+		case .Hash_Map_Key:
+			#partial switch tag {
+			case .Hash_Map:
+				m := read_hash_map_init(cur) or_return
+				next_maybe = hash_map_get_cursor_by_hash(m, step_hashes[i]) or_return
+			case .Counted_Hash_Map:
+				cm := read_counted_hash_map_init(cur) or_return
+				next_maybe = hash_map_get_cursor_by_hash(cm.read_hash_map, step_hashes[i]) or_return
+			case .Sorted_Map:
+				sm_col := read_sorted_map_init(cur) or_return
+				next_maybe = sorted_map_get_cursor(sm_col, step.key) or_return
+			case .Hash_Set:
+				hs_col := read_hash_set_init(cur) or_return
+				next_maybe = hash_set_get_cursor_by_hash(hs_col, step_hashes[i]) or_return
+			case .Counted_Hash_Set:
+				cs_col := read_counted_hash_set_init(cur) or_return
+				next_maybe = hash_set_get_cursor_by_hash(cs_col.read_hash_set, step_hashes[i]) or_return
+			case .Sorted_Set:
+				ss_col := read_sorted_set_init(cur) or_return
+				next_maybe = cursor_read_path(
+					ss_col.cursor,
+					[]Path_Part{Sorted_Map_Get{target = Sorted_Map_Get_Key{key = transmute([]u8)step.key}}},
+				) or_return
+			case:
+				return nil, .Unexpected_Tag
+			}
+
+		case .Counted_Hash_Map_Key:
+			cm := read_counted_hash_map_init(cur) or_return
+			next_maybe = hash_map_get_cursor_by_hash(cm.read_hash_map, step_hashes[i]) or_return
+
+		case .Sorted_Map_Key:
+			if !strict_sigils && (tag == .Hash_Map || tag == .Counted_Hash_Map) {
+				m := read_hash_map_init(cur) or_return
+				next_maybe = hash_map_get_cursor_by_hash(m, step_hashes[i]) or_return
+			} else {
+				sm_col := read_sorted_map_init(cur) or_return
+				next_maybe = sorted_map_get_cursor(sm_col, step.key) or_return
+			}
+
+		case .Array_List_Idx:
+			#partial switch tag {
+			case .Array_List:
+				al_col := read_array_list_init(cur) or_return
+				next_maybe = array_list_get_cursor(al_col, step.index) or_return
+			case .Linked_Array_List:
+				ll_col := read_linked_array_list_init(cur) or_return
+				next_maybe = linked_array_list_get_cursor(ll_col, step.index) or_return
+			case:
+				return nil, .Unexpected_Tag
+			}
+
+		case .Linked_List_Idx:
+			ll_col := read_linked_array_list_init(cur) or_return
+			next_maybe = linked_array_list_get_cursor(ll_col, step.index) or_return
+
+		case .Hash_Set_Member:
+			hs_col := read_hash_set_init(cur) or_return
+			next_maybe = hash_set_get_cursor_by_hash(hs_col, step_hashes[i]) or_return
+
+		case .Counted_Set_Member:
+			cs_col := read_counted_hash_set_init(cur) or_return
+			next_maybe = hash_set_get_cursor_by_hash(cs_col.read_hash_set, step_hashes[i]) or_return
+
+		case .Sorted_Set_Member:
+			ss_col := read_sorted_set_init(cur) or_return
+			next_maybe = cursor_read_path(ss_col.cursor, []Path_Part{
+				Sorted_Map_Get{target = Sorted_Map_Get_Key{key = transmute([]u8)step.key}},
+			}) or_return
+		}
+
+		next_cur, ok := next_maybe.?
+		if !ok {
+			return nil, nil
+		}
+		cur = next_cur
+	}
+	return cur, nil
+}
+
+// Resolve a `Slot` by walking `steps` using pre-computed step digests; returns zero `Slot{}` when absent.
+read_prehashed_steps_slot :: proc(
+	start_cur: Read_Cursor,
+	steps: []Path_Step,
+	step_hashes: [][]u8,
+	strict_sigils := false,
+) -> (res: Slot, err: Error) {
+	tc_maybe := read_prehashed_steps_cursor(start_cur, steps, step_hashes, strict_sigils) or_return
+	tc, has_tc := tc_maybe.?
+	if !has_tc {
+		return Slot{}, nil
+	}
+	return cursor_slot(tc)
+}
+
 // Resolve a selector string (with optional `@moment` prefix) against `db`.
 select_cursor :: proc(db: ^Database, selector: string) -> (res: Maybe(Read_Cursor), err: Error) {
-	parsed := parse_selector(selector, context.temp_allocator) or_return
+	step_buf: [16]Path_Step = ---
+	parsed := parse_selector_buf(selector, step_buf[:], context.temp_allocator) or_return
+	defer selector_destroy_buf(&parsed, step_buf[:], context.temp_allocator)
 	rc := database_root_cursor(db).read_cursor
 	start := rc
 	if parsed.has_moment {
@@ -1718,8 +1912,8 @@ unmarshal_into :: proc(cursor: Read_Cursor, dst_ptr: any, allocator := context.a
 				break
 			}
 			if slot.tag == .Sorted_Set || slot.tag == .Hash_Set || slot.tag == .Counted_Hash_Set {
-				kv := cursor_read_kv_pair(c, context.temp_allocator) or_return
-				append(&items, kv.key_cursor)
+				key_cur, _ := cursor_read_kv_pair_slots(c) or_return
+				append(&items, key_cur)
 			} else {
 				append(&items, c)
 			}
@@ -1982,8 +2176,9 @@ _eval_pull_spec :: proc(cursor: Read_Cursor, spec: string, visited: ^map[i64]boo
 		}
 	}
 
-	steps := parse_steps(path_part, allocator) or_return
-	defer steps_destroy(steps, allocator)
+	step_buf: [16]Path_Step = ---
+	steps := parse_steps_buf(path_part, step_buf[:], allocator) or_return
+	defer steps_destroy_buf(steps, step_buf[:], allocator)
 	if len(steps) == 0 {
 		return {}, false, nil
 	}
@@ -2262,18 +2457,18 @@ _diff_recursive :: proc(
 			if !ok {
 				break
 			}
-			kv_b := cursor_read_kv_pair(cb, context.temp_allocator) or_return
-			k_str := cursor_read_string(kv_b.key_cursor, 0, context.temp_allocator) or_return
+			kv_b_key_cur, kv_b_val_cur := cursor_read_kv_pair_slots(cb) or_return
+			k_str := cursor_read_string(kv_b_key_cur, 0, context.temp_allocator) or_return
 			if !include_tx_meta && len(prefix) == 0 && k_str == "__tx" {
 				continue
 			}
 			child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
-			val_b_slot := cursor_slot(kv_b.value_cursor) or_return
+			val_b_slot := cursor_slot(kv_b_val_cur) or_return
 			if _is_collection_tag(val_b_slot.tag) && !visited[[2]i64{-1, val_b_slot.value}] {
 				if len(prefix) == 0 && (val_b_slot.tag == .Array_List || val_b_slot.tag == .Linked_Array_List) {
 					delete(child_path, allocator)
 					sub_prefix := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = context.temp_allocator)
-					_diff_recursive(empty_cur, kv_b.value_cursor, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
+					_diff_recursive(empty_cur, kv_b_val_cur, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
 				} else {
 					append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
 				}
@@ -2316,18 +2511,18 @@ _diff_recursive :: proc(
 				if !ok {
 					break
 				}
-				kv_a := cursor_read_kv_pair(ca, context.temp_allocator) or_return
-				k_str := cursor_read_string(kv_a.key_cursor, 0, context.temp_allocator) or_return
+				kv_a_key_cur, kv_a_val_cur := cursor_read_kv_pair_slots(ca) or_return
+				k_str := cursor_read_string(kv_a_key_cur, 0, context.temp_allocator) or_return
 				if !include_tx_meta && len(prefix) == 0 && k_str == "__tx" {
 					continue
 				}
 				vb_maybe := hash_map_get_cursor(map_b, k_str) or_return
 				if vb_cur, has_b := vb_maybe.?; has_b {
 					sub_prefix := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = context.temp_allocator)
-					_diff_recursive(kv_a.value_cursor, vb_cur, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
+					_diff_recursive(kv_a_val_cur, vb_cur, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
 				} else {
 					child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
-					val_a_slot := cursor_slot(kv_a.value_cursor) or_return
+					val_a_slot := cursor_slot(kv_a_val_cur) or_return
 					append(changes, Tx_Change{op = .Remove, path_str = child_path, old_slot = val_a_slot, new_slot = Slot{}})
 				}
 			}
@@ -2339,14 +2534,14 @@ _diff_recursive :: proc(
 				if !ok {
 					break
 				}
-				kv_b := cursor_read_kv_pair(cb, context.temp_allocator) or_return
-				k_str := cursor_read_string(kv_b.key_cursor, 0, context.temp_allocator) or_return
+				kv_b_key_cur, kv_b_val_cur := cursor_read_kv_pair_slots(cb) or_return
+				k_str := cursor_read_string(kv_b_key_cur, 0, context.temp_allocator) or_return
 				if !include_tx_meta && len(prefix) == 0 && k_str == "__tx" {
 					continue
 				}
 				va_maybe := hash_map_get_cursor(map_a, k_str) or_return
 				if va_maybe == nil {
-					val_b_slot := cursor_slot(kv_b.value_cursor) or_return
+					val_b_slot := cursor_slot(kv_b_val_cur) or_return
 					child_path := fmt.aprintf("%s%s%s", prefix, sigil, k_str, allocator = allocator)
 					append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
 				}
@@ -2363,15 +2558,15 @@ _diff_recursive :: proc(
 				if !ok {
 					break
 				}
-				kv_a := cursor_read_kv_pair(ca, context.temp_allocator) or_return
-				k_str := cursor_read_string(kv_a.key_cursor, 0, context.temp_allocator) or_return
+				kv_a_key_cur, kv_a_val_cur := cursor_read_kv_pair_slots(ca) or_return
+				k_str := cursor_read_string(kv_a_key_cur, 0, context.temp_allocator) or_return
 				vb_maybe := sorted_map_get_cursor(sm_b, k_str) or_return
 				if vb_cur, has_b := vb_maybe.?; has_b {
 					sub_prefix := fmt.aprintf("%s$%s", prefix, k_str, allocator = context.temp_allocator)
-					_diff_recursive(kv_a.value_cursor, vb_cur, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
+					_diff_recursive(kv_a_val_cur, vb_cur, sub_prefix, include_tx_meta, changes, visited, allocator) or_return
 				} else {
 					child_path := fmt.aprintf("%s$%s", prefix, k_str, allocator = allocator)
-					val_a_slot := cursor_slot(kv_a.value_cursor) or_return
+					val_a_slot := cursor_slot(kv_a_val_cur) or_return
 					append(changes, Tx_Change{op = .Remove, path_str = child_path, old_slot = val_a_slot, new_slot = Slot{}})
 				}
 			}
@@ -2382,11 +2577,11 @@ _diff_recursive :: proc(
 				if !ok {
 					break
 				}
-				kv_b := cursor_read_kv_pair(cb, context.temp_allocator) or_return
-				k_str := cursor_read_string(kv_b.key_cursor, 0, context.temp_allocator) or_return
+				kv_b_key_cur, kv_b_val_cur := cursor_read_kv_pair_slots(cb) or_return
+				k_str := cursor_read_string(kv_b_key_cur, 0, context.temp_allocator) or_return
 				va_maybe := sorted_map_get_cursor(sm_a, k_str) or_return
 				if va_maybe == nil {
-					val_b_slot := cursor_slot(kv_b.value_cursor) or_return
+					val_b_slot := cursor_slot(kv_b_val_cur) or_return
 					child_path := fmt.aprintf("%s$%s", prefix, k_str, allocator = allocator)
 					append(changes, Tx_Change{op = .Put, path_str = child_path, old_slot = Slot{}, new_slot = val_b_slot})
 				}
@@ -2434,13 +2629,48 @@ _diff_recursive :: proc(
 }
 
 // Walk database history and return every moment where `path_selector` changed,
-// skipping unchanged moments in $O(1)$ via `Slot` equality.
+// skipping unchanged moments in `O(1)` via `Slot` equality.
 history_of :: proc(db: ^Database, path_selector: string, allocator := context.temp_allocator) -> (res: []History_Entry, err: Error) {
-	steps := parse_steps(path_selector, allocator) or_return
-	defer steps_destroy(steps, allocator)
+	step_buf: [16]Path_Step = ---
+	steps := parse_steps_buf(path_selector, step_buf[:], allocator) or_return
+	defer steps_destroy_buf(steps, step_buf[:], allocator)
+
 	rc := database_root_cursor(db).read_cursor
+	root_slot := cursor_slot(rc) or_return
+	if root_slot.tag == .None || root_slot.value == 0 {
+		return nil, nil
+	}
 	history := read_array_list_init(rc) or_return
-	moment_count := array_list_count(history) or_return
+	it := cursor_iterator(history.cursor) or_return
+
+	tx_hash_buf: [64]u8 = ---
+	doc_hash_buf: [64]u8 = ---
+	inst_hash_buf: [64]u8 = ---
+	tx_hash := database_digest_string_buf(db, "__tx", tx_hash_buf[:])
+	doc_hash := database_digest_string_buf(db, "doc", doc_hash_buf[:])
+	inst_hash := database_digest_string_buf(db, "tx_instant", inst_hash_buf[:])
+
+	inline_hash_bufs: [16][64]u8 = ---
+	inline_hashes: [16][]u8 = ---
+	dyn_hash_bufs: [][64]u8
+	dyn_hashes: [][]u8
+	step_hash_bufs: [][64]u8 = inline_hash_bufs[:len(steps)] if len(steps) <= len(inline_hash_bufs) else nil
+	step_hashes: [][]u8 = inline_hashes[:len(steps)] if len(steps) <= len(inline_hashes) else nil
+	if len(steps) > len(inline_hash_bufs) {
+		dyn_hash_bufs = make([][64]u8, len(steps), allocator)
+		dyn_hashes = make([][]u8, len(steps), allocator)
+		step_hash_bufs = dyn_hash_bufs
+		step_hashes = dyn_hashes
+	}
+	defer {
+		if dyn_hash_bufs != nil {
+			delete(dyn_hash_bufs, allocator)
+		}
+		if dyn_hashes != nil {
+			delete(dyn_hashes, allocator)
+		}
+	}
+	precompute_step_hashes(db, steps, step_hash_bufs, step_hashes)
 
 	entries := make([dynamic]History_Entry, 0, 8, allocator)
 	defer if err != nil {
@@ -2453,13 +2683,22 @@ history_of :: proc(db: ^Database, path_selector: string, allocator := context.te
 	}
 	prev_slot := Slot{}
 
-	for m_idx: i64 = 0; m_idx < moment_count; m_idx += 1 {
-		mc_maybe := array_list_get_cursor(history, m_idx) or_return
+	for {
+		mc_maybe := cursor_iterator_next(&it) or_return
 		mc, ok := mc_maybe.?
 		if !ok {
-			continue
+			break
 		}
-		target_maybe := read_steps_cursor(mc, steps) or_return
+		m_idx := it.index - 1
+
+		target_maybe, s_err := read_prehashed_steps_cursor(mc, steps, step_hashes)
+		if s_err != nil {
+			if s_err == .Unexpected_Tag {
+				target_maybe = nil
+			} else {
+				return nil, s_err
+			}
+		}
 		cur_slot := Slot{}
 		if tc, has_tc := target_maybe.?; has_tc {
 			cur_slot = cursor_slot(tc) or_return
@@ -2468,13 +2707,13 @@ history_of :: proc(db: ^Database, path_selector: string, allocator := context.te
 			doc_str := ""
 			inst_val: i64 = 0
 			m_map := read_hash_map_init(mc) or_return
-			tx_maybe := hash_map_get_cursor(m_map, "__tx") or_return
+			tx_maybe := hash_map_get_cursor_by_hash(m_map, tx_hash) or_return
 			if tx_cur, has_tx := tx_maybe.?; has_tx {
 				tx_map := read_hash_map_init(tx_cur) or_return
-				if d_cur, has_d := (hash_map_get_cursor(tx_map, "doc") or_return).?; has_d {
+				if d_cur, has_d := (hash_map_get_cursor_by_hash(tx_map, doc_hash) or_return).?; has_d {
 					doc_str = cursor_read_string(d_cur, 0, allocator) or_return
 				}
-				if i_cur, has_i := (hash_map_get_cursor(tx_map, "tx_instant") or_return).?; has_i {
+				if i_cur, has_i := (hash_map_get_cursor_by_hash(tx_map, inst_hash) or_return).?; has_i {
 					inst_val = cursor_read_int(i_cur) or_return
 				}
 			}

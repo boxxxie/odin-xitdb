@@ -571,3 +571,14 @@ spec_concurrent_dsl_selectors_pull_diff_and_datalog_queries :: proc(t: ^testing.
 		)
 	}
 }
+
+@(test)
+spec_dsl_prehashed_history_and_deep_selector_overflow :: proc(t: ^testing.T) {
+	for backend in ([?]Backend_Kind{.Memory, .Buffered_File}) {
+		ctx := driver_init_ctx(t)
+		defer driver_destroy_ctx(&ctx)
+
+		given_database_initialized_with(&ctx, backend)
+		then_prehashed_history_and_deep_selectors_match(&ctx)
+	}
+}

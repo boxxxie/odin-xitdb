@@ -42,9 +42,13 @@ score, err4 := xitdb.get_float(&db,  "@-1.$leaderboard[\"dan\"]")
 // Resolve a Read_Cursor at any path
 cur_maybe, err5 := xitdb.select_cursor(&db, "@-1.todos[[0]]")
 
-// Programmatic Path_Step combinators
+// Programmatic Path_Step combinators & zero-alloc stack-buffered parsing
 steps := []xitdb.Path_Step{xitdb.hm("users"), xitdb.hm("101"), xitdb.hm("age")}
 path_str := xitdb.format_steps(steps) // ".users[\"101\"].age"
+
+step_buf: [16]xitdb.Path_Step
+parsed, _ := xitdb.parse_selector_buf("@-1.users[\"101\"].age", step_buf[:], context.allocator)
+defer xitdb.selector_destroy_buf(&parsed, step_buf[:], context.allocator)
 ```
 
 ---
@@ -182,8 +186,9 @@ if prof, ok := xitdb.pull_get(pulled, "profile"); ok {
 
 Because `xitdb` shares unchanged subtrees across transactions using 9-byte `Slot` pointers, historical comparisons never scan unmodified data:
 
-* **`diff_moments(&db, moment_a, moment_b)`**: Compares two moments and skips any branch where `slot_a == slot_b` in $O(1)$ time, returning a `[]Tx_Change` slice of leaf mutations.
-* **`history_of(&db, ".users[\"101\"].age")`**: Walks moments `0 ..< N` and returns a `[]History_Entry` slice for every moment where the target path's `Slot` changed, alongside its `__tx.doc` and `__tx.tx_instant`.
+* **`diff_moments(&db, moment_a, moment_b)`**: Compares two moments and skips any branch where `slot_a == slot_b` in `O(1)` time, returning a `[]Tx_Change` slice of leaf mutations.
+* **`history_of(&db, ".users[\"101\"].age")`**: Pre-hashes selector steps and `"__tx"` / `"doc"` / `"tx_instant"` keys once, walks moments `0 ..< N` sequentially via `cursor_iterator`, and returns a `[]History_Entry` slice for every moment where the target path's `Slot` changed.
+* **Reusable Pre-Hashed Traversal**: `precompute_step_hashes`, `read_prehashed_steps_cursor`, and `read_prehashed_steps_slot` allow downstream callers (such as FFI/NIF bindings) to share pre-computed digests across repeated moment traversals.
 * **`query_prefix(moment, "username->id", "da")`**: Seeks to `"da"` in $O(\log_{16} N)$ time via `sorted_map_iterator_from_string` and returns all matching `Index_Hit` entries.
 * **`query_count_range(moment, "username->id", "da", "dz")`**: Computes the exact number of keys in `["da", "dz")` in $O(\log_{16} N)$ time via `sorted_map_rank("dz") - sorted_map_rank("da")` without scanning leaf nodes.
 

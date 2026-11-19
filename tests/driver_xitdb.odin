@@ -4415,3 +4415,111 @@ driver_brute_force_collection_diff :: proc(ctx: ^Suite_Ctx, moment_a, moment_b: 
 	slice.sort(out[:])
 	return out[:]
 }
+
+driver_verify_prehashed_history_and_deep_selector :: proc(ctx: ^Suite_Ctx) {
+	deep_sel := ".d0.d1.d2.d3.d4.d5.d6.d7.d8.d9.d10.d11.d12.d13.d14.d15.d16.leaf"
+
+	// Commit 25 moments with sparse target mutations, key deletion/recreation, and 18-step deep writes
+	for m in 0 ..< 25 {
+		tx := xitdb.tx_init(&ctx.primary_db, base_moment = -1, track_changes = false, allocator = context.allocator)
+		switch m {
+		case 0:
+			xitdb.tx_doc(&tx, "open")
+			xitdb.tx_instant(&tx, 1000)
+			testing.expect_value(ctx.t, xitdb.tx_put(&tx, ".ledger.balance", u64(100)), nil)
+		case 5:
+			xitdb.tx_doc(&tx, "deep-init")
+			testing.expect_value(ctx.t, xitdb.tx_put(&tx, deep_sel, "v1"), nil)
+		case 10:
+			xitdb.tx_doc(&tx, "topup")
+			xitdb.tx_instant(&tx, 2000)
+			testing.expect_value(ctx.t, xitdb.tx_put(&tx, ".ledger.balance", u64(200)), nil)
+		case 15:
+			xitdb.tx_doc(&tx, "close")
+			testing.expect_value(ctx.t, xitdb.tx_rm(&tx, ".ledger.balance"), nil)
+		case 20:
+			xitdb.tx_doc(&tx, "reopen")
+			xitdb.tx_instant(&tx, 3000)
+			testing.expect_value(ctx.t, xitdb.tx_put(&tx, ".ledger.balance", u64(999)), nil)
+		case 22:
+			xitdb.tx_doc(&tx, "deep-update")
+			testing.expect_value(ctx.t, xitdb.tx_put(&tx, deep_sel, "v2"), nil)
+		case:
+			testing.expect_value(ctx.t, xitdb.tx_put(&tx, ".noise.tick", i64(m)), nil)
+		}
+		rep, c_err := xitdb.tx_commit(&tx)
+		testing.expect_value(ctx.t, c_err, nil)
+		xitdb.tx_report_destroy(&rep, context.allocator)
+		xitdb.tx_destroy(&tx)
+	}
+
+	// 1. Verify pre-hashed sequential history_of skips unchanged moments and preserves deletion + metadata
+	hist_bal, hb_err := xitdb.history_of(&ctx.primary_db, ".ledger.balance", context.allocator)
+	testing.expect_value(ctx.t, hb_err, nil)
+	defer xitdb.history_entries_destroy(hist_bal, context.allocator)
+
+	testing.expect_value(ctx.t, len(hist_bal), 4)
+	testing.expect_value(ctx.t, hist_bal[0].moment_index, i64(0))
+	testing.expect_value(ctx.t, hist_bal[0].tx_doc, "open")
+	testing.expect_value(ctx.t, hist_bal[0].tx_instant, i64(1000))
+	testing.expect_value(ctx.t, hist_bal[1].moment_index, i64(10))
+	testing.expect_value(ctx.t, hist_bal[1].tx_doc, "topup")
+	testing.expect_value(ctx.t, hist_bal[2].moment_index, i64(15))
+	testing.expect_value(ctx.t, hist_bal[2].tx_doc, "close")
+	testing.expect_value(ctx.t, hist_bal[2].new_slot, xitdb.Slot{})
+	testing.expect_value(ctx.t, hist_bal[2].cursor, nil)
+	testing.expect_value(ctx.t, hist_bal[3].moment_index, i64(20))
+	testing.expect_value(ctx.t, hist_bal[3].tx_doc, "reopen")
+
+	// 2. Verify > 16-step selector overflow in history_of, get_string, and parse_selector_buf / read_prehashed_steps_slot
+	hist_deep, hd_err := xitdb.history_of(&ctx.primary_db, deep_sel, context.allocator)
+	testing.expect_value(ctx.t, hd_err, nil)
+	defer xitdb.history_entries_destroy(hist_deep, context.allocator)
+
+	testing.expect_value(ctx.t, len(hist_deep), 2)
+	testing.expect_value(ctx.t, hist_deep[0].moment_index, i64(5))
+	testing.expect_value(ctx.t, hist_deep[0].tx_doc, "deep-init")
+	testing.expect_value(ctx.t, hist_deep[1].moment_index, i64(22))
+	testing.expect_value(ctx.t, hist_deep[1].tx_doc, "deep-update")
+
+	deep_sel_latest := "@-1.d0.d1.d2.d3.d4.d5.d6.d7.d8.d9.d10.d11.d12.d13.d14.d15.d16.leaf"
+	leaf_val, g_err := xitdb.get_string(&ctx.primary_db, deep_sel_latest, context.allocator)
+	testing.expect_value(ctx.t, g_err, nil)
+	defer delete(leaf_val, context.allocator)
+	testing.expect_value(ctx.t, leaf_val, "v2")
+
+	short_buf: [16]xitdb.Path_Step = ---
+	short_sel, s_err := xitdb.parse_selector_buf("@20.ledger.balance", short_buf[:], context.allocator)
+	testing.expect_value(ctx.t, s_err, nil)
+	defer xitdb.selector_destroy_buf(&short_sel, short_buf[:], context.allocator)
+	testing.expect_value(ctx.t, len(short_sel.steps), 2)
+	testing.expect(ctx.t, raw_data(short_sel.steps) == raw_data(short_buf[:]))
+
+	deep_buf: [16]xitdb.Path_Step = ---
+	deep_parsed, dp_err := xitdb.parse_selector_buf(deep_sel, deep_buf[:], context.allocator)
+	testing.expect_value(ctx.t, dp_err, nil)
+	defer xitdb.selector_destroy_buf(&deep_parsed, deep_buf[:], context.allocator)
+	testing.expect_value(ctx.t, len(deep_parsed.steps), 18)
+	testing.expect(ctx.t, raw_data(deep_parsed.steps) != raw_data(deep_buf[:]))
+
+	hash_bufs := make([][64]u8, len(deep_parsed.steps), context.allocator)
+	defer delete(hash_bufs, context.allocator)
+	step_hashes := make([][]u8, len(deep_parsed.steps), context.allocator)
+	defer delete(step_hashes, context.allocator)
+	xitdb.precompute_step_hashes(&ctx.primary_db, deep_parsed.steps, hash_bufs, step_hashes)
+
+	rc := xitdb.database_root_cursor(&ctx.primary_db).read_cursor
+	hist_list, hl_err := xitdb.read_array_list_init(rc)
+	testing.expect_value(ctx.t, hl_err, nil)
+	latest_m, lm_err := xitdb.array_list_get_cursor(hist_list, -1)
+	testing.expect_value(ctx.t, lm_err, nil)
+	deep_slot, ds_err := xitdb.read_prehashed_steps_slot(latest_m.?, deep_parsed.steps, step_hashes, true)
+	testing.expect_value(ctx.t, ds_err, nil)
+	testing.expect(ctx.t, deep_slot != xitdb.Slot{})
+
+	if ctx.backend_kind == .Buffered_File {
+		committed, sz_err := xitdb.database_committed_size(&ctx.primary_db)
+		testing.expect_value(ctx.t, sz_err, nil)
+		testing.expect(ctx.t, committed > i64(xitdb.FILE_SIZE_START))
+	}
+}

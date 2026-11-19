@@ -554,3 +554,7 @@ then_collection_diff_matches_full_scan :: proc(ctx: ^Suite_Ctx, moment_a, moment
 	testing.expect_value(ctx.t, len(fast), expected_count)
 	driver_assert_string_slice(ctx.t, fast, slow)
 }
+
+then_prehashed_history_and_deep_selectors_match :: proc(ctx: ^Suite_Ctx) {
+	driver_verify_prehashed_history_and_deep_selector(ctx)
+}
