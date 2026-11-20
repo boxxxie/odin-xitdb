@@ -1905,6 +1905,13 @@ _append_tx_change :: proc(changes: ^[dynamic]Tx_Change, chg: Tx_Change, allocato
 }
 
 unmarshal_into :: proc(cursor: Read_Cursor, dst_ptr: any, allocator := context.allocator) -> Error {
+	pool := _iter_pool_init(context.allocator)
+	defer _iter_pool_destroy(&pool)
+	return _unmarshal_into_pooled(cursor, dst_ptr, &pool, allocator)
+}
+
+@(private = "file")
+_unmarshal_into_pooled :: proc(cursor: Read_Cursor, dst_ptr: any, pool: ^_Iter_Pool, allocator: runtime.Allocator) -> Error {
 	val := reflect.deref(dst_ptr)
 	ti := runtime.type_info_base(type_info_of(val.id))
 
@@ -1972,10 +1979,8 @@ unmarshal_into :: proc(cursor: Read_Cursor, dst_ptr: any, allocator := context.a
 		if !_is_collection_tag(slot.tag) {
 			return .Unexpected_Tag
 		}
-		it := _alloc_cursor_iterator() or_return
-		defer if it != nil {
-			free(it)
-		}
+		it := _iter_pool_acquire(pool) or_return
+		defer _iter_pool_release(pool, it)
 		cursor_iterator_init(it, cursor) or_return
 		items := make([dynamic]Read_Cursor, 0, 8, context.temp_allocator)
 		for {
@@ -1986,12 +1991,16 @@ unmarshal_into :: proc(cursor: Read_Cursor, dst_ptr: any, allocator := context.a
 			}
 			if slot.tag == .Sorted_Set || slot.tag == .Hash_Set || slot.tag == .Counted_Hash_Set {
 				key_cur, _ := cursor_read_kv_pair_slots(c) or_return
-				append(&items, key_cur)
+				if _, a_err := append(&items, key_cur); a_err != nil {
+					return .Write_Failed
+				}
 			} else {
-				append(&items, c)
+				if _, a_err := append(&items, c); a_err != nil {
+					return .Write_Failed
+				}
 			}
 		}
-		free(it)
+		_iter_pool_release(pool, it)
 		it = nil
 		count := len(items)
 		raw_bytes, alloc_err := mem.alloc_bytes(count * info.elem_size, info.elem.align, allocator)
@@ -2000,7 +2009,7 @@ unmarshal_into :: proc(cursor: Read_Cursor, dst_ptr: any, allocator := context.a
 		}
 		for item_cur, idx in items {
 			elem_ptr := rawptr(uintptr(raw_data(raw_bytes)) + uintptr(idx * info.elem_size))
-			unmarshal_into(item_cur, any{elem_ptr, info.elem.id}, allocator) or_return
+			_unmarshal_into_pooled(item_cur, any{elem_ptr, info.elem.id}, pool, allocator) or_return
 		}
 		raw_slice := (^runtime.Raw_Slice)(val.data)
 		raw_slice.data = raw_data(raw_bytes)
@@ -2018,7 +2027,7 @@ unmarshal_into :: proc(cursor: Read_Cursor, dst_ptr: any, allocator := context.a
 			fcur_maybe := hash_map_get_cursor(hm_col, spec.name) or_return
 			if fcur, ok := fcur_maybe.?; ok {
 				fval := reflect.struct_field_value(val, field)
-				unmarshal_into(fcur, fval, allocator) or_return
+				_unmarshal_into_pooled(fcur, fval, pool, allocator) or_return
 			}
 		}
 		return nil
@@ -2132,15 +2141,13 @@ _pull_scalar_slot :: proc(cursor: Read_Cursor, slot: Slot, allocator: runtime.Al
 }
 
 @(private = "file")
-_pull_cursor_value :: proc(cursor: Read_Cursor, allocator: runtime.Allocator) -> (res: Pull_Value, err: Error) {
+_pull_cursor_value :: proc(cursor: Read_Cursor, pool: ^_Iter_Pool, allocator: runtime.Allocator) -> (res: Pull_Value, err: Error) {
 	slot := cursor_slot(cursor) or_return
 	if !_is_collection_tag(slot.tag) {
 		return _pull_scalar_slot(cursor, slot, allocator)
 	}
 	visited := make(map[i64]bool, 16, context.temp_allocator)
-	pool := _iter_pool_init(context.allocator)
-	defer _iter_pool_destroy(&pool)
-	return _pull_wildcard(cursor, &visited, &pool, allocator)
+	return _pull_wildcard(cursor, &visited, pool, allocator)
 }
 
 // Free a `Pull_Value` tree (strings, bytes, lists, maps) allocated with a persistent allocator.
@@ -3780,8 +3787,10 @@ datalog_execute :: proc(db: ^Database, q: ^Datalog_Query, default_moment: i64 = 
 		delete(raw_rows)
 	}
 	env := Datalog_Env{}
+	pool := _iter_pool_init(context.allocator)
+	defer _iter_pool_destroy(&pool)
 
-	_eval_datalog_clauses(db, q, 0, default_moment, env, &raw_rows, &matched_envs, false, allocator) or_return
+	_eval_datalog_clauses(db, q, 0, default_moment, env, &raw_rows, &matched_envs, false, &pool, allocator) or_return
 
 	vars := make([]string, len(q.find_items), allocator)
 	for item, i in q.find_items {
@@ -3968,6 +3977,7 @@ _eval_datalog_clauses :: proc(
 	out_rows: ^[dynamic][]Pull_Value,
 	out_envs: ^[dynamic]Datalog_Env,
 	stop_after_first: bool,
+	pool: ^_Iter_Pool,
 	allocator: runtime.Allocator,
 ) -> (matched_any: bool, err: Error) {
 	if clause_idx >= len(q.clauses) {
@@ -3992,22 +4002,22 @@ _eval_datalog_clauses :: proc(
 		if !_eval_datalog_predicate(clause, &next_env) {
 			return false, nil
 		}
-		return _eval_datalog_clauses(db, q, clause_idx + 1, default_moment, next_env, out_rows, out_envs, stop_after_first, allocator)
+		return _eval_datalog_clauses(db, q, clause_idx + 1, default_moment, next_env, out_rows, out_envs, stop_after_first, pool, allocator)
 
 	case .Not_Pattern:
 		neg_clause := clause
 		neg_clause.kind = .Pattern
-		has_match := _eval_pattern_moment(db, q, neg_clause, -1, default_moment, env, out_rows, out_envs, true, allocator) or_return
+		has_match := _eval_pattern_moment(db, q, neg_clause, -1, default_moment, env, out_rows, out_envs, true, pool, allocator) or_return
 		if has_match {
 			return false, nil
 		}
-		return _eval_datalog_clauses(db, q, clause_idx + 1, default_moment, env, out_rows, out_envs, stop_after_first, allocator)
+		return _eval_datalog_clauses(db, q, clause_idx + 1, default_moment, env, out_rows, out_envs, stop_after_first, pool, allocator)
 
 	case .Reach:
-		return _eval_reach_clause(db, q, clause, clause_idx, default_moment, env, out_rows, out_envs, stop_after_first, allocator)
+		return _eval_reach_clause(db, q, clause, clause_idx, default_moment, env, out_rows, out_envs, stop_after_first, pool, allocator)
 
 	case .Pattern:
-		return _eval_pattern_moment(db, q, clause, clause_idx, default_moment, env, out_rows, out_envs, stop_after_first, allocator)
+		return _eval_pattern_moment(db, q, clause, clause_idx, default_moment, env, out_rows, out_envs, stop_after_first, pool, allocator)
 	}
 
 	return false, nil
@@ -4030,6 +4040,7 @@ _eval_reach_clause :: proc(
 	out_rows: ^[dynamic][]Pull_Value,
 	out_envs: ^[dynamic]Datalog_Env,
 	stop_after_first: bool,
+	pool: ^_Iter_Pool,
 	allocator: runtime.Allocator,
 ) -> (matched_any: bool, err: Error) {
 	if clause.reach_edge == nil {
@@ -4065,7 +4076,7 @@ _eval_reach_clause :: proc(
 		seed_env := env
 		seed_env.bound[clause.reach_from_var] = false
 		seed_env.bound[clause.reach_to_var] = false
-		_ = _eval_pattern_moment(db, &step_q, clause.reach_edge^, 0, default_moment, seed_env, &seed_rows, nil, false, allocator) or_return
+		_ = _eval_pattern_moment(db, &step_q, clause.reach_edge^, 0, default_moment, seed_env, &seed_rows, nil, false, pool, allocator) or_return
 		for sr in seed_rows {
 			if !_pull_slice_contains(seeds[:], sr[0]) {
 				append(&seeds, sr[0])
@@ -4100,7 +4111,7 @@ _eval_reach_clause :: proc(
 				}
 				delete(neighbor_rows)
 			}
-			_ = _eval_pattern_moment(db, &step_q, clause.reach_edge^, 0, default_moment, edge_env, &neighbor_rows, nil, false, allocator) or_return
+			_ = _eval_pattern_moment(db, &step_q, clause.reach_edge^, 0, default_moment, edge_env, &neighbor_rows, nil, false, pool, allocator) or_return
 
 			for nrow in neighbor_rows {
 				next_node := nrow[0]
@@ -4131,7 +4142,7 @@ _eval_reach_clause :: proc(
 					next_env.vals[clause.reach_depth_var] = next_depth
 				}
 
-				m := _eval_datalog_clauses(db, q, clause_idx + 1, default_moment, next_env, out_rows, out_envs, stop_after_first, allocator) or_return
+				m := _eval_datalog_clauses(db, q, clause_idx + 1, default_moment, next_env, out_rows, out_envs, stop_after_first, pool, allocator) or_return
 				if m {
 					matched_any = true
 					if stop_after_first {
@@ -4166,6 +4177,7 @@ _eval_pattern_moment :: proc(
 	out_rows: ^[dynamic][]Pull_Value,
 	out_envs: ^[dynamic]Datalog_Env,
 	check_only: bool,
+	pool: ^_Iter_Pool,
 	allocator: runtime.Allocator,
 ) -> (matched_any: bool, err: Error) {
 	rc := database_root_cursor(db).read_cursor
@@ -4173,7 +4185,7 @@ _eval_pattern_moment :: proc(
 
 	if root_slot.tag != .Array_List {
 		// Non-Array_List top-level database root
-		return _eval_pattern_steps(db, q, clause, 0, rc, clause_idx, default_moment, env, out_rows, out_envs, check_only, allocator)
+		return _eval_pattern_steps(db, q, clause, 0, rc, clause_idx, default_moment, env, out_rows, out_envs, check_only, pool, allocator)
 	}
 
 	history := read_array_list_init(rc) or_return
@@ -4189,7 +4201,7 @@ _eval_pattern_moment :: proc(
 		if !ok {
 			return false, nil
 		}
-		return _eval_pattern_steps(db, q, clause, 0, mc, clause_idx, default_moment, env, out_rows, out_envs, check_only, allocator)
+		return _eval_pattern_steps(db, q, clause, 0, mc, clause_idx, default_moment, env, out_rows, out_envs, check_only, pool, allocator)
 
 	case .Literal_Moment:
 		mc_maybe := array_list_get_cursor(history, clause.moment_lit) or_return
@@ -4197,7 +4209,7 @@ _eval_pattern_moment :: proc(
 		if !ok {
 			return false, nil
 		}
-		return _eval_pattern_steps(db, q, clause, 0, mc, clause_idx, default_moment, env, out_rows, out_envs, check_only, allocator)
+		return _eval_pattern_steps(db, q, clause, 0, mc, clause_idx, default_moment, env, out_rows, out_envs, check_only, pool, allocator)
 
 	case .Var_Moment:
 		if env.bound[clause.moment_var] {
@@ -4210,7 +4222,7 @@ _eval_pattern_moment :: proc(
 			if !has_mc {
 				return false, nil
 			}
-			return _eval_pattern_steps(db, q, clause, 0, mc, clause_idx, default_moment, env, out_rows, out_envs, check_only, allocator)
+			return _eval_pattern_steps(db, q, clause, 0, mc, clause_idx, default_moment, env, out_rows, out_envs, check_only, pool, allocator)
 		}
 		for m_idx: i64 = 0; m_idx < moment_count; m_idx += 1 {
 			mc_maybe := array_list_get_cursor(history, m_idx) or_return
@@ -4221,7 +4233,7 @@ _eval_pattern_moment :: proc(
 			next_env := env
 			next_env.bound[clause.moment_var] = true
 			next_env.vals[clause.moment_var] = m_idx
-			m_matched := _eval_pattern_steps(db, q, clause, 0, mc, clause_idx, default_moment, next_env, out_rows, out_envs, check_only, allocator) or_return
+			m_matched := _eval_pattern_steps(db, q, clause, 0, mc, clause_idx, default_moment, next_env, out_rows, out_envs, check_only, pool, allocator) or_return
 			if m_matched {
 				matched_any = true
 				if check_only {
@@ -4248,6 +4260,7 @@ _eval_pattern_steps :: proc(
 	out_rows: ^[dynamic][]Pull_Value,
 	out_envs: ^[dynamic]Datalog_Env,
 	check_only: bool,
+	pool: ^_Iter_Pool,
 	allocator: runtime.Allocator,
 ) -> (matched_any: bool, err: Error) {
 	if step_idx >= len(clause.steps) {
@@ -4255,14 +4268,14 @@ _eval_pattern_steps :: proc(
 		switch clause.rhs_kind {
 		case .None:
 		case .Literal:
-			actual := _pull_cursor_value(cur, allocator) or_return
+			actual := _pull_cursor_value(cur, pool, allocator) or_return
 			eq := _pull_value_equals(actual, clause.rhs_lit)
 			pull_value_destroy(actual, allocator)
 			if !eq {
 				return false, nil
 			}
 		case .Var:
-			actual := _pull_cursor_value(cur, allocator) or_return
+			actual := _pull_cursor_value(cur, pool, allocator) or_return
 			if next_env.bound[clause.rhs_var] {
 				eq := _pull_value_equals(next_env.vals[clause.rhs_var], actual)
 				pull_value_destroy(actual, allocator)
@@ -4277,7 +4290,7 @@ _eval_pattern_steps :: proc(
 		if check_only {
 			return true, nil
 		}
-		return _eval_datalog_clauses(db, q, clause_idx + 1, default_moment, next_env, out_rows, out_envs, false, allocator)
+		return _eval_datalog_clauses(db, q, clause_idx + 1, default_moment, next_env, out_rows, out_envs, false, pool, allocator)
 	}
 
 	step := clause.steps[step_idx]
@@ -4320,7 +4333,7 @@ _eval_pattern_steps :: proc(
 		if !ok {
 			return false, nil
 		}
-		return _eval_pattern_steps(db, q, clause, step_idx + 1, next_cur, clause_idx, default_moment, env, out_rows, out_envs, check_only, allocator)
+		return _eval_pattern_steps(db, q, clause, step_idx + 1, next_cur, clause_idx, default_moment, env, out_rows, out_envs, check_only, pool, allocator)
 	}
 
 	// 2. Unbound variable step -> B+Tree prefix/range seek or collection iterator
@@ -4328,8 +4341,8 @@ _eval_pattern_steps :: proc(
 	case .Sorted_Map, .Sorted_Set:
 		prefix_hint, has_prefix := _find_prefix_hint(q, step.var_idx)
 		lower_hint, has_lower := _find_lower_bound_hint(q, step.var_idx)
-		it := _alloc_cursor_iterator() or_return
-		defer free(it)
+		it := _iter_pool_acquire(pool) or_return
+		defer _iter_pool_release(pool, it)
 		if has_prefix {
 			cursor_iterator_sorted_from_key_init(it, cur, transmute([]u8)prefix_hint) or_return
 		} else if has_lower {
@@ -4355,7 +4368,7 @@ _eval_pattern_steps :: proc(
 			next_env.bound[step.var_idx] = true
 			next_env.vals[step.var_idx] = k_str
 			child_cur := key_cur if slot.tag == .Sorted_Set else val_cur
-			m := _eval_pattern_steps(db, q, clause, step_idx + 1, child_cur, clause_idx, default_moment, next_env, out_rows, out_envs, check_only, allocator) or_return
+			m := _eval_pattern_steps(db, q, clause, step_idx + 1, child_cur, clause_idx, default_moment, next_env, out_rows, out_envs, check_only, pool, allocator) or_return
 			if m {
 				matched_any = true
 				if check_only {
@@ -4367,8 +4380,8 @@ _eval_pattern_steps :: proc(
 
 	case .Hash_Map, .Counted_Hash_Map, .Hash_Set, .Counted_Hash_Set:
 		is_set := slot.tag == .Hash_Set || slot.tag == .Counted_Hash_Set
-		it := _alloc_cursor_iterator() or_return
-		defer free(it)
+		it := _iter_pool_acquire(pool) or_return
+		defer _iter_pool_release(pool, it)
 		cursor_iterator_init(it, cur) or_return
 		for {
 			c_maybe := cursor_iterator_next(it) or_return
@@ -4388,7 +4401,7 @@ _eval_pattern_steps :: proc(
 			next_env.bound[step.var_idx] = true
 			next_env.vals[step.var_idx] = k_str
 			child_cur := key_cur if is_set else val_cur
-			m := _eval_pattern_steps(db, q, clause, step_idx + 1, child_cur, clause_idx, default_moment, next_env, out_rows, out_envs, check_only, allocator) or_return
+			m := _eval_pattern_steps(db, q, clause, step_idx + 1, child_cur, clause_idx, default_moment, next_env, out_rows, out_envs, check_only, pool, allocator) or_return
 			if m {
 				matched_any = true
 				if check_only {
@@ -4399,8 +4412,8 @@ _eval_pattern_steps :: proc(
 		return matched_any, nil
 
 	case .Array_List, .Linked_Array_List:
-		it := _alloc_cursor_iterator() or_return
-		defer free(it)
+		it := _iter_pool_acquire(pool) or_return
+		defer _iter_pool_release(pool, it)
 		cursor_iterator_init(it, cur) or_return
 		idx: i64 = 0
 		for {
@@ -4413,7 +4426,7 @@ _eval_pattern_steps :: proc(
 			next_env.bound[step.var_idx] = true
 			next_env.vals[step.var_idx] = idx
 			idx += 1
-			m := _eval_pattern_steps(db, q, clause, step_idx + 1, c, clause_idx, default_moment, next_env, out_rows, out_envs, check_only, allocator) or_return
+			m := _eval_pattern_steps(db, q, clause, step_idx + 1, c, clause_idx, default_moment, next_env, out_rows, out_envs, check_only, pool, allocator) or_return
 			if m {
 				matched_any = true
 				if check_only {

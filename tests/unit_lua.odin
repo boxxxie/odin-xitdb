@@ -1,6 +1,8 @@
 package xitdb_tests
 
 import "base:runtime"
+import "core:fmt"
+import "core:mem"
 import "core:testing"
 import lua "../xitdb/luajit"
 import xitdb "../xitdb"
@@ -218,4 +220,65 @@ unit_lua_deep_recursive_unmarshal_small_stack_and_oom_safety :: proc(t: ^testing
 	}
 
 	_run_on_small_stack(t, 512 * 1024, worker, &args)
+}
+
+@(test)
+unit_lua_arena_context_allocator_bounds_unmarshal_iterator_growth :: proc(t: ^testing.T) {
+	GROUP_COUNT :: 50
+
+	core := xitdb.core_memory_init()
+	defer xitdb.core_destroy(&core)
+	defer free_all(context.temp_allocator)
+
+	db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
+	testing.expect_value(t, init_err, nil)
+
+	tx0 := xitdb.tx_init(&db, base_moment = nil, allocator = context.allocator)
+	defer xitdb.tx_destroy(&tx0)
+	xitdb.tx_with_cursor(&tx0, proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		moment := xitdb.write_hash_map_init(cursor^) or_return
+		groups_cur := xitdb.hash_map_put_cursor(&moment, "groups") or_return
+		groups := xitdb.write_hash_map_init(groups_cur) or_return
+		for i in 0 ..< GROUP_COUNT {
+			g_cur := xitdb.hash_map_put_cursor(&groups, fmt.tprintf("g-%02d", i)) or_return
+			g_list := xitdb.write_array_list_init(g_cur) or_return
+			xitdb.array_list_append(&g_list, "a") or_return
+			xitdb.array_list_append(&g_list, "b") or_return
+		}
+		return nil
+	})
+	rep0, err0 := xitdb.tx_commit(&tx0)
+	testing.expect_value(t, err0, nil)
+	defer xitdb.tx_report_destroy(&rep0, context.allocator)
+
+	groups_maybe, gm_err := xitdb.select_cursor(&db, "@0.groups")
+	testing.expect_value(t, gm_err, nil)
+	groups_cur, has_groups := groups_maybe.?
+	testing.expect(t, has_groups, "Expected @0.groups cursor")
+	if !has_groups {
+		return
+	}
+
+	L := xitdb.lua_new_state(&db)
+	testing.expect(t, L != nil)
+	if L == nil {
+		return
+	}
+	defer lua.close(L)
+
+	arena_buf := make([]u8, 64 * 1024, context.allocator)
+	defer delete(arena_buf, context.allocator)
+	arena: mem.Arena
+	mem.arena_init(&arena, arena_buf[:])
+
+	prev_alloc := context.allocator
+	defer context.allocator = prev_alloc
+	context.allocator = mem.arena_allocator(&arena)
+
+	u_err := xitdb.lua_unmarshal_cursor(L, groups_cur)
+	testing.expect_value(t, u_err, nil)
+	testing.expect(t, arena.offset < 32 * 1024, "Expected bounded arena growth during lua_unmarshal_cursor")
+	if u_err == nil {
+		lua.pop(L, 1)
+	}
 }

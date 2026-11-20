@@ -1,6 +1,8 @@
 package xitdb_tests
 
 import "base:runtime"
+import "core:fmt"
+import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:testing"
@@ -1142,4 +1144,134 @@ unit_user_dsl_iterator_pool_oom_and_range_edge_guards :: proc(t: ^testing.T) {
 	res_oom_diffs, res_oom_diff_err := xitdb.diff_moments(&db, 0, 1, false, runtime.nil_allocator())
 	defer xitdb.diff_changes_destroy(res_oom_diffs, runtime.nil_allocator())
 	testing.expect_value(t, res_oom_diff_err, xitdb.Xitdb_Error.Write_Failed)
+}
+
+@(test)
+unit_user_dsl_arena_context_allocator_bounds_iterator_growth :: proc(t: ^testing.T) {
+	GROUP_COUNT :: 50
+
+	Arena_Row :: struct {
+		name: string   `xitdb:"name"`,
+		tags: []string `xitdb:"tags"`,
+	}
+
+	core := xitdb.core_memory_init()
+	defer xitdb.core_destroy(&core)
+	defer free_all(context.temp_allocator)
+
+	db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
+	testing.expect_value(t, init_err, nil)
+
+	// Moment 0: 50 sibling groups and 50 rows, each with a nested Array_List of 2 tags
+	tx0 := xitdb.tx_init(&db, base_moment = nil, allocator = context.allocator)
+	defer xitdb.tx_destroy(&tx0)
+	xitdb.tx_with_cursor(&tx0, proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		moment := xitdb.write_hash_map_init(cursor^) or_return
+
+		groups_cur := xitdb.hash_map_put_cursor(&moment, "groups") or_return
+		groups := xitdb.write_hash_map_init(groups_cur) or_return
+
+		rows_cur := xitdb.hash_map_put_cursor(&moment, "rows") or_return
+		rows := xitdb.write_array_list_init(rows_cur) or_return
+
+		for i in 0 ..< GROUP_COUNT {
+			gname := fmt.tprintf("g-%02d", i)
+
+			g_cur := xitdb.hash_map_put_cursor(&groups, gname) or_return
+			g_hm := xitdb.write_hash_map_init(g_cur) or_return
+			xitdb.hash_map_put(&g_hm, "name", gname) or_return
+			tags_cur := xitdb.hash_map_put_cursor(&g_hm, "tags") or_return
+			tags := xitdb.write_array_list_init(tags_cur) or_return
+			xitdb.array_list_append(&tags, "a") or_return
+			xitdb.array_list_append(&tags, "b") or_return
+
+			r_cur := xitdb.array_list_append_cursor(&rows) or_return
+			r_hm := xitdb.write_hash_map_init(r_cur) or_return
+			xitdb.hash_map_put(&r_hm, "name", gname) or_return
+			r_tags_cur := xitdb.hash_map_put_cursor(&r_hm, "tags") or_return
+			r_tags := xitdb.write_array_list_init(r_tags_cur) or_return
+			xitdb.array_list_append(&r_tags, "a") or_return
+			xitdb.array_list_append(&r_tags, "b") or_return
+		}
+		return nil
+	})
+	rep0, err0 := xitdb.tx_commit(&tx0)
+	testing.expect_value(t, err0, nil)
+	defer xitdb.tx_report_destroy(&rep0, context.allocator)
+
+	// Moment 1: update tags[0] across all 50 sibling groups so diff_moments visits every group + list
+	tx1 := xitdb.tx_init(&db, base_moment = 0, allocator = context.allocator)
+	defer xitdb.tx_destroy(&tx1)
+	xitdb.tx_with_cursor(&tx1, proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		moment := xitdb.write_hash_map_init(cursor^) or_return
+		groups_cur := xitdb.hash_map_put_cursor(&moment, "groups") or_return
+		groups := xitdb.write_hash_map_init(groups_cur) or_return
+		for i in 0 ..< GROUP_COUNT {
+			gname := fmt.tprintf("g-%02d", i)
+			g_cur := xitdb.hash_map_put_cursor(&groups, gname) or_return
+			g_hm := xitdb.write_hash_map_init(g_cur) or_return
+			tags_cur := xitdb.hash_map_put_cursor(&g_hm, "tags") or_return
+			tags := xitdb.write_array_list_init(tags_cur) or_return
+			xitdb.array_list_put(&tags, 0, "a2") or_return
+		}
+		return nil
+	})
+	rep1, err1 := xitdb.tx_commit(&tx1)
+	testing.expect_value(t, err1, nil)
+	defer xitdb.tx_report_destroy(&rep1, context.allocator)
+
+	m1_cur := rep1.after.cursor
+	rows_cur_maybe, rc_err := xitdb.select_cursor(&db, "@1.rows")
+	testing.expect_value(t, rc_err, nil)
+	rows_cur, has_rows := rows_cur_maybe.?
+	testing.expect(t, has_rows, "Expected @1.rows cursor")
+	if !has_rows {
+		return
+	}
+
+	// Bump arena capped at 64 KiB (< 15x sizeof(Cursor_Iterator)): without iterator pooling,
+	// traversing 50+ sibling collections would exhaust the arena and fail with .Write_Failed.
+	arena_buf := make([]u8, 64 * 1024, context.allocator)
+	defer delete(arena_buf, context.allocator)
+	arena: mem.Arena
+	mem.arena_init(&arena, arena_buf[:])
+
+	prev_alloc := context.allocator
+	defer context.allocator = prev_alloc
+	context.allocator = mem.arena_allocator(&arena)
+
+	// 1. pull("*", temp_allocator)
+	mem.arena_free_all(&arena)
+	free_all(context.temp_allocator)
+	pv, p_err := xitdb.pull(m1_cur, "*", context.temp_allocator)
+	testing.expect_value(t, p_err, nil)
+	testing.expect(t, arena.offset < 32 * 1024, "Expected bounded arena growth during pull")
+	_ = pv
+
+	// 2. diff_moments(0, 1, temp_allocator)
+	mem.arena_free_all(&arena)
+	free_all(context.temp_allocator)
+	diffs, d_err := xitdb.diff_moments(&db, 0, 1, false, context.temp_allocator)
+	testing.expect_value(t, d_err, nil)
+	testing.expect_value(t, len(diffs), GROUP_COUNT)
+	testing.expect(t, arena.offset < 32 * 1024, "Expected bounded arena growth during diff_moments")
+
+	// 3. unmarshal([]Arena_Row, temp_allocator)
+	mem.arena_free_all(&arena)
+	free_all(context.temp_allocator)
+	rows, u_err := xitdb.unmarshal([]Arena_Row, rows_cur, context.temp_allocator)
+	testing.expect_value(t, u_err, nil)
+	testing.expect_value(t, len(rows), GROUP_COUNT)
+	if len(rows) == GROUP_COUNT {
+		testing.expect_value(t, len(rows[GROUP_COUNT - 1].tags), 2)
+	}
+	testing.expect(t, arena.offset < 16 * 1024, "Expected bounded arena growth during unmarshal")
+
+	// 4. query_datalog(..., temp_allocator)
+	mem.arena_free_all(&arena)
+	free_all(context.temp_allocator)
+	qres, q_err := xitdb.query_datalog(&db, "find ?g, ?t where .groups[?g].tags[?i] = ?t", 1, context.temp_allocator)
+	testing.expect_value(t, q_err, nil)
+	testing.expect_value(t, len(qres.rows), GROUP_COUNT * 2)
+	testing.expect(t, arena.offset < 32 * 1024, "Expected bounded arena growth during query_datalog")
 }

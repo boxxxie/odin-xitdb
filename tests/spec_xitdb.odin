@@ -2416,8 +2416,14 @@ unit_cursor_iterator_in_place_init_and_reuse_invariants :: proc(t: ^testing.T) {
 
 		sm_cur := xitdb.hash_map_put_cursor(&root_map, "sm") or_return
 		sm := xitdb.write_sorted_map_init(sm_cur) or_return
+		al_cur := xitdb.hash_map_put_cursor(&root_map, "al") or_return
+		al := xitdb.write_array_list_init(al_cur) or_return
+		ll_cur := xitdb.hash_map_put_cursor(&root_map, "ll") or_return
+		ll := xitdb.write_linked_array_list_init(ll_cur) or_return
 		for i in 0 ..< 40 {
 			xitdb.sorted_map_put(&sm, fmt.tprintf("k-%02d", i), u64(i)) or_return
+			xitdb.array_list_append(&al, fmt.tprintf("al-%02d", i)) or_return
+			xitdb.linked_array_list_append(&ll, fmt.tprintf("ll-%02d", i)) or_return
 		}
 		return nil
 	}
@@ -2438,6 +2444,18 @@ unit_cursor_iterator_in_place_init_and_reuse_invariants :: proc(t: ^testing.T) {
 	c_sm_rc := sm_maybe.?
 	c_sm_slot, css_err := xitdb.cursor_slot(c_sm_rc)
 	testing.expect_value(t, css_err, nil)
+
+	al_maybe, al_err := xitdb.hash_map_get_cursor(root_hm, "al")
+	testing.expect_value(t, al_err, nil)
+	c_al_rc := al_maybe.?
+	c_al_slot, cas_err := xitdb.cursor_slot(c_al_rc)
+	testing.expect_value(t, cas_err, nil)
+
+	ll_maybe, ll_err := xitdb.hash_map_get_cursor(root_hm, "ll")
+	testing.expect_value(t, ll_err, nil)
+	c_ll_rc := ll_maybe.?
+	c_ll_slot, cls_err := xitdb.cursor_slot(c_ll_rc)
+	testing.expect_value(t, cls_err, nil)
 
 	cm := &corrupt_core.(xitdb.Core_Memory)
 
@@ -2492,6 +2510,58 @@ unit_cursor_iterator_in_place_init_and_reuse_invariants :: proc(t: ^testing.T) {
 	val_it, val_err := xitdb.cursor_iterator_sorted_from_index(c_sm_rc, 25)
 	testing.expect_value(t, val_err, xitdb.Xitdb_Error.Invalid_BTree_Node_Kind)
 	testing.expect(t, is_zeroed(&val_it), "Expected full zero rollback on value-returning cursor_iterator_sorted_from_index failure")
+
+	// Corrupt interior radix slot 1 in c_al_rc (tag .None, value 0) -> must return .Unexpected_Tag without reading offset 0
+	al_root_ptr_val, _ := endian.get_u64(cm.buf[c_al_slot.value + 8 : c_al_slot.value + 16], .Big)
+	mem.zero(&cm.buf[int(al_root_ptr_val) + xitdb.SLOT_LENGTH], xitdb.SLOT_LENGTH)
+
+	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
+	testing.expect_value(t, xitdb.cursor_iterator_array_list_from_index_init(it_iso, c_al_rc, 20), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect(t, is_zeroed(it_iso), "Expected full zero rollback on corrupt interior Array_List slot (forward)")
+
+	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
+	testing.expect_value(t, xitdb.cursor_iterator_array_list_reverse_from_index_init(it_iso, c_al_rc, 20), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect(t, is_zeroed(it_iso), "Expected full zero rollback on corrupt interior Array_List slot (reverse)")
+
+	al_val_it, al_val_err := xitdb.cursor_iterator_array_list_from_index(c_al_rc, 20)
+	testing.expect_value(t, al_val_err, xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect(t, is_zeroed(&al_val_it), "Expected full zero rollback on value-returning cursor_iterator_array_list_from_index failure")
+
+	// Zero all branch child slots in c_sm_rc and c_ll_rc -> all 6 B-Tree descending initializers must reject with .Unexpected_Tag
+	for j in 0 ..< branch_num {
+		mem.zero(&cm.buf[branch_off + xitdb.BTREE_NODE_HEADER_SIZE + j * xitdb.SLOT_LENGTH], xitdb.SLOT_LENGTH)
+	}
+	ll_root_ptr_val, _ := endian.get_u64(cm.buf[c_ll_slot.value + 8 : c_ll_slot.value + 16], .Big)
+	ll_branch_off := int(ll_root_ptr_val)
+	ll_branch_num := int(cm.buf[ll_branch_off + 1])
+	testing.expect(t, cm.buf[ll_branch_off] == 1 && ll_branch_num > 0, "Expected multi-tier Linked_Array_List branch root")
+	for j in 0 ..< ll_branch_num {
+		mem.zero(&cm.buf[ll_branch_off + xitdb.BTREE_NODE_HEADER_SIZE + j * xitdb.SLOT_LENGTH], xitdb.SLOT_LENGTH)
+	}
+
+	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_index_init(it_iso, c_sm_rc, 25), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Sorted_Map branch slot (from_index)")
+
+	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_key_init(it_iso, c_sm_rc, transmute([]u8)string("k-25")), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Sorted_Map branch slot (from_key)")
+
+	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_reverse_from_index_init(it_iso, c_sm_rc, 25), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Sorted_Map branch slot (reverse_from_index)")
+
+	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_reverse_from_key_init(it_iso, c_sm_rc, transmute([]u8)string("k-25")), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Sorted_Map branch slot (reverse_from_key)")
+
+	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
+	testing.expect_value(t, xitdb.cursor_iterator_linked_array_list_from_index_init(it_iso, c_ll_rc, 25), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Linked_Array_List branch slot (from_index)")
+
+	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
+	testing.expect_value(t, xitdb.cursor_iterator_linked_array_list_reverse_from_index_init(it_iso, c_ll_rc, 25), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Linked_Array_List branch slot (reverse_from_index)")
 }
 
 // ----------------------------------------------------------------------------

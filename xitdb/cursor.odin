@@ -1081,6 +1081,9 @@ cursor_iterator_sorted_from_index_init :: proc(res: ^Cursor_Iterator, unresolved
 		}
 		_fill_slot_block_from(cursor, position, i, num, level) or_return
 		res.stack_len += 1
+		if level.block[i].tag != .Index {
+			return .Unexpected_Tag
+		}
 		node_ptr = level.block[i].value
 	}
 	res.size = total
@@ -1190,6 +1193,9 @@ cursor_iterator_sorted_from_key_init :: proc(res: ^Cursor_Iterator, unresolved_c
 		level.index = u8(i)
 		level.count = u8(num)
 		res.stack_len += 1
+		if level.block[i].tag != .Index {
+			return .Unexpected_Tag
+		}
 		node_ptr = level.block[i].value
 	}
 	res.size = total
@@ -1238,6 +1244,9 @@ cursor_iterator_array_list_from_index_init :: proc(res: ^Cursor_Iterator, unreso
 		res.stack_len += 1
 		if sh == 0 {
 			break
+		}
+		if level.block[i].tag != .Index {
+			return .Unexpected_Tag
 		}
 		pos = level.block[i].value
 		sh -= 1
@@ -1316,6 +1325,9 @@ cursor_iterator_linked_array_list_from_index_init :: proc(res: ^Cursor_Iterator,
 		}
 		_fill_slot_block_from(cursor, position, i, num, level) or_return
 		res.stack_len += 1
+		if level.block[i].tag != .Index {
+			return .Unexpected_Tag
+		}
 		node_ptr = level.block[i].value
 	}
 	res.size = header.size
@@ -1391,6 +1403,9 @@ cursor_iterator_sorted_reverse_from_index_init :: proc(res: ^Cursor_Iterator, un
 		}
 		_fill_slot_block_rev(cursor, position, i + 1, level) or_return
 		res.stack_len += 1
+		if level.block[i].tag != .Index {
+			return .Unexpected_Tag
+		}
 		node_ptr = level.block[i].value
 	}
 	res.size = total
@@ -1511,6 +1526,9 @@ cursor_iterator_sorted_reverse_from_key_init :: proc(res: ^Cursor_Iterator, unre
 		level.index = u8(i)
 		level.count = u8(i + 1)
 		res.stack_len += 1
+		if level.block[i].tag != .Index {
+			return .Unexpected_Tag
+		}
 		node_ptr = level.block[i].value
 	}
 	res.size = total
@@ -1559,6 +1577,9 @@ cursor_iterator_array_list_reverse_from_index_init :: proc(res: ^Cursor_Iterator
 		res.stack_len += 1
 		if sh == 0 {
 			break
+		}
+		if level.block[i].tag != .Index {
+			return .Unexpected_Tag
 		}
 		pos = level.block[i].value
 		sh -= 1
@@ -1637,6 +1658,9 @@ cursor_iterator_linked_array_list_reverse_from_index_init :: proc(res: ^Cursor_I
 		}
 		_fill_slot_block_rev(cursor, position, i + 1, level) or_return
 		res.stack_len += 1
+		if level.block[i].tag != .Index {
+			return .Unexpected_Tag
+		}
 		node_ptr = level.block[i].value
 	}
 	res.size = header.size
