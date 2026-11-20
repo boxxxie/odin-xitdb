@@ -1,6 +1,8 @@
 package xitdb_tests
 
+import "base:runtime"
 import "core:slice"
+import "core:strings"
 import "core:testing"
 import xitdb "../xitdb"
 
@@ -608,4 +610,501 @@ unit_user_dsl_cyclic_graph_pull_and_diff_safety :: proc(t: ^testing.T) {
 	testing.expect_value(t, d_err, nil)
 	testing.expect_value(t, len(diffs), 1)
 	testing.expect_value(t, diffs[0].path_str, ".title")
+}
+
+@(test)
+unit_user_dsl_deep_recursive_pull_and_diff_small_stack_safety :: proc(t: ^testing.T) {
+	MIXED_DEPTH :: 40
+	RANGE_DEPTH :: 60
+
+	core := xitdb.core_memory_init()
+	defer xitdb.core_destroy(&core)
+	defer free_all(context.temp_allocator)
+
+	db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
+	testing.expect_value(t, init_err, nil)
+
+	// Moment 0: iteratively construct a 40-level mixed-collection spine (`chain`),
+	// a 60-level range-slice spine (`range_chain`), and top-level lists/scalar.
+	// `track_changes = true` on genesis also covers `_diff_recursive`'s `.None -> map/list` branches.
+	tx0 := xitdb.tx_init(&db, base_moment = nil, track_changes = true, allocator = context.allocator)
+	defer xitdb.tx_destroy(&tx0)
+	xitdb.tx_with_cursor(&tx0, proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		moment := xitdb.write_hash_map_init(cursor^) or_return
+		xitdb.hash_map_put(&moment, "scalar", u64(7)) or_return
+
+		top_al_cur := xitdb.hash_map_put_cursor(&moment, "top_al") or_return
+		top_al := xitdb.write_array_list_init(top_al_cur) or_return
+		xitdb.array_list_append(&top_al, "a0") or_return
+		xitdb.array_list_append(&top_al, "a1") or_return
+
+		top_ll_cur := xitdb.hash_map_put_cursor(&moment, "top_ll") or_return
+		top_ll := xitdb.write_linked_array_list_init(top_ll_cur) or_return
+		xitdb.linked_array_list_append(&top_ll, "l0") or_return
+		xitdb.linked_array_list_append(&top_ll, "l1") or_return
+
+		cur := xitdb.hash_map_put_cursor(&moment, "chain") or_return
+		for level in 0 ..< MIXED_DEPTH {
+			switch level % 5 {
+			case 0:
+				hm := xitdb.write_hash_map_init(cur) or_return
+				xitdb.hash_map_put(&hm, "keep", "ok") or_return
+				if level == 0 {
+					xitdb.hash_map_put(&hm, "drop", "bye") or_return
+				}
+				cur = xitdb.hash_map_put_cursor(&hm, "next") or_return
+			case 1:
+				chm := xitdb.write_counted_hash_map_init(cur) or_return
+				xitdb.hash_map_put(&chm, "keep", "ok") or_return
+				cur = xitdb.hash_map_put_cursor(&chm.write_hash_map, "next") or_return
+			case 2:
+				sm := xitdb.write_sorted_map_init(cur) or_return
+				xitdb.sorted_map_put(&sm, "a_keep", "ok") or_return
+				if level == 2 {
+					xitdb.sorted_map_put(&sm, "z_drop", "bye") or_return
+				}
+				cur = xitdb.sorted_map_put_cursor(&sm, "m_next") or_return
+			case 3:
+				al := xitdb.write_array_list_init(cur) or_return
+				xitdb.array_list_append(&al, "pad") or_return
+				cur = xitdb.array_list_append_cursor(&al) or_return
+			case 4:
+				ll := xitdb.write_linked_array_list_init(cur) or_return
+				xitdb.linked_array_list_append(&ll, "pad") or_return
+				cur = xitdb.linked_array_list_append_cursor(&ll) or_return
+			}
+		}
+
+		leaf_hm := xitdb.write_hash_map_init(cur) or_return
+		xitdb.hash_map_put(&leaf_hm, "leaf", "v1") or_return
+		hs_cur := xitdb.hash_map_put_cursor(&leaf_hm, "hs") or_return
+		hs := xitdb.write_hash_set_init(hs_cur) or_return
+		xitdb.hash_set_put(&hs, "t1") or_return
+		xitdb.hash_set_put(&hs, "t2") or_return
+		chs_cur := xitdb.hash_map_put_cursor(&leaf_hm, "chs") or_return
+		chs := xitdb.write_counted_hash_set_init(chs_cur) or_return
+		xitdb.hash_set_put(&chs, "t1") or_return
+		xitdb.hash_set_put(&chs, "t2") or_return
+		ss_cur := xitdb.hash_map_put_cursor(&leaf_hm, "ss") or_return
+		ss := xitdb.write_sorted_set_init(ss_cur) or_return
+		xitdb.sorted_set_put(&ss, "t1") or_return
+		xitdb.sorted_set_put(&ss, "t2") or_return
+
+		rcur := xitdb.hash_map_put_cursor(&moment, "range_chain") or_return
+		for level in 0 ..< RANGE_DEPTH {
+			hm := xitdb.write_hash_map_init(rcur) or_return
+			items_cur := xitdb.hash_map_put_cursor(&hm, "items") or_return
+			if level % 2 == 0 {
+				al := xitdb.write_array_list_init(items_cur) or_return
+				xitdb.array_list_append(&al, "skip") or_return
+				xitdb.array_list_append(&al, xitdb.Slot{}) or_return
+				xitdb.array_list_append(&al, "tail") or_return
+				rcur = xitdb.array_list_put_cursor(&al, 1) or_return
+			} else {
+				ll := xitdb.write_linked_array_list_init(items_cur) or_return
+				xitdb.linked_array_list_append(&ll, "skip") or_return
+				xitdb.linked_array_list_append(&ll, xitdb.Slot{}) or_return
+				xitdb.linked_array_list_append(&ll, "tail") or_return
+				rcur = xitdb.linked_array_list_put_cursor(&ll, 1) or_return
+			}
+		}
+		range_leaf := xitdb.write_hash_map_init(rcur) or_return
+		xitdb.hash_map_put(&range_leaf, "leaf", "range-bottom") or_return
+		return nil
+	})
+	rep0, err0 := xitdb.tx_commit(&tx0)
+	testing.expect_value(t, err0, nil)
+	defer xitdb.tx_report_destroy(&rep0, context.allocator)
+
+	// Moment 1: branch from Moment 0 and mutate top-level nodes + the 40-level leaf
+	tx1 := xitdb.tx_init(&db, base_moment = 0, allocator = context.allocator)
+	defer xitdb.tx_destroy(&tx1)
+	xitdb.tx_with_cursor(&tx1, proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		moment := xitdb.write_hash_map_init(cursor^) or_return
+		cur := xitdb.hash_map_put_cursor(&moment, "chain") or_return
+		for level in 0 ..< MIXED_DEPTH {
+			switch level % 5 {
+			case 0:
+				hm := xitdb.write_hash_map_init(cur) or_return
+				if level == 0 {
+					_ = xitdb.hash_map_remove(&hm, "drop") or_return
+					xitdb.hash_map_put(&hm, "added", "new_hm") or_return
+				}
+				cur = xitdb.hash_map_put_cursor(&hm, "next") or_return
+			case 1:
+				chm := xitdb.write_counted_hash_map_init(cur) or_return
+				cur = xitdb.hash_map_put_cursor(&chm.write_hash_map, "next") or_return
+			case 2:
+				sm := xitdb.write_sorted_map_init(cur) or_return
+				if level == 2 {
+					_ = xitdb.sorted_map_remove(&sm, "z_drop") or_return
+					xitdb.sorted_map_put(&sm, "z_added", "new_sm") or_return
+				}
+				cur = xitdb.sorted_map_put_cursor(&sm, "m_next") or_return
+			case 3:
+				al := xitdb.write_array_list_init(cur) or_return
+				if level == 3 {
+					xitdb.array_list_append(&al, "appended_al") or_return
+				}
+				cur = xitdb.array_list_put_cursor(&al, 1) or_return
+			case 4:
+				ll := xitdb.write_linked_array_list_init(cur) or_return
+				if level == 4 {
+					xitdb.linked_array_list_append(&ll, "appended_ll") or_return
+				}
+				cur = xitdb.linked_array_list_put_cursor(&ll, 1) or_return
+			}
+		}
+		leaf_hm := xitdb.write_hash_map_init(cur) or_return
+		xitdb.hash_map_put(&leaf_hm, "leaf", "v2") or_return
+		return nil
+	})
+	rep1, err1 := xitdb.tx_commit(&tx1)
+	testing.expect_value(t, err1, nil)
+	defer xitdb.tx_report_destroy(&rep1, context.allocator)
+
+	chain_m1_maybe, cm1_err := xitdb.select_cursor(&db, "@1.chain")
+	testing.expect_value(t, cm1_err, nil)
+	chain_m1_cur, has_cm1 := chain_m1_maybe.?
+	testing.expect(t, has_cm1, "Expected @1.chain cursor")
+
+	range_cur_maybe, rc_err := xitdb.select_cursor(&db, "@1.range_chain")
+	testing.expect_value(t, rc_err, nil)
+	range_root_cur, has_rc := range_cur_maybe.?
+	testing.expect(t, has_rc, "Expected @1.range_chain cursor")
+
+	if !has_cm1 || !has_rc {
+		return
+	}
+
+	pb := strings.builder_make(0, RANGE_DEPTH * 16 + 16, context.allocator)
+	defer strings.builder_destroy(&pb)
+	for _ in 0 ..< RANGE_DEPTH {
+		strings.write_string(&pb, "{.items[1..2]")
+	}
+	strings.write_string(&pb, "{leaf}")
+	for _ in 0 ..< RANGE_DEPTH {
+		strings.write_byte(&pb, '}')
+	}
+
+	Worker_Args :: struct {
+		t:              ^testing.T,
+		db:             ^xitdb.Database,
+		m0_root:        xitdb.Read_Cursor,
+		chain_m1_cur:   xitdb.Read_Cursor,
+		range_root_cur: xitdb.Read_Cursor,
+		range_pattern:  string,
+	}
+
+	args := Worker_Args{
+		t              = t,
+		db             = &db,
+		m0_root        = rep0.after.cursor,
+		chain_m1_cur   = chain_m1_cur,
+		range_root_cur = range_root_cur,
+		range_pattern  = strings.to_string(pb),
+	}
+
+	worker :: proc(raw: rawptr) {
+		defer free_all(context.temp_allocator)
+		a := (^Worker_Args)(raw)
+
+		has_change :: proc(diffs: []xitdb.Tx_Change, op: xitdb.Tx_Op_Kind, path: string) -> bool {
+			for d in diffs {
+				if d.op == op && d.path_str == path {
+					return true
+				}
+			}
+			return false
+		}
+
+		// 1. Forward deep structural diff across 40 levels
+		diffs_fwd, df_err := xitdb.diff_moments(a.db, 0, 1, false, context.allocator)
+		defer xitdb.diff_changes_destroy(diffs_fwd, context.allocator)
+		testing.expect_value(a.t, df_err, nil)
+		testing.expect_value(a.t, len(diffs_fwd), 7)
+		testing.expect(a.t, has_change(diffs_fwd, .Remove, ".chain.drop"), "Expected .chain.drop removal")
+		testing.expect(a.t, has_change(diffs_fwd, .Put,    ".chain.added"), "Expected .chain.added put")
+		testing.expect(a.t, has_change(diffs_fwd, .Remove, ".chain.next#next$z_drop"), "Expected .chain.next#next$z_drop removal")
+		testing.expect(a.t, has_change(diffs_fwd, .Put,    ".chain.next#next$z_added"), "Expected .chain.next#next$z_added put")
+		testing.expect(a.t, has_change(diffs_fwd, .Append, ".chain.next#next$m_next[2]"), "Expected Array_List append diff")
+		testing.expect(a.t, has_change(diffs_fwd, .Append, ".chain.next#next$m_next[1][[2]]"), "Expected Linked_Array_List append diff")
+
+		found_leaf_fwd := false
+		for d in diffs_fwd {
+			if d.op == .Put && strings.has_suffix(d.path_str, ".leaf") && len(d.path_str) > MIXED_DEPTH {
+				found_leaf_fwd = true
+				break
+			}
+		}
+		testing.expect(a.t, found_leaf_fwd, "Expected 40-level leaf Put diff")
+
+		// 2. Reverse deep structural diff across 40 levels (exercises .Slice path)
+		diffs_rev, dr_err := xitdb.diff_moments(a.db, 1, 0, false, context.allocator)
+		defer xitdb.diff_changes_destroy(diffs_rev, context.allocator)
+		testing.expect_value(a.t, dr_err, nil)
+		testing.expect_value(a.t, len(diffs_rev), 7)
+		testing.expect(a.t, has_change(diffs_rev, .Slice, ".chain.next#next$m_next"), "Expected Array_List Slice in reverse diff")
+		testing.expect(a.t, has_change(diffs_rev, .Slice, ".chain.next#next$m_next[1]"), "Expected Linked_Array_List Slice in reverse diff")
+
+		// 3. Deep recursive wildcard pull across 40 levels of all collection families
+		pv, p_err := xitdb.pull(a.chain_m1_cur, "*", context.allocator)
+		defer xitdb.pull_value_destroy(pv, context.allocator)
+		testing.expect_value(a.t, p_err, nil)
+
+		cur_pv := pv
+		for level in 0 ..< MIXED_DEPTH {
+			switch level % 5 {
+			case 0, 1:
+				next_pv, ok := xitdb.pull_get(cur_pv, "next")
+				testing.expectf(a.t, ok, "Missing 'next' at wildcard level %d", level)
+				if !ok {
+					return
+				}
+				cur_pv = next_pv
+			case 2:
+				next_pv, ok := xitdb.pull_get(cur_pv, "m_next")
+				testing.expectf(a.t, ok, "Missing 'm_next' at wildcard level %d", level)
+				if !ok {
+					return
+				}
+				cur_pv = next_pv
+			case 3, 4:
+				list_pv, is_list := cur_pv.(xitdb.Pull_List)
+				testing.expectf(a.t, is_list && len(list_pv) >= 2, "Expected Pull_List >= 2 at wildcard level %d", level)
+				if !is_list || len(list_pv) < 2 {
+					return
+				}
+				cur_pv = list_pv[1]
+			}
+		}
+		leaf_pv, has_leaf := xitdb.pull_get(cur_pv, "leaf")
+		testing.expect(a.t, has_leaf, "Missing leaf value in deep wildcard pull")
+		if has_leaf {
+			leaf_str, is_str := leaf_pv.(string)
+			testing.expect(a.t, is_str, "Expected string at deep wildcard leaf")
+			if is_str {
+				testing.expect_value(a.t, leaf_str, "v2")
+			}
+		}
+		for set_key in ([?]string{"hs", "chs", "ss"}) {
+			set_pv, has_set := xitdb.pull_get(cur_pv, set_key)
+			testing.expectf(a.t, has_set, "Missing set %s at leaf", set_key)
+			if has_set {
+				set_list, is_list := set_pv.(xitdb.Pull_List)
+				testing.expectf(a.t, is_list && len(set_list) == 2, "Expected 2 elements in leaf set %s", set_key)
+			}
+		}
+
+		// 4. Deep recursive range pull across 60 levels of alternating Array_List / Linked_Array_List
+		rpv, rp_err := xitdb.pull(a.range_root_cur, a.range_pattern, context.allocator)
+		defer xitdb.pull_value_destroy(rpv, context.allocator)
+		testing.expect_value(a.t, rp_err, nil)
+
+		cur_rpv := rpv
+		for level in 0 ..< RANGE_DEPTH {
+			items_pv, ok := xitdb.pull_get(cur_rpv, "items")
+			testing.expectf(a.t, ok, "Missing 'items' at range level %d", level)
+			if !ok {
+				return
+			}
+			items_list, is_list := items_pv.(xitdb.Pull_List)
+			testing.expectf(a.t, is_list && len(items_list) == 1, "Expected 1 sliced item at range level %d", level)
+			if !is_list || len(items_list) != 1 {
+				return
+			}
+			cur_rpv = items_list[0]
+		}
+		rleaf_pv, has_rleaf := xitdb.pull_get(cur_rpv, "leaf")
+		testing.expect(a.t, has_rleaf, "Missing leaf in deep range pull")
+		if has_rleaf {
+			rleaf_str, is_str := rleaf_pv.(string)
+			testing.expect(a.t, is_str, "Expected string at deep range leaf")
+			if is_str {
+				testing.expect_value(a.t, rleaf_str, "range-bottom")
+			}
+		}
+
+		// 5. _pull_range edge & error-path leak checks under persistent allocator
+		oob_pv, oob_err := xitdb.pull(a.range_root_cur, "{.items[99..105]}", context.allocator)
+		defer xitdb.pull_value_destroy(oob_pv, context.allocator)
+		testing.expect_value(a.t, oob_err, nil)
+		if oob_items, ok := xitdb.pull_get(oob_pv, "items"); ok {
+			oob_list, is_list := oob_items.(xitdb.Pull_List)
+			testing.expect(a.t, is_list && len(oob_list) == 0, "Expected empty Pull_List for out-of-range slice")
+		}
+
+		rev_pv, rev_err := xitdb.pull(a.range_root_cur, "{.items[2..1]}", context.allocator)
+		defer xitdb.pull_value_destroy(rev_pv, context.allocator)
+		testing.expect_value(a.t, rev_err, nil)
+		if rev_items, ok := xitdb.pull_get(rev_pv, "items"); ok {
+			rev_list, is_list := rev_items.(xitdb.Pull_List)
+			testing.expect(a.t, is_list && len(rev_list) == 0, "Expected empty Pull_List for reversed range slice")
+		}
+
+		neg_pv, neg_err := xitdb.pull(a.range_root_cur, "{.items[-1..2]}", context.allocator)
+		defer xitdb.pull_value_destroy(neg_pv, context.allocator)
+		testing.expect_value(a.t, neg_err, xitdb.Xitdb_Error.Invalid_Range)
+
+		bad_pv, bad_err := xitdb.pull(a.m0_root, "{.scalar[0..1]}", context.allocator)
+		defer xitdb.pull_value_destroy(bad_pv, context.allocator)
+		testing.expect_value(a.t, bad_err, xitdb.Xitdb_Error.Unexpected_Tag)
+	}
+
+	_run_on_small_stack(t, 512 * 1024, worker, &args)
+}
+
+@(test)
+unit_user_dsl_iterator_pool_oom_and_range_edge_guards :: proc(t: ^testing.T) {
+	core := xitdb.core_memory_init()
+	defer xitdb.core_destroy(&core)
+	defer free_all(context.temp_allocator)
+
+	db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
+	testing.expect_value(t, init_err, nil)
+
+	// Moment 0: scalar, map, list, and empty instances of all collection families
+	tx0 := xitdb.tx_init(&db, base_moment = nil, allocator = context.allocator)
+	defer xitdb.tx_destroy(&tx0)
+	xitdb.tx_with_cursor(&tx0, proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		moment := xitdb.write_hash_map_init(cursor^) or_return
+		xitdb.hash_map_put(&moment, "scalar", u64(7)) or_return
+
+		m_cur := xitdb.hash_map_put_cursor(&moment, "map") or_return
+		m := xitdb.write_hash_map_init(m_cur) or_return
+		xitdb.hash_map_put(&m, "a", "1") or_return
+
+		items_cur := xitdb.hash_map_put_cursor(&moment, "items") or_return
+		items := xitdb.write_array_list_init(items_cur) or_return
+		xitdb.array_list_append(&items, "x") or_return
+		xitdb.array_list_append(&items, "y") or_return
+
+		eal_cur := xitdb.hash_map_put_cursor(&moment, "empty_al") or_return
+		_ = xitdb.write_array_list_init(eal_cur) or_return
+		ell_cur := xitdb.hash_map_put_cursor(&moment, "empty_ll") or_return
+		_ = xitdb.write_linked_array_list_init(ell_cur) or_return
+		ehm_cur := xitdb.hash_map_put_cursor(&moment, "empty_hm") or_return
+		_ = xitdb.write_hash_map_init(ehm_cur) or_return
+		esm_cur := xitdb.hash_map_put_cursor(&moment, "empty_sm") or_return
+		_ = xitdb.write_sorted_map_init(esm_cur) or_return
+		ehs_cur := xitdb.hash_map_put_cursor(&moment, "empty_hs") or_return
+		_ = xitdb.write_hash_set_init(ehs_cur) or_return
+		return nil
+	})
+	rep0, err0 := xitdb.tx_commit(&tx0)
+	testing.expect_value(t, err0, nil)
+	defer xitdb.tx_report_destroy(&rep0, context.allocator)
+
+	// Moment 1: update/add keys and append an item so diff_moments has changes
+	tx1 := xitdb.tx_init(&db, base_moment = 0, allocator = context.allocator)
+	defer xitdb.tx_destroy(&tx1)
+	_ = xitdb.tx_put(&tx1, ".map.a", "2")
+	_ = xitdb.tx_put(&tx1, ".map.b", "3")
+	_ = xitdb.tx_append(&tx1, ".items", "z")
+	rep1, err1 := xitdb.tx_commit(&tx1)
+	testing.expect_value(t, err1, nil)
+	defer xitdb.tx_report_destroy(&rep1, context.allocator)
+
+	m1_cur := rep1.after.cursor
+	items_cur_maybe, ic_err := xitdb.select_cursor(&db, "@1.items")
+	testing.expect_value(t, ic_err, nil)
+	items_cur, has_items := items_cur_maybe.?
+	testing.expect(t, has_items, "Expected @1.items cursor")
+	if !has_items {
+		return
+	}
+
+	// 1. _pull_range rejects non-list targets even on zero-length or reversed ranges
+	for pat in ([?]string{"{.scalar[0..0]}", "{.scalar[2..1]}", "{.map[0..0]}"}) {
+		pv, err := xitdb.pull(m1_cur, pat, context.allocator)
+		defer xitdb.pull_value_destroy(pv, context.allocator)
+		testing.expect_value(t, err, xitdb.Xitdb_Error.Unexpected_Tag)
+	}
+
+	// 2. _pull_wildcard on empty collections returns zero-capacity nil slices without heap allocation
+	for list_sel in ([?]string{"@0.empty_al", "@0.empty_ll", "@0.empty_hs"}) {
+		cur_maybe, sel_err := xitdb.select_cursor(&db, list_sel)
+		testing.expect_value(t, sel_err, nil)
+		pv, p_err := xitdb.pull(cur_maybe.?, "*", context.allocator)
+		defer xitdb.pull_value_destroy(pv, context.allocator)
+		testing.expect_value(t, p_err, nil)
+		pl, is_list := pv.(xitdb.Pull_List)
+		testing.expectf(t, is_list, "Expected Pull_List for %s", list_sel)
+		testing.expect_value(t, len(pl), 0)
+		testing.expect(t, raw_data(pl) == nil, "Expected nil backing pointer for empty Pull_List")
+	}
+	for map_sel in ([?]string{"@0.empty_hm", "@0.empty_sm"}) {
+		cur_maybe, sel_err := xitdb.select_cursor(&db, map_sel)
+		testing.expect_value(t, sel_err, nil)
+		pv, p_err := xitdb.pull(cur_maybe.?, "*", context.allocator)
+		defer xitdb.pull_value_destroy(pv, context.allocator)
+		testing.expect_value(t, p_err, nil)
+		pm, is_map := pv.(xitdb.Pull_Map)
+		testing.expectf(t, is_map, "Expected Pull_Map for %s", map_sel)
+		testing.expect_value(t, len(pm), 0)
+		testing.expect(t, raw_data(pm) == nil, "Expected nil backing pointer for empty Pull_Map")
+	}
+
+	// 3. OOM on implicit context.allocator (iterator pool / heap iterator) returns .Write_Failed cleanly
+	prev_alloc := context.allocator
+	defer context.allocator = prev_alloc
+
+	context.allocator = runtime.nil_allocator()
+	oom_pv_wild, oom_wild_err := xitdb.pull(m1_cur, "*", prev_alloc)
+	context.allocator = prev_alloc
+	defer xitdb.pull_value_destroy(oom_pv_wild, prev_alloc)
+	testing.expect_value(t, oom_wild_err, xitdb.Xitdb_Error.Write_Failed)
+
+	context.allocator = runtime.nil_allocator()
+	oom_pv_range, oom_range_err := xitdb.pull(m1_cur, "{.items[0..2]}", prev_alloc)
+	context.allocator = prev_alloc
+	defer xitdb.pull_value_destroy(oom_pv_range, prev_alloc)
+	testing.expect_value(t, oom_range_err, xitdb.Xitdb_Error.Write_Failed)
+
+	context.allocator = runtime.nil_allocator()
+	oom_diffs, oom_diff_err := xitdb.diff_moments(&db, 0, 1, false, prev_alloc)
+	context.allocator = prev_alloc
+	defer xitdb.diff_changes_destroy(oom_diffs, prev_alloc)
+	testing.expect_value(t, oom_diff_err, xitdb.Xitdb_Error.Write_Failed)
+
+	context.allocator = runtime.nil_allocator()
+	oom_slice, oom_unm_err := xitdb.unmarshal([]string, items_cur, prev_alloc)
+	context.allocator = prev_alloc
+	defer if oom_slice != nil {
+		for s in oom_slice {
+			if len(s) > 0 {
+				delete(s, prev_alloc)
+			}
+		}
+		delete(oom_slice, prev_alloc)
+	}
+	testing.expect_value(t, oom_unm_err, xitdb.Xitdb_Error.Write_Failed)
+
+	context.allocator = runtime.nil_allocator()
+	oom_qres, oom_q_err := xitdb.query_datalog(&db, "find ?k where .map[?k] = ?v", -1, prev_alloc)
+	context.allocator = prev_alloc
+	defer {
+		for row in oom_qres.rows {
+			for cell in row {
+				xitdb.pull_value_destroy(cell, prev_alloc)
+			}
+			delete(row, prev_alloc)
+		}
+		delete(oom_qres.rows, prev_alloc)
+		delete(oom_qres.vars, prev_alloc)
+	}
+	testing.expect_value(t, oom_q_err, xitdb.Xitdb_Error.Write_Failed)
+
+	// 4. OOM on explicit result allocator leaves zero leaks on context.allocator
+	res_oom_wild, res_oom_wild_err := xitdb.pull(m1_cur, "*", runtime.nil_allocator())
+	defer xitdb.pull_value_destroy(res_oom_wild, runtime.nil_allocator())
+	testing.expect_value(t, res_oom_wild_err, xitdb.Xitdb_Error.Write_Failed)
+
+	res_oom_range, res_oom_range_err := xitdb.pull(m1_cur, "{.items[0..2]}", runtime.nil_allocator())
+	defer xitdb.pull_value_destroy(res_oom_range, runtime.nil_allocator())
+	testing.expect_value(t, res_oom_range_err, xitdb.Xitdb_Error.Write_Failed)
+
+	res_oom_diffs, res_oom_diff_err := xitdb.diff_moments(&db, 0, 1, false, runtime.nil_allocator())
+	defer xitdb.diff_changes_destroy(res_oom_diffs, runtime.nil_allocator())
+	testing.expect_value(t, res_oom_diff_err, xitdb.Xitdb_Error.Write_Failed)
 }
