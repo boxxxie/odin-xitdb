@@ -963,6 +963,24 @@ unit_user_dsl_iterator_pool_oom_and_range_edge_guards :: proc(t: ^testing.T) {
 	db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
 	testing.expect_value(t, init_err, nil)
 
+	// .None target returns empty nil slice before allocating a Cursor_Iterator
+	prev_alloc := context.allocator
+	defer context.allocator = prev_alloc
+	context.allocator = runtime.nil_allocator()
+	none_unm_slice, none_unm_err := xitdb.unmarshal([]string, xitdb.database_root_cursor(&db).read_cursor, prev_alloc)
+	context.allocator = prev_alloc
+	defer if none_unm_slice != nil {
+		for s in none_unm_slice {
+			if len(s) > 0 {
+				delete(s, prev_alloc)
+			}
+		}
+		delete(none_unm_slice, prev_alloc)
+	}
+	testing.expect_value(t, none_unm_err, nil)
+	testing.expect_value(t, len(none_unm_slice), 0)
+	testing.expect(t, raw_data(none_unm_slice) == nil, "Expected nil slice for .None unmarshal")
+
 	// Moment 0: scalar, map, list, and empty instances of all collection families
 	tx0 := xitdb.tx_init(&db, base_moment = nil, allocator = context.allocator)
 	defer xitdb.tx_destroy(&tx0)
@@ -1010,7 +1028,13 @@ unit_user_dsl_iterator_pool_oom_and_range_edge_guards :: proc(t: ^testing.T) {
 	testing.expect_value(t, ic_err, nil)
 	items_cur, has_items := items_cur_maybe.?
 	testing.expect(t, has_items, "Expected @1.items cursor")
-	if !has_items {
+
+	scalar_cur_maybe, sc_err := xitdb.select_cursor(&db, "@0.scalar")
+	testing.expect_value(t, sc_err, nil)
+	scalar_cur, has_scalar := scalar_cur_maybe.?
+	testing.expect(t, has_scalar, "Expected @0.scalar cursor")
+
+	if !has_items || !has_scalar {
 		return
 	}
 
@@ -1046,9 +1070,6 @@ unit_user_dsl_iterator_pool_oom_and_range_edge_guards :: proc(t: ^testing.T) {
 	}
 
 	// 3. OOM on implicit context.allocator (iterator pool / heap iterator) returns .Write_Failed cleanly
-	prev_alloc := context.allocator
-	defer context.allocator = prev_alloc
-
 	context.allocator = runtime.nil_allocator()
 	oom_pv_wild, oom_wild_err := xitdb.pull(m1_cur, "*", prev_alloc)
 	context.allocator = prev_alloc
@@ -1079,6 +1100,20 @@ unit_user_dsl_iterator_pool_oom_and_range_edge_guards :: proc(t: ^testing.T) {
 		delete(oom_slice, prev_alloc)
 	}
 	testing.expect_value(t, oom_unm_err, xitdb.Xitdb_Error.Write_Failed)
+
+	// Non-collection target rejects before allocating a Cursor_Iterator
+	context.allocator = runtime.nil_allocator()
+	bad_unm_slice, bad_unm_err := xitdb.unmarshal([]string, scalar_cur, prev_alloc)
+	context.allocator = prev_alloc
+	defer if bad_unm_slice != nil {
+		for s in bad_unm_slice {
+			if len(s) > 0 {
+				delete(s, prev_alloc)
+			}
+		}
+		delete(bad_unm_slice, prev_alloc)
+	}
+	testing.expect_value(t, bad_unm_err, xitdb.Xitdb_Error.Unexpected_Tag)
 
 	context.allocator = runtime.nil_allocator()
 	oom_qres, oom_q_err := xitdb.query_datalog(&db, "find ?k where .map[?k] = ?v", -1, prev_alloc)

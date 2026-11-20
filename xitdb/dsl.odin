@@ -1844,13 +1844,13 @@ unmarshal :: proc($T: typeid, cursor: Read_Cursor, allocator := context.allocato
 	return res, err
 }
 
-@(private = "file")
+@(private)
 _Iter_Pool :: struct {
 	free_list: [dynamic]^Cursor_Iterator,
 	alloc:     runtime.Allocator,
 }
 
-@(private = "file")
+@(private)
 _iter_pool_init :: proc(alloc := context.allocator) -> _Iter_Pool {
 	return _Iter_Pool{
 		free_list = make([dynamic]^Cursor_Iterator, alloc),
@@ -1858,7 +1858,7 @@ _iter_pool_init :: proc(alloc := context.allocator) -> _Iter_Pool {
 	}
 }
 
-@(private = "file")
+@(private)
 _iter_pool_destroy :: proc(pool: ^_Iter_Pool) {
 	for it in pool.free_list {
 		free(it, pool.alloc)
@@ -1875,7 +1875,7 @@ _alloc_cursor_iterator :: proc(alloc := context.allocator) -> (it: ^Cursor_Itera
 	return ptr, nil
 }
 
-@(private = "file", require_results)
+@(private, require_results)
 _iter_pool_acquire :: proc(pool: ^_Iter_Pool) -> (it: ^Cursor_Iterator, err: Error) {
 	if len(pool.free_list) > 0 {
 		return pop(&pool.free_list), nil
@@ -1883,7 +1883,7 @@ _iter_pool_acquire :: proc(pool: ^_Iter_Pool) -> (it: ^Cursor_Iterator, err: Err
 	return _alloc_cursor_iterator(pool.alloc)
 }
 
-@(private = "file")
+@(private)
 _iter_pool_release :: proc(pool: ^_Iter_Pool, it: ^Cursor_Iterator) {
 	if it == nil {
 		return
@@ -1963,6 +1963,15 @@ unmarshal_into :: proc(cursor: Read_Cursor, dst_ptr: any, allocator := context.a
 			return nil
 		}
 		slot := cursor_slot(cursor) or_return
+		if slot.tag == .None {
+			raw_slice := (^runtime.Raw_Slice)(val.data)
+			raw_slice.data = nil
+			raw_slice.len = 0
+			return nil
+		}
+		if !_is_collection_tag(slot.tag) {
+			return .Unexpected_Tag
+		}
 		it := _alloc_cursor_iterator() or_return
 		defer if it != nil {
 			free(it)
