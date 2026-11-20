@@ -1,7 +1,9 @@
 package xitdb_tests
 
+import "core:encoding/endian"
 import "core:fmt"
 import "core:math/rand"
+import "core:mem"
 import "core:slice"
 import "core:testing"
 import xitdb "../xitdb"
@@ -1783,6 +1785,713 @@ unit_reverse_iterator_unwritten_none_sparse_slots_and_tag_guards :: proc(t: ^tes
 	}
 
 	testing.expect_value(t, xitdb.database_run_context(&db, cb, t), nil)
+}
+
+@(test)
+unit_cursor_iterator_in_place_init_and_reuse_invariants :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	core: xitdb.Core = xitdb.core_memory_init()
+	defer _ = xitdb.core_destroy(&core)
+
+	db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
+	testing.expect_value(t, init_err, nil)
+
+	cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+		t_ptr := (^testing.T)(user_data)
+		root_map := xitdb.write_hash_map_init(cursor^) or_return
+
+		// Empty / special cursors
+		unwritten_cur := xitdb.hash_map_put_cursor(&root_map, "unwritten") or_return
+		unwritten_rc := unwritten_cur.read_cursor
+
+		scalar_cur := xitdb.hash_map_put_cursor(&root_map, "scalar") or_return
+		xitdb.cursor_write(&scalar_cur, u64(42)) or_return
+		scalar_rc := scalar_cur.read_cursor
+
+		empty_al_cur := xitdb.hash_map_put_cursor(&root_map, "empty_al") or_return
+		_ = xitdb.write_array_list_init(empty_al_cur) or_return
+		empty_ll_cur := xitdb.hash_map_put_cursor(&root_map, "empty_ll") or_return
+		_ = xitdb.write_linked_array_list_init(empty_ll_cur) or_return
+		empty_sm_cur := xitdb.hash_map_put_cursor(&root_map, "empty_sm") or_return
+		_ = xitdb.write_sorted_map_init(empty_sm_cur) or_return
+		empty_ss_cur := xitdb.hash_map_put_cursor(&root_map, "empty_ss") or_return
+		_ = xitdb.write_sorted_set_init(empty_ss_cur) or_return
+		empty_hm_cur := xitdb.hash_map_put_cursor(&root_map, "empty_hm") or_return
+		_ = xitdb.write_hash_map_init(empty_hm_cur) or_return
+		empty_chm_cur := xitdb.hash_map_put_cursor(&root_map, "empty_chm") or_return
+		_ = xitdb.write_counted_hash_map_init(empty_chm_cur) or_return
+		empty_hs_cur := xitdb.hash_map_put_cursor(&root_map, "empty_hs") or_return
+		_ = xitdb.write_hash_set_init(empty_hs_cur) or_return
+		empty_chs_cur := xitdb.hash_map_put_cursor(&root_map, "empty_chs") or_return
+		_ = xitdb.write_counted_hash_set_init(empty_chs_cur) or_return
+
+		// Multi-tier populated collections (N = 40 > 16 so radix tries and B-Trees have height >= 2)
+		N :: 40
+		al_cur := xitdb.hash_map_put_cursor(&root_map, "al") or_return
+		al := xitdb.write_array_list_init(al_cur) or_return
+		ll_cur := xitdb.hash_map_put_cursor(&root_map, "ll") or_return
+		ll := xitdb.write_linked_array_list_init(ll_cur) or_return
+		sm_cur := xitdb.hash_map_put_cursor(&root_map, "sm") or_return
+		sm := xitdb.write_sorted_map_init(sm_cur) or_return
+		ss_cur := xitdb.hash_map_put_cursor(&root_map, "ss") or_return
+		ss := xitdb.write_sorted_set_init(ss_cur) or_return
+
+		for i in 0 ..< N {
+			xitdb.array_list_append(&al, fmt.tprintf("al-%02d", i)) or_return
+			xitdb.linked_array_list_append(&ll, fmt.tprintf("ll-%02d", i)) or_return
+			xitdb.sorted_map_put(&sm, fmt.tprintf("k-%02d", i), u64(i)) or_return
+			xitdb.sorted_set_put(&ss, fmt.tprintf("s-%02d", i)) or_return
+		}
+
+		H :: 20
+		hm_cur := xitdb.hash_map_put_cursor(&root_map, "hm") or_return
+		hm := xitdb.write_hash_map_init(hm_cur) or_return
+		chm_cur := xitdb.hash_map_put_cursor(&root_map, "chm") or_return
+		chm := xitdb.write_counted_hash_map_init(chm_cur) or_return
+		hs_cur := xitdb.hash_map_put_cursor(&root_map, "hs") or_return
+		hs := xitdb.write_hash_set_init(hs_cur) or_return
+		chs_cur := xitdb.hash_map_put_cursor(&root_map, "chs") or_return
+		chs := xitdb.write_counted_hash_set_init(chs_cur) or_return
+
+		for i in 0 ..< H {
+			mk := fmt.tprintf("m-%02d", i)
+			hk := fmt.tprintf("h-%02d", i)
+			xitdb.hash_map_put(&hm, mk, u64(i)) or_return
+			xitdb.hash_map_put(&chm, mk, u64(i)) or_return
+			xitdb.hash_set_put(&hs, hk) or_return
+			xitdb.hash_set_put(&chs, hk) or_return
+		}
+
+		al_rc  := al.read_array_list.cursor
+		ll_rc  := ll.read_linked_array_list.cursor
+		sm_rc  := sm.read_sorted_map.cursor
+		ss_rc  := ss.read_sorted_set.cursor
+		hm_rc  := hm.read_hash_map.cursor
+		chm_rc := chm.read_hash_map.cursor
+		hs_rc  := hs.read_hash_set.cursor
+		chs_rc := chs.read_hash_set.cursor
+
+		make_dirty :: proc(t_ptr: ^testing.T, it: ^xitdb.Cursor_Iterator, sm_rc: xitdb.Read_Cursor) {
+			err := xitdb.cursor_iterator_init(it, sm_rc)
+			testing.expect_value(t_ptr, err, nil)
+			for _ in 0 ..< 20 {
+				c, next_err := xitdb.cursor_iterator_next(it)
+				testing.expect_value(t_ptr, next_err, nil)
+				testing.expect(t_ptr, c != nil, "Expected non-nil element while dirtying iterator")
+			}
+			testing.expect(t_ptr, it.stack_len >= 2, "Expected multi-tier B+Tree stack_len >= 2")
+			testing.expect_value(t_ptr, it.index, i64(20))
+			testing.expect_value(t_ptr, it.size, i64(40))
+		}
+
+		collect_strings :: proc(t_ptr: ^testing.T, it: ^xitdb.Cursor_Iterator, kv_key: bool, reverse: bool = false) -> []string {
+			out := make([dynamic]string, 0, 16, context.temp_allocator)
+			for {
+				c_maybe: Maybe(xitdb.Read_Cursor)
+				next_err: xitdb.Error
+				if reverse {
+					c_maybe, next_err = xitdb.cursor_iterator_prev(it)
+				} else {
+					c_maybe, next_err = xitdb.cursor_iterator_next(it)
+				}
+				testing.expect_value(t_ptr, next_err, nil)
+				c, ok := c_maybe.?
+				if !ok {
+					break
+				}
+				target := c
+				if kv_key {
+					k_cur, _, kv_err := xitdb.cursor_read_kv_pair_slots(c)
+					testing.expect_value(t_ptr, kv_err, nil)
+					target = k_cur
+				}
+				s, s_err := xitdb.cursor_read_string(target, 64, context.temp_allocator)
+				testing.expect_value(t_ptr, s_err, nil)
+				append(&out, s)
+			}
+			return out[:]
+		}
+
+		is_zeroed_iter :: proc(it: ^xitdb.Cursor_Iterator) -> bool {
+			for b in mem.ptr_to_bytes(it) {
+				if b != 0 {
+					return false
+				}
+			}
+			return true
+		}
+
+		expect_slice_eq :: proc(t_ptr: ^testing.T, a, b: []string, label: string) {
+			testing.expect_value(t_ptr, len(a), len(b))
+			n := min(len(a), len(b))
+			for i in 0 ..< n {
+				if a[i] != b[i] {
+					testing.expectf(t_ptr, false, "%s mismatch at %d: %q vs %q", label, i, a[i], b[i])
+					break
+				}
+			}
+		}
+
+		expect_empty_iter :: proc(t_ptr: ^testing.T, it: ^xitdb.Cursor_Iterator, label: string, reverse: bool = false) {
+			c: Maybe(xitdb.Read_Cursor)
+			err: xitdb.Error
+			if reverse {
+				c, err = xitdb.cursor_iterator_prev(it)
+			} else {
+				c, err = xitdb.cursor_iterator_next(it)
+			}
+			testing.expect_value(t_ptr, err, nil)
+			testing.expectf(t_ptr, c == nil, "%s: expected nil from empty iterator", label)
+		}
+
+		// Allocate a single Cursor_Iterator and reuse it across all tests
+		it := new(xitdb.Cursor_Iterator)
+		defer free(it)
+
+		// 1. cursor_iterator_init: parity across all 8 populated collection types
+		all_cols := [?]struct {
+			rc:     xitdb.Read_Cursor,
+			kv_key: bool,
+			sorted: bool,
+			count:  int,
+			prefix: string,
+		}{
+			{al_rc,  false, true,  N, "al-"},
+			{ll_rc,  false, true,  N, "ll-"},
+			{sm_rc,  true,  true,  N, "k-"},
+			{ss_rc,  true,  true,  N, "s-"},
+			{hm_rc,  true,  false, H, "m-"},
+			{chm_rc, true,  false, H, "m-"},
+			{hs_rc,  true,  false, H, "h-"},
+			{chs_rc, true,  false, H, "h-"},
+		}
+		for col in all_cols {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_init(it, col.rc), nil)
+			got := collect_strings(t_ptr, it, col.kv_key)
+
+			ref_it, ref_err := xitdb.cursor_iterator(col.rc)
+			testing.expect_value(t_ptr, ref_err, nil)
+			ref := collect_strings(t_ptr, &ref_it, col.kv_key)
+
+			testing.expect_value(t_ptr, len(got), col.count)
+			expect_slice_eq(t_ptr, got, ref, col.prefix)
+			if col.sorted {
+				for i in 0 ..< len(got) {
+					testing.expect_value(t_ptr, got[i], fmt.tprintf("%s%02d", col.prefix, i))
+				}
+			} else {
+				slice.sort(got)
+				for i in 0 ..< len(got) {
+					testing.expect_value(t_ptr, got[i], fmt.tprintf("%s%02d", col.prefix, i))
+				}
+			}
+		}
+
+		// cursor_iterator_init on dirty iterator -> all 8 empty collections, .None, and .Uint error
+		empty_cols := [?]xitdb.Read_Cursor{
+			empty_al_cur.read_cursor,
+			empty_ll_cur.read_cursor,
+			empty_sm_cur.read_cursor,
+			empty_ss_cur.read_cursor,
+			empty_hm_cur.read_cursor,
+			empty_chm_cur.read_cursor,
+			empty_hs_cur.read_cursor,
+			empty_chs_cur.read_cursor,
+		}
+		for ec in empty_cols {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_init(it, ec), nil)
+			expect_empty_iter(t_ptr, it, "cursor_iterator_init empty")
+		}
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_init(it, unwritten_rc), nil)
+		testing.expect_value(t_ptr, it.size, i64(0))
+		testing.expect_value(t_ptr, it.index, i64(0))
+		testing.expect_value(t_ptr, it.stack_len, 0)
+		expect_empty_iter(t_ptr, it, "cursor_iterator_init .None")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_init(it, scalar_rc), xitdb.Xitdb_Error.Unexpected_Tag)
+		testing.expect(t_ptr, is_zeroed_iter(it), "Expected full zero reset on cursor_iterator_init error")
+
+		// 2. cursor_iterator_sorted_from_index_init
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_index_init(it, sm_rc, 25), nil)
+		testing.expect_value(t_ptr, it.size, i64(40))
+		testing.expect_value(t_ptr, it.index, i64(25))
+		sm_idx_got := collect_strings(t_ptr, it, true)
+		sm_idx_ref_it, sm_idx_ref_err := xitdb.cursor_iterator_sorted_from_index(sm_rc, 25)
+		testing.expect_value(t_ptr, sm_idx_ref_err, nil)
+		expect_slice_eq(t_ptr, sm_idx_got, collect_strings(t_ptr, &sm_idx_ref_it, true), "sorted_from_index 25")
+		testing.expect_value(t_ptr, len(sm_idx_got), 15)
+		testing.expect_value(t_ptr, sm_idx_got[0], "k-25")
+		testing.expect_value(t_ptr, sm_idx_got[14], "k-39")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_index_init(it, sm_rc, -5), nil)
+		testing.expect_value(t_ptr, it.index, i64(35))
+		sm_neg := collect_strings(t_ptr, it, true)
+		testing.expect_value(t_ptr, len(sm_neg), 5)
+		testing.expect_value(t_ptr, sm_neg[0], "k-35")
+		testing.expect_value(t_ptr, sm_neg[4], "k-39")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_index_init(it, ss_rc, 30), nil)
+		ss_idx := collect_strings(t_ptr, it, true)
+		testing.expect_value(t_ptr, len(ss_idx), 10)
+		testing.expect_value(t_ptr, ss_idx[0], "s-30")
+		testing.expect_value(t_ptr, ss_idx[9], "s-39")
+
+		for oob in ([?]i64{40, -41}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_index_init(it, sm_rc, oob), nil)
+			testing.expect_value(t_ptr, it.size, i64(0))
+			testing.expect_value(t_ptr, it.index, i64(0))
+			testing.expect_value(t_ptr, it.stack_len, 0)
+			expect_empty_iter(t_ptr, it, "sorted_from_index oob")
+		}
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_index_init(it, empty_sm_cur.read_cursor, 0), nil)
+		testing.expect_value(t_ptr, it.stack_len, 0)
+		expect_empty_iter(t_ptr, it, "sorted_from_index empty")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_index_init(it, unwritten_rc, 0), nil)
+		expect_empty_iter(t_ptr, it, "sorted_from_index .None")
+
+		for bad in ([?]xitdb.Read_Cursor{hm_rc, al_rc, scalar_rc}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_index_init(it, bad, 0), xitdb.Xitdb_Error.Unexpected_Tag)
+			testing.expect(t_ptr, is_zeroed_iter(it), "Expected full zero reset on sorted_from_index_init error")
+		}
+
+		// 3. cursor_iterator_sorted_from_key_init
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_key_init(it, sm_rc, transmute([]u8)string("k-17")), nil)
+		testing.expect_value(t_ptr, it.size, i64(40))
+		testing.expect_value(t_ptr, it.index, i64(17))
+		sm_key_got := collect_strings(t_ptr, it, true)
+		sm_key_ref_it, sm_key_ref_err := xitdb.cursor_iterator_sorted_from_key(sm_rc, transmute([]u8)string("k-17"))
+		testing.expect_value(t_ptr, sm_key_ref_err, nil)
+		expect_slice_eq(t_ptr, sm_key_got, collect_strings(t_ptr, &sm_key_ref_it, true), "sorted_from_key k-17")
+		testing.expect_value(t_ptr, len(sm_key_got), 23)
+		testing.expect_value(t_ptr, sm_key_got[0], "k-17")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_key_init(it, sm_rc, transmute([]u8)string("k-17a")), nil)
+		testing.expect_value(t_ptr, it.index, i64(18))
+		sm_mid := collect_strings(t_ptr, it, true)
+		testing.expect_value(t_ptr, len(sm_mid), 22)
+		testing.expect_value(t_ptr, sm_mid[0], "k-18")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_key_init(it, sm_rc, transmute([]u8)string("z-99")), nil)
+		testing.expect_value(t_ptr, it.index, i64(40))
+		expect_empty_iter(t_ptr, it, "sorted_from_key past end")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_key_init(it, empty_sm_cur.read_cursor, transmute([]u8)string("a")), nil)
+		expect_empty_iter(t_ptr, it, "sorted_from_key empty")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_key_init(it, ss_rc, transmute([]u8)string("s-35")), nil)
+		ss_key := collect_strings(t_ptr, it, true)
+		testing.expect_value(t_ptr, len(ss_key), 5)
+		testing.expect_value(t_ptr, ss_key[0], "s-35")
+		testing.expect_value(t_ptr, ss_key[4], "s-39")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_key_init(it, unwritten_rc, transmute([]u8)string("a")), nil)
+		testing.expect_value(t_ptr, it.stack_len, 0)
+		expect_empty_iter(t_ptr, it, "sorted_from_key .None")
+
+		for bad in ([?]xitdb.Read_Cursor{al_rc, scalar_rc}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_key_init(it, bad, transmute([]u8)string("a")), xitdb.Xitdb_Error.Unexpected_Tag)
+			testing.expect(t_ptr, is_zeroed_iter(it), "Expected full zero reset on sorted_from_key_init error")
+		}
+
+		// 4. cursor_iterator_array_list_from_index_init
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_from_index_init(it, al_rc, 20), nil)
+		testing.expect_value(t_ptr, it.size, i64(40))
+		testing.expect_value(t_ptr, it.index, i64(20))
+		al_got := collect_strings(t_ptr, it, false)
+		al_ref_it, al_ref_err := xitdb.cursor_iterator_array_list_from_index(al_rc, 20)
+		testing.expect_value(t_ptr, al_ref_err, nil)
+		expect_slice_eq(t_ptr, al_got, collect_strings(t_ptr, &al_ref_it, false), "array_list_from_index 20")
+		testing.expect_value(t_ptr, len(al_got), 20)
+		testing.expect_value(t_ptr, al_got[0], "al-20")
+		testing.expect_value(t_ptr, al_got[19], "al-39")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_from_index_init(it, al_rc, -3), nil)
+		testing.expect_value(t_ptr, it.index, i64(37))
+		al_neg := collect_strings(t_ptr, it, false)
+		testing.expect_value(t_ptr, len(al_neg), 3)
+		testing.expect_value(t_ptr, al_neg[0], "al-37")
+		testing.expect_value(t_ptr, al_neg[2], "al-39")
+
+		for oob in ([?]i64{40, -41}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_from_index_init(it, al_rc, oob), nil)
+			testing.expect_value(t_ptr, it.stack_len, 0)
+			expect_empty_iter(t_ptr, it, "array_list_from_index oob")
+		}
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_from_index_init(it, empty_al_cur.read_cursor, 0), nil)
+		testing.expect_value(t_ptr, it.stack_len, 0)
+		expect_empty_iter(t_ptr, it, "array_list_from_index empty")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_from_index_init(it, unwritten_rc, 0), nil)
+		expect_empty_iter(t_ptr, it, "array_list_from_index .None")
+
+		for bad in ([?]xitdb.Read_Cursor{ll_rc, scalar_rc}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_from_index_init(it, bad, 0), xitdb.Xitdb_Error.Unexpected_Tag)
+			testing.expect(t_ptr, is_zeroed_iter(it), "Expected full zero reset on array_list_from_index_init error")
+		}
+
+		// 5. cursor_iterator_linked_array_list_from_index_init
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_from_index_init(it, ll_rc, 22), nil)
+		testing.expect_value(t_ptr, it.size, i64(40))
+		testing.expect_value(t_ptr, it.index, i64(22))
+		ll_got := collect_strings(t_ptr, it, false)
+		ll_ref_it, ll_ref_err := xitdb.cursor_iterator_linked_array_list_from_index(ll_rc, 22)
+		testing.expect_value(t_ptr, ll_ref_err, nil)
+		expect_slice_eq(t_ptr, ll_got, collect_strings(t_ptr, &ll_ref_it, false), "linked_array_list_from_index 22")
+		testing.expect_value(t_ptr, len(ll_got), 18)
+		testing.expect_value(t_ptr, ll_got[0], "ll-22")
+		testing.expect_value(t_ptr, ll_got[17], "ll-39")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_from_index_init(it, ll_rc, -4), nil)
+		testing.expect_value(t_ptr, it.index, i64(36))
+		ll_neg := collect_strings(t_ptr, it, false)
+		testing.expect_value(t_ptr, len(ll_neg), 4)
+		testing.expect_value(t_ptr, ll_neg[0], "ll-36")
+		testing.expect_value(t_ptr, ll_neg[3], "ll-39")
+
+		for oob in ([?]i64{40, -41}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_from_index_init(it, ll_rc, oob), nil)
+			testing.expect_value(t_ptr, it.stack_len, 0)
+			expect_empty_iter(t_ptr, it, "linked_array_list_from_index oob")
+		}
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_from_index_init(it, empty_ll_cur.read_cursor, 0), nil)
+		testing.expect_value(t_ptr, it.stack_len, 0)
+		expect_empty_iter(t_ptr, it, "linked_array_list_from_index empty")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_from_index_init(it, unwritten_rc, 0), nil)
+		expect_empty_iter(t_ptr, it, "linked_array_list_from_index .None")
+
+		for bad in ([?]xitdb.Read_Cursor{al_rc, scalar_rc}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_from_index_init(it, bad, 0), xitdb.Xitdb_Error.Unexpected_Tag)
+			testing.expect(t_ptr, is_zeroed_iter(it), "Expected full zero reset on linked_array_list_from_index_init error")
+		}
+
+		// 6. cursor_iterator_reverse_init: parity across all 8 populated collections + empty/.None/.Unexpected_Tag
+		for col in all_cols {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_reverse_init(it, col.rc), nil)
+			got := collect_strings(t_ptr, it, col.kv_key, reverse = true)
+
+			ref_it, ref_err := xitdb.cursor_iterator_reverse(col.rc)
+			testing.expect_value(t_ptr, ref_err, nil)
+			ref := collect_strings(t_ptr, &ref_it, col.kv_key, reverse = true)
+
+			testing.expect_value(t_ptr, len(got), col.count)
+			expect_slice_eq(t_ptr, got, ref, col.prefix)
+			if col.sorted {
+				for i in 0 ..< len(got) {
+					testing.expect_value(t_ptr, got[i], fmt.tprintf("%s%02d", col.prefix, col.count - 1 - i))
+				}
+			} else {
+				slice.sort(got)
+				for i in 0 ..< len(got) {
+					testing.expect_value(t_ptr, got[i], fmt.tprintf("%s%02d", col.prefix, i))
+				}
+			}
+		}
+		for ec in empty_cols {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_reverse_init(it, ec), nil)
+			expect_empty_iter(t_ptr, it, "cursor_iterator_reverse_init empty", reverse = true)
+		}
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_reverse_init(it, unwritten_rc), nil)
+		expect_empty_iter(t_ptr, it, "cursor_iterator_reverse_init .None", reverse = true)
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_reverse_init(it, scalar_rc), xitdb.Xitdb_Error.Unexpected_Tag)
+		testing.expect(t_ptr, is_zeroed_iter(it), "Expected full zero reset on cursor_iterator_reverse_init error")
+
+		// Verify forward -> reverse -> forward transitions on the exact same reused Cursor_Iterator
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_reverse_init(it, al_rc), nil)
+		first_rev, fr_err := xitdb.cursor_iterator_prev(it)
+		testing.expect_value(t_ptr, fr_err, nil)
+		fr_str, _ := xitdb.cursor_read_string(first_rev.?, 64, context.temp_allocator)
+		testing.expect_value(t_ptr, fr_str, "al-39")
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_init(it, al_rc), nil)
+		first_fwd, ff_err := xitdb.cursor_iterator_next(it)
+		testing.expect_value(t_ptr, ff_err, nil)
+		ff_str, _ := xitdb.cursor_read_string(first_fwd.?, 64, context.temp_allocator)
+		testing.expect_value(t_ptr, ff_str, "al-00")
+
+		// 7. cursor_iterator_sorted_reverse_from_index_init
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_index_init(it, sm_rc, 15), nil)
+		testing.expect_value(t_ptr, it.size, i64(40))
+		testing.expect_value(t_ptr, it.index, i64(16))
+		sm_ridx := collect_strings(t_ptr, it, true, reverse = true)
+		sm_ridx_ref_it, sm_ridx_ref_err := xitdb.cursor_iterator_sorted_reverse_from_index(sm_rc, 15)
+		testing.expect_value(t_ptr, sm_ridx_ref_err, nil)
+		expect_slice_eq(t_ptr, sm_ridx, collect_strings(t_ptr, &sm_ridx_ref_it, true, reverse = true), "sorted_reverse_from_index 15")
+		testing.expect_value(t_ptr, len(sm_ridx), 16)
+		testing.expect_value(t_ptr, sm_ridx[0], "k-15")
+		testing.expect_value(t_ptr, sm_ridx[15], "k-00")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_index_init(it, sm_rc, -5), nil)
+		sm_rneg := collect_strings(t_ptr, it, true, reverse = true)
+		testing.expect_value(t_ptr, len(sm_rneg), 36)
+		testing.expect_value(t_ptr, sm_rneg[0], "k-35")
+		testing.expect_value(t_ptr, sm_rneg[35], "k-00")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_index_init(it, ss_rc, 5), nil)
+		ss_ridx := collect_strings(t_ptr, it, true, reverse = true)
+		testing.expect_value(t_ptr, len(ss_ridx), 6)
+		testing.expect_value(t_ptr, ss_ridx[0], "s-05")
+		testing.expect_value(t_ptr, ss_ridx[5], "s-00")
+
+		for oob in ([?]i64{40, -41}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_index_init(it, sm_rc, oob), nil)
+			testing.expect_value(t_ptr, it.stack_len, 0)
+			expect_empty_iter(t_ptr, it, "sorted_reverse_from_index oob", reverse = true)
+		}
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_index_init(it, empty_sm_cur.read_cursor, 0), nil)
+		expect_empty_iter(t_ptr, it, "sorted_reverse_from_index empty", reverse = true)
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_index_init(it, unwritten_rc, 0), nil)
+		expect_empty_iter(t_ptr, it, "sorted_reverse_from_index .None", reverse = true)
+
+		for bad in ([?]xitdb.Read_Cursor{hm_rc, al_rc, scalar_rc}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_index_init(it, bad, 0), xitdb.Xitdb_Error.Unexpected_Tag)
+			testing.expect(t_ptr, is_zeroed_iter(it), "Expected full zero reset on sorted_reverse_from_index_init error")
+		}
+
+		// 8. cursor_iterator_sorted_reverse_from_key_init
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_key_init(it, sm_rc, transmute([]u8)string("k-17"), true), nil)
+		sm_rkey_inc := collect_strings(t_ptr, it, true, reverse = true)
+		sm_rkey_ref_it, sm_rkey_ref_err := xitdb.cursor_iterator_sorted_reverse_from_key(sm_rc, transmute([]u8)string("k-17"), true)
+		testing.expect_value(t_ptr, sm_rkey_ref_err, nil)
+		expect_slice_eq(t_ptr, sm_rkey_inc, collect_strings(t_ptr, &sm_rkey_ref_it, true, reverse = true), "sorted_reverse_from_key k-17")
+		testing.expect_value(t_ptr, len(sm_rkey_inc), 18)
+		testing.expect_value(t_ptr, sm_rkey_inc[0], "k-17")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_key_init(it, sm_rc, transmute([]u8)string("k-17"), false), nil)
+		sm_rkey_exc := collect_strings(t_ptr, it, true, reverse = true)
+		testing.expect_value(t_ptr, len(sm_rkey_exc), 17)
+		testing.expect_value(t_ptr, sm_rkey_exc[0], "k-16")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_key_init(it, sm_rc, transmute([]u8)string("a-00"), true), nil)
+		testing.expect_value(t_ptr, it.stack_len, 0)
+		expect_empty_iter(t_ptr, it, "sorted_reverse_from_key before first", reverse = true)
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_key_init(it, empty_sm_cur.read_cursor, transmute([]u8)string("z")), nil)
+		expect_empty_iter(t_ptr, it, "sorted_reverse_from_key empty", reverse = true)
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_key_init(it, unwritten_rc, transmute([]u8)string("z")), nil)
+		expect_empty_iter(t_ptr, it, "sorted_reverse_from_key .None", reverse = true)
+
+		for bad in ([?]xitdb.Read_Cursor{al_rc, scalar_rc}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_reverse_from_key_init(it, bad, transmute([]u8)string("z")), xitdb.Xitdb_Error.Unexpected_Tag)
+			testing.expect(t_ptr, is_zeroed_iter(it), "Expected full zero reset on sorted_reverse_from_key_init error")
+		}
+
+		// 9. cursor_iterator_array_list_reverse_from_index_init
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_reverse_from_index_init(it, al_rc, 10), nil)
+		al_rev_got := collect_strings(t_ptr, it, false, reverse = true)
+		al_rev_ref_it, al_rev_ref_err := xitdb.cursor_iterator_array_list_reverse_from_index(al_rc, 10)
+		testing.expect_value(t_ptr, al_rev_ref_err, nil)
+		expect_slice_eq(t_ptr, al_rev_got, collect_strings(t_ptr, &al_rev_ref_it, false, reverse = true), "array_list_reverse_from_index 10")
+		testing.expect_value(t_ptr, len(al_rev_got), 11)
+		testing.expect_value(t_ptr, al_rev_got[0], "al-10")
+		testing.expect_value(t_ptr, al_rev_got[10], "al-00")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_reverse_from_index_init(it, al_rc, -1), nil)
+		al_rev_all := collect_strings(t_ptr, it, false, reverse = true)
+		testing.expect_value(t_ptr, len(al_rev_all), 40)
+		testing.expect_value(t_ptr, al_rev_all[0], "al-39")
+
+		for oob in ([?]i64{40, -41}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_reverse_from_index_init(it, al_rc, oob), nil)
+			expect_empty_iter(t_ptr, it, "array_list_reverse_from_index oob", reverse = true)
+		}
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_reverse_from_index_init(it, empty_al_cur.read_cursor, 0), nil)
+		expect_empty_iter(t_ptr, it, "array_list_reverse_from_index empty", reverse = true)
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_reverse_from_index_init(it, unwritten_rc, 0), nil)
+		expect_empty_iter(t_ptr, it, "array_list_reverse_from_index .None", reverse = true)
+		for bad in ([?]xitdb.Read_Cursor{ll_rc, scalar_rc}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_array_list_reverse_from_index_init(it, bad, 0), xitdb.Xitdb_Error.Unexpected_Tag)
+			testing.expect(t_ptr, is_zeroed_iter(it), "Expected full zero reset on array_list_reverse_from_index_init error")
+		}
+
+		// 10. cursor_iterator_linked_array_list_reverse_from_index_init
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_reverse_from_index_init(it, ll_rc, 12), nil)
+		ll_rev_got := collect_strings(t_ptr, it, false, reverse = true)
+		ll_rev_ref_it, ll_rev_ref_err := xitdb.cursor_iterator_linked_array_list_reverse_from_index(ll_rc, 12)
+		testing.expect_value(t_ptr, ll_rev_ref_err, nil)
+		expect_slice_eq(t_ptr, ll_rev_got, collect_strings(t_ptr, &ll_rev_ref_it, false, reverse = true), "linked_array_list_reverse_from_index 12")
+		testing.expect_value(t_ptr, len(ll_rev_got), 13)
+		testing.expect_value(t_ptr, ll_rev_got[0], "ll-12")
+		testing.expect_value(t_ptr, ll_rev_got[12], "ll-00")
+
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_reverse_from_index_init(it, ll_rc, -38), nil)
+		ll_rev_neg := collect_strings(t_ptr, it, false, reverse = true)
+		testing.expect_value(t_ptr, len(ll_rev_neg), 3)
+		testing.expect_value(t_ptr, ll_rev_neg[0], "ll-02")
+		testing.expect_value(t_ptr, ll_rev_neg[2], "ll-00")
+
+		for oob in ([?]i64{40, -41}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_reverse_from_index_init(it, ll_rc, oob), nil)
+			expect_empty_iter(t_ptr, it, "linked_array_list_reverse_from_index oob", reverse = true)
+		}
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_reverse_from_index_init(it, empty_ll_cur.read_cursor, 0), nil)
+		expect_empty_iter(t_ptr, it, "linked_array_list_reverse_from_index empty", reverse = true)
+		make_dirty(t_ptr, it, sm_rc)
+		testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_reverse_from_index_init(it, unwritten_rc, 0), nil)
+		expect_empty_iter(t_ptr, it, "linked_array_list_reverse_from_index .None", reverse = true)
+		for bad in ([?]xitdb.Read_Cursor{al_rc, scalar_rc}) {
+			make_dirty(t_ptr, it, sm_rc)
+			testing.expect_value(t_ptr, xitdb.cursor_iterator_linked_array_list_reverse_from_index_init(it, bad, 0), xitdb.Xitdb_Error.Unexpected_Tag)
+			testing.expect(t_ptr, is_zeroed_iter(it), "Expected full zero reset on linked_array_list_reverse_from_index_init error")
+		}
+
+		return nil
+	}
+
+	testing.expect_value(t, xitdb.database_run_context(&db, cb, t), nil)
+
+	// 11. Mid-walk B+Tree error rollback and sorted total == 0 fast-path (isolated DB)
+	corrupt_core: xitdb.Core = xitdb.core_memory_init()
+	defer _ = xitdb.core_destroy(&corrupt_core)
+
+	corrupt_db, cdb_err := xitdb.database_init(&corrupt_core, xitdb.sha1_hasher())
+	testing.expect_value(t, cdb_err, nil)
+
+	corrupt_cb :: proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		root_map := xitdb.write_hash_map_init(cursor^) or_return
+		empty_sm_cur := xitdb.hash_map_put_cursor(&root_map, "empty_sm") or_return
+		_ = xitdb.write_sorted_map_init(empty_sm_cur) or_return
+
+		sm_cur := xitdb.hash_map_put_cursor(&root_map, "sm") or_return
+		sm := xitdb.write_sorted_map_init(sm_cur) or_return
+		for i in 0 ..< 40 {
+			xitdb.sorted_map_put(&sm, fmt.tprintf("k-%02d", i), u64(i)) or_return
+		}
+		return nil
+	}
+	testing.expect_value(t, xitdb.database_run_context(&corrupt_db, corrupt_cb, nil), nil)
+
+	root_rc := xitdb.database_root_cursor(&corrupt_db).read_cursor
+	root_hm, rhm_err := xitdb.read_hash_map_init(root_rc)
+	testing.expect_value(t, rhm_err, nil)
+
+	empty_sm_maybe, esm_err := xitdb.hash_map_get_cursor(root_hm, "empty_sm")
+	testing.expect_value(t, esm_err, nil)
+	empty_sm_rc := empty_sm_maybe.?
+	empty_sm_slot, ess_err := xitdb.cursor_slot(empty_sm_rc)
+	testing.expect_value(t, ess_err, nil)
+
+	sm_maybe, sm_err := xitdb.hash_map_get_cursor(root_hm, "sm")
+	testing.expect_value(t, sm_err, nil)
+	c_sm_rc := sm_maybe.?
+	c_sm_slot, css_err := xitdb.cursor_slot(c_sm_rc)
+	testing.expect_value(t, css_err, nil)
+
+	cm := &corrupt_core.(xitdb.Core_Memory)
+
+	// Point empty_sm's root_ptr at an out-of-bounds offset: total == 0 fast-path avoids dereferencing root_ptr
+	endian.put_u64(cm.buf[empty_sm_slot.value + 8 : empty_sm_slot.value + 16], .Big, 999_999)
+
+	is_zeroed :: proc(it: ^xitdb.Cursor_Iterator) -> bool {
+		for b in mem.ptr_to_bytes(it) {
+			if b != 0 {
+				return false
+			}
+		}
+		return true
+	}
+
+	it_iso := new(xitdb.Cursor_Iterator)
+	defer free(it_iso)
+
+	// Dirty it_iso on c_sm_rc first, then verify empty_sm total == 0 fast-path succeeds
+	testing.expect_value(t, xitdb.cursor_iterator_init(it_iso, c_sm_rc), nil)
+	_, _ = xitdb.cursor_iterator_next(it_iso)
+
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_key_init(it_iso, empty_sm_rc, transmute([]u8)string("a")), nil)
+	c_fast, cf_err := xitdb.cursor_iterator_next(it_iso)
+	testing.expect_value(t, cf_err, nil)
+	testing.expect(t, c_fast == nil, "Expected nil from empty Sorted_Map fast-path")
+
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_reverse_from_key_init(it_iso, empty_sm_rc, transmute([]u8)string("z")), nil)
+	cr_fast, crf_err := xitdb.cursor_iterator_prev(it_iso)
+	testing.expect_value(t, crf_err, nil)
+	testing.expect(t, cr_fast == nil, "Expected nil from empty Sorted_Map reverse fast-path")
+
+	// Corrupt all child leaf nodes under c_sm_rc's B+Tree branch root so mid-walk fails after stack_len >= 1
+	root_ptr_val, _ := endian.get_u64(cm.buf[c_sm_slot.value + 8 : c_sm_slot.value + 16], .Big)
+	branch_off := int(root_ptr_val)
+	branch_num := int(cm.buf[branch_off + 1])
+	testing.expect(t, cm.buf[branch_off] == 1 && branch_num > 0, "Expected multi-tier B+Tree branch root")
+	for j in 0 ..< branch_num {
+		slot_off := branch_off + xitdb.BTREE_NODE_HEADER_SIZE + j * xitdb.SLOT_LENGTH
+		child_slot, cs_err := xitdb.slot_from_slice(cm.buf[slot_off : slot_off + xitdb.SLOT_LENGTH])
+		testing.expect_value(t, cs_err, nil)
+		cm.buf[child_slot.value] = 0xFF
+	}
+
+	// Re-dirty it_iso via an Array_List? No, c_sm_rc's branch root itself is still intact at level 0,
+	// or dirty it_iso via cursor_iterator_sorted_from_index_init's outer loop itself (`stack_len` becomes 1 before leaf fail).
+	// Still pre-fill it_iso with non-zero bytes to prove both pre-existing dirty bytes AND mid-walk branch stack are wiped!
+	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_index_init(it_iso, c_sm_rc, 25), xitdb.Xitdb_Error.Invalid_BTree_Node_Kind)
+	testing.expect(t, is_zeroed(it_iso), "Expected full zero rollback on mid-walk sorted_from_index_init failure")
+
+	val_it, val_err := xitdb.cursor_iterator_sorted_from_index(c_sm_rc, 25)
+	testing.expect_value(t, val_err, xitdb.Xitdb_Error.Invalid_BTree_Node_Kind)
+	testing.expect(t, is_zeroed(&val_it), "Expected full zero rollback on value-returning cursor_iterator_sorted_from_index failure")
 }
 
 // ----------------------------------------------------------------------------

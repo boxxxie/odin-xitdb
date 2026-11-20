@@ -3,6 +3,7 @@ package xitdb
 import "base:intrinsics"
 import "core:encoding/endian"
 import "core:io"
+import "core:mem"
 
 Read_Cursor :: struct {
 	slot_ptr:  Slot_Pointer,
@@ -888,47 +889,54 @@ _init_btree_iter_level_rev :: proc(cursor: Read_Cursor, node_ptr: i64, level: ^I
 	return nil
 }
 
-cursor_iterator_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor) -> Error {
+@(private)
+_reset_cursor_iterator :: proc(res: ^Cursor_Iterator) {
+	assert(res != nil)
+	res.cursor = {}
 	res.size = 0
 	res.index = 0
 	res.stack_len = 0
+}
+
+@(require_results)
+cursor_iterator_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor) -> (err: Error) {
+	_reset_cursor_iterator(res)
+	defer if err != nil {
+		mem.zero_item(res)
+	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
-	res.cursor = cursor
 
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
-		res.size = 0
-		res.index = 0
+		res.cursor = cursor
 	case .Array_List:
+		res.cursor = cursor
 		position := cursor.slot_ptr.slot.value
 		hb: [ARRAY_LIST_HEADER_LENGTH]u8 = ---
 		core_read_exact_at(cursor.db.core, position, hb[:]) or_return
 		header := array_list_header_from_bytes(hb) or_return
 		res.size = header.size
-		res.index = 0
 		if header.size > 0 {
 			_init_iter_level(cursor, header.ptr, &res.stack[0]) or_return
 			res.stack_len = 1
 		}
 	case .Linked_Array_List, .Sorted_Map, .Sorted_Set:
+		res.cursor = cursor
 		position := cursor.slot_ptr.slot.value
 		hb: [BTREE_HEADER_LENGTH]u8 = ---
 		core_read_exact_at(cursor.db.core, position, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
 		res.size = header.size
-		res.index = 0
 		if header.size > 0 {
 			_init_btree_iter_level(cursor, header.root_ptr, &res.stack[0]) or_return
 			res.stack_len = 1
 		}
 	case .Hash_Map, .Hash_Set:
-		res.size = 0
-		res.index = 0
+		res.cursor = cursor
 		_init_iter_level(cursor, cursor.slot_ptr.slot.value, &res.stack[0]) or_return
 		res.stack_len = 1
 	case .Counted_Hash_Map, .Counted_Hash_Set:
-		res.size = 0
-		res.index = 0
+		res.cursor = cursor
 		_init_iter_level(cursor, cursor.slot_ptr.slot.value + 8, &res.stack[0]) or_return
 		res.stack_len = 1
 	case:
@@ -942,17 +950,21 @@ cursor_iterator :: proc(unresolved_cursor: Read_Cursor) -> (res: Cursor_Iterator
 	return
 }
 
-cursor_iterator_reverse :: proc(unresolved_cursor: Read_Cursor) -> (res: Cursor_Iterator, err: Error) {
+@(require_results)
+cursor_iterator_reverse_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor) -> (err: Error) {
+	_reset_cursor_iterator(res)
+	defer if err != nil {
+		mem.zero_item(res)
+	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
-	res.cursor = cursor
 
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
-		res.size = 0
-		res.index = 0
+		res.cursor = cursor
 	case .Array_List:
-		return cursor_iterator_array_list_reverse_from_index(cursor, -1)
+		return cursor_iterator_array_list_reverse_from_index_init(res, cursor, -1)
 	case .Linked_Array_List, .Sorted_Map, .Sorted_Set:
+		res.cursor = cursor
 		position := cursor.slot_ptr.slot.value
 		hb: [BTREE_HEADER_LENGTH]u8 = ---
 		core_read_exact_at(cursor.db.core, position, hb[:]) or_return
@@ -964,19 +976,22 @@ cursor_iterator_reverse :: proc(unresolved_cursor: Read_Cursor) -> (res: Cursor_
 			res.stack_len = 1
 		}
 	case .Hash_Map, .Hash_Set:
-		res.size = 0
-		res.index = 0
+		res.cursor = cursor
 		_init_iter_level_rev(cursor, cursor.slot_ptr.slot.value, &res.stack[0]) or_return
 		res.stack_len = 1
 	case .Counted_Hash_Map, .Counted_Hash_Set:
-		res.size = 0
-		res.index = 0
+		res.cursor = cursor
 		_init_iter_level_rev(cursor, cursor.slot_ptr.slot.value + 8, &res.stack[0]) or_return
 		res.stack_len = 1
 	case:
-		return {}, .Unexpected_Tag
+		return .Unexpected_Tag
 	}
-	return res, nil
+	return nil
+}
+
+cursor_iterator_reverse :: proc(unresolved_cursor: Read_Cursor) -> (res: Cursor_Iterator, err: Error) {
+	err = cursor_iterator_reverse_init(&res, unresolved_cursor)
+	return
 }
 
 @(private)
@@ -1003,16 +1018,19 @@ _sorted_header :: proc(cursor: Read_Cursor) -> (res: BTree_Header, err: Error) {
 	return btree_header_from_bytes(hb)
 }
 
-cursor_iterator_sorted_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> Error {
-	res.size = 0
-	res.index = 0
-	res.stack_len = 0
+@(require_results)
+cursor_iterator_sorted_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
+	_reset_cursor_iterator(res)
+	defer if err != nil {
+		mem.zero_item(res)
+	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
-	res.cursor = cursor
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
+		res.cursor = cursor
 		return nil
 	case .Sorted_Map, .Sorted_Set:
+		res.cursor = cursor
 	case:
 		return .Unexpected_Tag
 	}
@@ -1041,10 +1059,10 @@ cursor_iterator_sorted_from_index_init :: proc(res: ^Cursor_Iterator, unresolved
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		level := &res.stack[res.stack_len]
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			r := int(rem)
-			if r < 0 || r >= num {
+			if rem < 0 || rem >= i64(num) {
 				return .Invalid_BTree_Node
 			}
+			r := int(rem)
 			_fill_slot_block_from(cursor, position, r, num, level) or_return
 			res.stack_len += 1
 			break
@@ -1075,21 +1093,27 @@ cursor_iterator_sorted_from_index :: proc(unresolved_cursor: Read_Cursor, start_
 	return
 }
 
-cursor_iterator_sorted_from_key_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_key: []u8) -> Error {
-	res.size = 0
-	res.index = 0
-	res.stack_len = 0
+@(require_results)
+cursor_iterator_sorted_from_key_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_key: []u8) -> (err: Error) {
+	_reset_cursor_iterator(res)
+	defer if err != nil {
+		mem.zero_item(res)
+	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
-	res.cursor = cursor
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
+		res.cursor = cursor
 		return nil
 	case .Sorted_Map, .Sorted_Set:
+		res.cursor = cursor
 	case:
 		return .Unexpected_Tag
 	}
 	header := _sorted_header(cursor) or_return
 	total := header.size
+	if total == 0 {
+		return nil
+	}
 	node_ptr := header.root_ptr
 	before: i64 = 0
 	for {
@@ -1178,16 +1202,19 @@ cursor_iterator_sorted_from_key :: proc(unresolved_cursor: Read_Cursor, start_ke
 	return
 }
 
-cursor_iterator_array_list_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> Error {
-	res.size = 0
-	res.index = 0
-	res.stack_len = 0
+@(require_results)
+cursor_iterator_array_list_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
+	_reset_cursor_iterator(res)
+	defer if err != nil {
+		mem.zero_item(res)
+	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
-	res.cursor = cursor
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
+		res.cursor = cursor
 		return nil
 	case .Array_List:
+		res.cursor = cursor
 	case:
 		return .Unexpected_Tag
 	}
@@ -1225,16 +1252,19 @@ cursor_iterator_array_list_from_index :: proc(unresolved_cursor: Read_Cursor, st
 	return
 }
 
-cursor_iterator_linked_array_list_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> Error {
-	res.size = 0
-	res.index = 0
-	res.stack_len = 0
+@(require_results)
+cursor_iterator_linked_array_list_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
+	_reset_cursor_iterator(res)
+	defer if err != nil {
+		mem.zero_item(res)
+	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
-	res.cursor = cursor
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
+		res.cursor = cursor
 		return nil
 	case .Linked_Array_List:
+		res.cursor = cursor
 	case:
 		return .Unexpected_Tag
 	}
@@ -1264,10 +1294,10 @@ cursor_iterator_linked_array_list_from_index_init :: proc(res: ^Cursor_Iterator,
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		level := &res.stack[res.stack_len]
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			r := int(rem)
-			if r < 0 || r >= num {
+			if rem < 0 || rem >= i64(num) {
 				return .Invalid_BTree_Node
 			}
+			r := int(rem)
 			_fill_slot_block_from(cursor, position, r, num, level) or_return
 			res.stack_len += 1
 			break
@@ -1298,45 +1328,51 @@ cursor_iterator_linked_array_list_from_index :: proc(unresolved_cursor: Read_Cur
 	return
 }
 
-cursor_iterator_sorted_reverse_from_index :: proc(unresolved_cursor: Read_Cursor, start_index: i64) -> (res: Cursor_Iterator, err: Error) {
+@(require_results)
+cursor_iterator_sorted_reverse_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
+	_reset_cursor_iterator(res)
+	defer if err != nil {
+		mem.zero_item(res)
+	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
-	res.cursor = cursor
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
-		return res, nil
+		res.cursor = cursor
+		return nil
 	case .Sorted_Map, .Sorted_Set:
+		res.cursor = cursor
 	case:
-		return {}, .Unexpected_Tag
+		return .Unexpected_Tag
 	}
 	header := _sorted_header(cursor) or_return
 	total := header.size
 	idx, ok := _resolve_start_index(start_index, total)
 	if !ok {
-		return res, nil
+		return nil
 	}
 	node_ptr := header.root_ptr
 	rem := idx
 	for {
 		if res.stack_len >= ITERATOR_STACK_SIZE {
-			return {}, .Max_Shift_Exceeded
+			return .Max_Shift_Exceeded
 		}
 		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
 		core_read_exact_at(cursor.db.core, node_ptr, header_bytes[:]) or_return
 		kind_int := header_bytes[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
-			return {}, .Invalid_BTree_Node_Kind
+			return .Invalid_BTree_Node_Kind
 		}
 		num := int(header_bytes[1])
 		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
-			return {}, .Invalid_BTree_Node
+			return .Invalid_BTree_Node
 		}
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		level := &res.stack[res.stack_len]
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			r := int(rem)
-			if r < 0 || r >= num {
-				return {}, .Invalid_BTree_Node
+			if rem < 0 || rem >= i64(num) {
+				return .Invalid_BTree_Node
 			}
+			r := int(rem)
 			_fill_slot_block_rev(cursor, position, r + 1, level) or_return
 			res.stack_len += 1
 			break
@@ -1359,39 +1395,50 @@ cursor_iterator_sorted_reverse_from_index :: proc(unresolved_cursor: Read_Cursor
 	}
 	res.size = total
 	res.index = idx + 1
-	return res, nil
+	return nil
 }
 
-cursor_iterator_sorted_reverse_from_key :: proc(unresolved_cursor: Read_Cursor, upper_key: []u8, inclusive: bool = true) -> (res: Cursor_Iterator, err: Error) {
+cursor_iterator_sorted_reverse_from_index :: proc(unresolved_cursor: Read_Cursor, start_index: i64) -> (res: Cursor_Iterator, err: Error) {
+	err = cursor_iterator_sorted_reverse_from_index_init(&res, unresolved_cursor, start_index)
+	return
+}
+
+@(require_results)
+cursor_iterator_sorted_reverse_from_key_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, upper_key: []u8, inclusive: bool = true) -> (err: Error) {
+	_reset_cursor_iterator(res)
+	defer if err != nil {
+		mem.zero_item(res)
+	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
-	res.cursor = cursor
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
-		return res, nil
+		res.cursor = cursor
+		return nil
 	case .Sorted_Map, .Sorted_Set:
+		res.cursor = cursor
 	case:
-		return {}, .Unexpected_Tag
+		return .Unexpected_Tag
 	}
 	header := _sorted_header(cursor) or_return
 	total := header.size
 	if total == 0 {
-		return res, nil
+		return nil
 	}
 	node_ptr := header.root_ptr
 	before: i64 = 0
 	for {
 		if res.stack_len >= ITERATOR_STACK_SIZE {
-			return {}, .Max_Shift_Exceeded
+			return .Max_Shift_Exceeded
 		}
 		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
 		core_read_exact_at(cursor.db.core, node_ptr, header_bytes[:]) or_return
 		kind_int := header_bytes[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
-			return {}, .Invalid_BTree_Node_Kind
+			return .Invalid_BTree_Node_Kind
 		}
 		num := int(header_bytes[1])
 		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
-			return {}, .Invalid_BTree_Node
+			return .Invalid_BTree_Node
 		}
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		level := &res.stack[res.stack_len]
@@ -1425,7 +1472,7 @@ cursor_iterator_sorted_reverse_from_key :: proc(unresolved_cursor: Read_Cursor, 
 			before += i64(leaf_count)
 			if before == 0 {
 				res.stack_len = 0
-				return res, nil
+				return nil
 			}
 			if leaf_count > 0 {
 				level.position = position
@@ -1468,32 +1515,43 @@ cursor_iterator_sorted_reverse_from_key :: proc(unresolved_cursor: Read_Cursor, 
 	}
 	res.size = total
 	res.index = before
-	return res, nil
+	return nil
 }
 
-cursor_iterator_array_list_reverse_from_index :: proc(unresolved_cursor: Read_Cursor, start_index: i64) -> (res: Cursor_Iterator, err: Error) {
+cursor_iterator_sorted_reverse_from_key :: proc(unresolved_cursor: Read_Cursor, upper_key: []u8, inclusive: bool = true) -> (res: Cursor_Iterator, err: Error) {
+	err = cursor_iterator_sorted_reverse_from_key_init(&res, unresolved_cursor, upper_key, inclusive)
+	return
+}
+
+@(require_results)
+cursor_iterator_array_list_reverse_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
+	_reset_cursor_iterator(res)
+	defer if err != nil {
+		mem.zero_item(res)
+	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
-	res.cursor = cursor
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
-		return res, nil
+		res.cursor = cursor
+		return nil
 	case .Array_List:
+		res.cursor = cursor
 	case:
-		return {}, .Unexpected_Tag
+		return .Unexpected_Tag
 	}
 	hb: [ARRAY_LIST_HEADER_LENGTH]u8 = ---
 	core_read_exact_at(cursor.db.core, cursor.slot_ptr.slot.value, hb[:]) or_return
 	header := array_list_header_from_bytes(hb) or_return
 	idx, ok := _resolve_start_index(start_index, header.size)
 	if !ok {
-		return res, nil
+		return nil
 	}
 	shift := radix_shift(header.size - 1)
 	pos := header.ptr
 	sh := shift
 	for {
 		if res.stack_len >= ITERATOR_STACK_SIZE {
-			return {}, .Max_Shift_Exceeded
+			return .Max_Shift_Exceeded
 		}
 		i := int((idx >> (u64(sh) * BIT_COUNT)) & i64(MASK))
 		level := &res.stack[res.stack_len]
@@ -1507,49 +1565,60 @@ cursor_iterator_array_list_reverse_from_index :: proc(unresolved_cursor: Read_Cu
 	}
 	res.size = header.size
 	res.index = idx + 1
-	return res, nil
+	return nil
 }
 
-cursor_iterator_linked_array_list_reverse_from_index :: proc(unresolved_cursor: Read_Cursor, start_index: i64) -> (res: Cursor_Iterator, err: Error) {
+cursor_iterator_array_list_reverse_from_index :: proc(unresolved_cursor: Read_Cursor, start_index: i64) -> (res: Cursor_Iterator, err: Error) {
+	err = cursor_iterator_array_list_reverse_from_index_init(&res, unresolved_cursor, start_index)
+	return
+}
+
+@(require_results)
+cursor_iterator_linked_array_list_reverse_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
+	_reset_cursor_iterator(res)
+	defer if err != nil {
+		mem.zero_item(res)
+	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
-	res.cursor = cursor
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
-		return res, nil
+		res.cursor = cursor
+		return nil
 	case .Linked_Array_List:
+		res.cursor = cursor
 	case:
-		return {}, .Unexpected_Tag
+		return .Unexpected_Tag
 	}
 	hb: [BTREE_HEADER_LENGTH]u8 = ---
 	core_read_exact_at(cursor.db.core, cursor.slot_ptr.slot.value, hb[:]) or_return
 	header := btree_header_from_bytes(hb) or_return
 	idx, ok := _resolve_start_index(start_index, header.size)
 	if !ok {
-		return res, nil
+		return nil
 	}
 	node_ptr := header.root_ptr
 	rem := idx
 	for {
 		if res.stack_len >= ITERATOR_STACK_SIZE {
-			return {}, .Max_Shift_Exceeded
+			return .Max_Shift_Exceeded
 		}
 		header_bytes: [BTREE_NODE_HEADER_SIZE]u8 = ---
 		core_read_exact_at(cursor.db.core, node_ptr, header_bytes[:]) or_return
 		kind_int := header_bytes[0]
 		if kind_int > u8(BTree_Node_Kind.Branch) {
-			return {}, .Invalid_BTree_Node_Kind
+			return .Invalid_BTree_Node_Kind
 		}
 		num := int(header_bytes[1])
 		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
-			return {}, .Invalid_BTree_Node
+			return .Invalid_BTree_Node
 		}
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		level := &res.stack[res.stack_len]
 		if BTree_Node_Kind(kind_int) == .Leaf {
-			r := int(rem)
-			if r < 0 || r >= num {
-				return {}, .Invalid_BTree_Node
+			if rem < 0 || rem >= i64(num) {
+				return .Invalid_BTree_Node
 			}
+			r := int(rem)
 			_fill_slot_block_rev(cursor, position, r + 1, level) or_return
 			res.stack_len += 1
 			break
@@ -1572,7 +1641,12 @@ cursor_iterator_linked_array_list_reverse_from_index :: proc(unresolved_cursor: 
 	}
 	res.size = header.size
 	res.index = idx + 1
-	return res, nil
+	return nil
+}
+
+cursor_iterator_linked_array_list_reverse_from_index :: proc(unresolved_cursor: Read_Cursor, start_index: i64) -> (res: Cursor_Iterator, err: Error) {
+	err = cursor_iterator_linked_array_list_reverse_from_index_init(&res, unresolved_cursor, start_index)
+	return
 }
 
 @(private)
