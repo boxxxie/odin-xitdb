@@ -2208,14 +2208,15 @@ _pull_range :: proc(cursor: Read_Cursor, start_idx, end_idx: i64, sub_pattern: s
 	}
 
 	slot := cursor_slot(cursor) or_return
-	it: Cursor_Iterator
+	it := new(Cursor_Iterator)
+	defer free(it)
 	#partial switch slot.tag {
 	case .Array_List:
 		al_col := read_array_list_init(cursor) or_return
-		it = array_list_iterator_from(al_col, start_idx) or_return
+		cursor_iterator_array_list_from_index_init(it, al_col.cursor, start_idx) or_return
 	case .Linked_Array_List:
 		ll_col := read_linked_array_list_init(cursor) or_return
-		it = linked_array_list_iterator_from(ll_col, start_idx) or_return
+		cursor_iterator_linked_array_list_from_index_init(it, ll_col.cursor, start_idx) or_return
 	case:
 		return nil, .Unexpected_Tag
 	}
@@ -2229,7 +2230,7 @@ _pull_range :: proc(cursor: Read_Cursor, start_idx, end_idx: i64, sub_pattern: s
 		delete(items)
 	}
 	for count: u64 = 0; count < limit; count += 1 {
-		c_maybe := cursor_iterator_next(&it) or_return
+		c_maybe := cursor_iterator_next(it) or_return
 		c, ok := c_maybe.?
 		if !ok {
 			break
@@ -2273,7 +2274,9 @@ _pull_wildcard :: proc(cursor: Read_Cursor, visited: ^map[i64]bool, allocator: r
 		s := cursor_read_string(cursor, 0, allocator) or_return
 		return s, nil
 	case .Array_List, .Linked_Array_List:
-		it := cursor_iterator(cursor) or_return
+		it := new(Cursor_Iterator)
+		defer free(it)
+		cursor_iterator_init(it, cursor) or_return
 		items := make([dynamic]Pull_Value, 0, 8, allocator)
 		defer if err != nil {
 			for item in items {
@@ -2282,7 +2285,7 @@ _pull_wildcard :: proc(cursor: Read_Cursor, visited: ^map[i64]bool, allocator: r
 			delete(items)
 		}
 		for {
-			c_maybe := cursor_iterator_next(&it) or_return
+			c_maybe := cursor_iterator_next(it) or_return
 			c, ok := c_maybe.?
 			if !ok {
 				break
@@ -2292,7 +2295,9 @@ _pull_wildcard :: proc(cursor: Read_Cursor, visited: ^map[i64]bool, allocator: r
 		}
 		return Pull_List(items[:]), nil
 	case .Hash_Set, .Counted_Hash_Set, .Sorted_Set:
-		it := cursor_iterator(cursor) or_return
+		it := new(Cursor_Iterator)
+		defer free(it)
+		cursor_iterator_init(it, cursor) or_return
 		items := make([dynamic]Pull_Value, 0, 8, allocator)
 		defer if err != nil {
 			for item in items {
@@ -2301,7 +2306,7 @@ _pull_wildcard :: proc(cursor: Read_Cursor, visited: ^map[i64]bool, allocator: r
 			delete(items)
 		}
 		for {
-			c_maybe := cursor_iterator_next(&it) or_return
+			c_maybe := cursor_iterator_next(it) or_return
 			c, ok := c_maybe.?
 			if !ok {
 				break
@@ -2312,7 +2317,9 @@ _pull_wildcard :: proc(cursor: Read_Cursor, visited: ^map[i64]bool, allocator: r
 		}
 		return Pull_List(items[:]), nil
 	case .Hash_Map, .Counted_Hash_Map, .Sorted_Map:
-		it := cursor_iterator(cursor) or_return
+		it := new(Cursor_Iterator)
+		defer free(it)
+		cursor_iterator_init(it, cursor) or_return
 		entries := make([dynamic]Pull_Map_Entry, 0, 8, allocator)
 		defer if err != nil {
 			for entry in entries {
@@ -2324,7 +2331,7 @@ _pull_wildcard :: proc(cursor: Read_Cursor, visited: ^map[i64]bool, allocator: r
 			delete(entries)
 		}
 		for {
-			c_maybe := cursor_iterator_next(&it) or_return
+			c_maybe := cursor_iterator_next(it) or_return
 			c, ok := c_maybe.?
 			if !ok {
 				break
@@ -2450,9 +2457,11 @@ _diff_recursive :: proc(
 
 	if slot_a.tag == .None && (slot_b.tag == .Hash_Map || slot_b.tag == .Counted_Hash_Map || slot_b.tag == .Sorted_Map) {
 		sigil := "." if slot_b.tag == .Hash_Map else ("#" if slot_b.tag == .Counted_Hash_Map else "$")
-		it_b := cursor_iterator(cur_b) or_return
+		it_b := new(Cursor_Iterator)
+		defer free(it_b)
+		cursor_iterator_init(it_b, cur_b) or_return
 		for {
-			cb_maybe := cursor_iterator_next(&it_b) or_return
+			cb_maybe := cursor_iterator_next(it_b) or_return
 			cb, ok := cb_maybe.?
 			if !ok {
 				break
@@ -2481,10 +2490,12 @@ _diff_recursive :: proc(
 
 	if slot_a.tag == .None && (slot_b.tag == .Array_List || slot_b.tag == .Linked_Array_List) {
 		is_linked := slot_b.tag == .Linked_Array_List
-		it_b := cursor_iterator(cur_b) or_return
+		it_b := new(Cursor_Iterator)
+		defer free(it_b)
+		cursor_iterator_init(it_b, cur_b) or_return
 		i: i64 = 0
 		for {
-			eb_maybe := cursor_iterator_next(&it_b) or_return
+			eb_maybe := cursor_iterator_next(it_b) or_return
 			eb_cur, ok := eb_maybe.?
 			if !ok {
 				break
@@ -2504,9 +2515,12 @@ _diff_recursive :: proc(
 			map_a := Read_Hash_Map{cursor = cur_a}
 			map_b := Read_Hash_Map{cursor = cur_b}
 
-			it_a := cursor_iterator(cur_a) or_return
+			it := new(Cursor_Iterator)
+			defer free(it)
+
+			cursor_iterator_init(it, cur_a) or_return
 			for {
-				ca_maybe := cursor_iterator_next(&it_a) or_return
+				ca_maybe := cursor_iterator_next(it) or_return
 				ca, ok := ca_maybe.?
 				if !ok {
 					break
@@ -2527,9 +2541,9 @@ _diff_recursive :: proc(
 				}
 			}
 
-			it_b := cursor_iterator(cur_b) or_return
+			cursor_iterator_init(it, cur_b) or_return
 			for {
-				cb_maybe := cursor_iterator_next(&it_b) or_return
+				cb_maybe := cursor_iterator_next(it) or_return
 				cb, ok := cb_maybe.?
 				if !ok {
 					break
@@ -2551,9 +2565,12 @@ _diff_recursive :: proc(
 		case .Sorted_Map:
 			sm_a := Read_Sorted_Map{cursor = cur_a}
 			sm_b := Read_Sorted_Map{cursor = cur_b}
-			it_a := cursor_iterator(cur_a) or_return
+			it := new(Cursor_Iterator)
+			defer free(it)
+
+			cursor_iterator_init(it, cur_a) or_return
 			for {
-				ca_maybe := cursor_iterator_next(&it_a) or_return
+				ca_maybe := cursor_iterator_next(it) or_return
 				ca, ok := ca_maybe.?
 				if !ok {
 					break
@@ -2570,9 +2587,9 @@ _diff_recursive :: proc(
 					append(changes, Tx_Change{op = .Remove, path_str = child_path, old_slot = val_a_slot, new_slot = Slot{}})
 				}
 			}
-			it_b := cursor_iterator(cur_b) or_return
+			cursor_iterator_init(it, cur_b) or_return
 			for {
-				cb_maybe := cursor_iterator_next(&it_b) or_return
+				cb_maybe := cursor_iterator_next(it) or_return
 				cb, ok := cb_maybe.?
 				if !ok {
 					break
@@ -2590,12 +2607,16 @@ _diff_recursive :: proc(
 
 		case .Array_List, .Linked_Array_List:
 			is_linked := slot_a.tag == .Linked_Array_List
-			it_a := cursor_iterator(cur_a) or_return
-			it_b := cursor_iterator(cur_b) or_return
+			it_a := new(Cursor_Iterator)
+			defer free(it_a)
+			it_b := new(Cursor_Iterator)
+			defer free(it_b)
+			cursor_iterator_init(it_a, cur_a) or_return
+			cursor_iterator_init(it_b, cur_b) or_return
 			i: i64 = 0
 			for {
-				ea_maybe := cursor_iterator_next(&it_a) or_return
-				eb_maybe := cursor_iterator_next(&it_b) or_return
+				ea_maybe := cursor_iterator_next(it_a) or_return
+				eb_maybe := cursor_iterator_next(it_b) or_return
 				ea_cur, has_a := ea_maybe.?
 				eb_cur, has_b := eb_maybe.?
 				if !has_a && !has_b {
