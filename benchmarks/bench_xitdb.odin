@@ -35,6 +35,10 @@ g_history_file:   ^os.File
 g_bench_rank:     int
 g_runs:           int = 7
 g_warmup:         int = 1
+g_pin_cpu:        int = -1
+g_counters:       bool = false
+g_test_mode:      bool = false
+g_host_warned:    bool = false
 g_commit_sha:     string = "unknown"
 g_run_id:         string = "run-0"
 g_append_primary: bool = false
@@ -82,6 +86,22 @@ parse_cli_args :: proc() {
 			g_save_history = false
 		} else if arg == "--quiet" || arg == "-quiet" {
 			g_quiet = true
+		} else if arg == "--test" || arg == "-test" {
+			g_test_mode = true
+		} else if arg == "--counters" || arg == "-counters" {
+			g_counters = true
+		} else if arg == "--host-warned" || arg == "-host-warned" {
+			g_host_warned = true
+		} else if (arg == "--pin" || arg == "-pin") && i + 1 < len(args) {
+			if v, ok := strconv.parse_int(args[i + 1]); ok && v >= 0 {
+				g_pin_cpu = v
+			}
+			i += 1
+		} else if strings.has_prefix(arg, "--pin=") || strings.has_prefix(arg, "-pin:") {
+			eq := strings.index_any(arg, "=:")
+			if v, ok := strconv.parse_int(arg[eq + 1:]); ok && v >= 0 {
+				g_pin_cpu = v
+			}
 		} else if (arg == "--runs" || arg == "-runs") && i + 1 < len(args) {
 			if v, ok := strconv.parse_int(args[i + 1]); ok && v > 0 {
 				g_runs = clamp(v, 1, MAX_RUNS)
@@ -156,6 +176,10 @@ parse_cli_args :: proc() {
 			g_name_filter = arg[eq + 1:]
 		}
 		i += 1
+	}
+	if g_test_mode {
+		g_runs = 1
+		g_warmup = 0
 	}
 	if g_lang == "lua" && g_jsonl_path == "benchmarks/odin.jsonl" {
 		g_jsonl_path = "benchmarks/lua.jsonl"
