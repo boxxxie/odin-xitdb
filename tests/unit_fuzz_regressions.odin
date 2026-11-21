@@ -1353,3 +1353,375 @@ unit_fuzz_regression_array_list_counted_map_and_sorted_empty_fast_paths :: proc(
 		testing.expect_value(t, xitdb.array_list_append_context(&history, m1_slot.?, sm_rm_cb, t), nil)
 	}
 }
+
+@(test)
+unit_fuzz_regression_diff_collection_scratch_allocator_no_leaks :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	cm := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&cm)
+	db, derr := xitdb.database_init(&cm, xitdb.sha1_hasher())
+	testing.expect_value(t, derr, nil)
+
+	// Moment 0: populate Hash_Map (.hm) and >20-entry Sorted_Map ($sm)
+	tx0 := xitdb.tx_init(&db, nil, false, context.allocator)
+	testing.expect_value(t, xitdb.tx_put(&tx0, ".hm.keep", "same"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx0, ".hm.update", "v1"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx0, ".hm.drop", "gone"), nil)
+	for i in 0 ..< 24 {
+		path := fmt.tprintf(`$sm["long_key_%02d"]`, i)
+		testing.expect_value(t, xitdb.tx_put(&tx0, path, i64(i)), nil)
+	}
+	rep0, cerr0 := xitdb.tx_commit(&tx0)
+	xitdb.tx_destroy(&tx0)
+	testing.expect_value(t, cerr0, nil)
+	xitdb.tx_report_destroy(&rep0, context.allocator)
+
+	// Moment 1: mutate subsets of both collections to force leaf/block comparisons
+	tx1 := xitdb.tx_init(&db, -1, false, context.allocator)
+	testing.expect_value(t, xitdb.tx_put(&tx1, ".hm.update", "v2"), nil)
+	testing.expect_value(t, xitdb.tx_rm(&tx1, ".hm.drop"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx1, ".hm.added", "new"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx1, `$sm["long_key_00"]`, i64(100)), nil)
+	testing.expect_value(t, xitdb.tx_rm(&tx1, `$sm["long_key_05"]`), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx1, `$sm["long_key_12"]`, i64(200)), nil)
+	testing.expect_value(t, xitdb.tx_rm(&tx1, `$sm["long_key_19"]`), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx1, `$sm["long_key_24_extra"]`, i64(24)), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx1, `$sm["long_key_25_extra"]`, i64(25)), nil)
+	rep1, cerr1 := xitdb.tx_commit(&tx1)
+	xitdb.tx_destroy(&tx1)
+	testing.expect_value(t, cerr1, nil)
+	xitdb.tx_report_destroy(&rep1, context.allocator)
+
+	free_changes :: proc(changes: []xitdb.Collection_Change) {
+		for ch in changes {
+			delete(ch.key, context.allocator)
+		}
+		delete(changes, context.allocator)
+	}
+
+	empty_cur := xitdb.Read_Cursor{
+		slot_ptr = xitdb.Slot_Pointer{slot = xitdb.Slot{}},
+		db       = &db,
+	}
+	hm0, ok_hm0 := xitdb.select_cursor(&db, "@0.hm")
+	hm1, ok_hm1 := xitdb.select_cursor(&db, "@1.hm")
+	sm0, ok_sm0 := xitdb.select_cursor(&db, "@0$sm")
+	sm1, ok_sm1 := xitdb.select_cursor(&db, "@1$sm")
+	testing.expect(t, ok_hm0 == nil && ok_hm1 == nil && ok_sm0 == nil && ok_sm1 == nil, "Expected cursors to resolve")
+
+	// 1. Empty <-> Hash_Map (_diff_hash_maps `entries` scratch path)
+	stats: xitdb.Diff_Stats
+	ch_empty_hm, err_eh := xitdb.diff_collection_with_stats(empty_cur, hm0.?, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_eh, nil)
+	testing.expect_value(t, len(ch_empty_hm), 3)
+	free_changes(ch_empty_hm)
+
+	ch_hm_empty, err_he := xitdb.diff_collection_with_stats(hm0.?, empty_cur, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_he, nil)
+	testing.expect_value(t, len(ch_hm_empty), 3)
+	free_changes(ch_hm_empty)
+
+	// 2. Hash_Map <-> Hash_Map (_diff_index_blocks `ea`/`eb` + `_collect_slot` `hash` scratch path)
+	ch_hm, err_hm := xitdb.diff_collection_with_stats(hm0.?, hm1.?, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_hm, nil)
+	testing.expect_value(t, len(ch_hm), 3)
+	free_changes(ch_hm)
+
+	// 3. Empty <-> Sorted_Map and Sorted_Map <-> Sorted_Map (`key_b` per-iteration scratch path)
+	ch_empty_sm, err_es := xitdb.diff_collection_with_stats(empty_cur, sm0.?, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_es, nil)
+	testing.expect_value(t, len(ch_empty_sm), 24)
+	free_changes(ch_empty_sm)
+
+	ch_sm_empty, err_se := xitdb.diff_collection_with_stats(sm0.?, empty_cur, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_se, nil)
+	testing.expect_value(t, len(ch_sm_empty), 24)
+	free_changes(ch_sm_empty)
+
+	ch_sm, err_sm := xitdb.diff_collection_with_stats(sm0.?, sm1.?, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_sm, nil)
+	testing.expect_value(t, len(ch_sm), 6)
+	testing.expect(t, stats.keys_decoded > 0, "Expected keys_decoded > 0 during sorted map diff")
+	free_changes(ch_sm)
+}
+
+@(test)
+unit_header_hash_id_validation_open_and_replication :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	sha1_id := xitdb.string_to_id("sha1")
+	alt_id := xitdb.string_to_id("alt1")
+
+	// 1. Database initialized with explicit hash_id validates hash_id on reopen
+	src_core := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&src_core)
+	src_db, src_err := xitdb.database_init(&src_core, xitdb.sha1_hasher(sha1_id))
+	testing.expect_value(t, src_err, nil)
+
+	tx0 := xitdb.tx_init(&src_db, nil, false, context.allocator)
+	testing.expect_value(t, xitdb.tx_put(&tx0, ".k", "v1"), nil)
+	rep0, cerr0 := xitdb.tx_commit(&tx0)
+	xitdb.tx_destroy(&tx0)
+	testing.expect_value(t, cerr0, nil)
+	xitdb.tx_report_destroy(&rep0, context.allocator)
+
+	_, ok_match := xitdb.database_init(&src_core, xitdb.sha1_hasher(sha1_id))
+	testing.expect_value(t, ok_match, nil)
+
+	_, ok_wildcard := xitdb.database_init(&src_core, xitdb.sha1_hasher())
+	testing.expect_value(t, ok_wildcard, nil)
+
+	_, mismatch_err := xitdb.database_init(&src_core, xitdb.sha1_hasher(alt_id))
+	testing.expect_value(t, mismatch_err, xitdb.Xitdb_Error.Invalid_Hash_Id)
+
+	// 2. Database initialized with hash_id == 0 is rejected when reopened with explicit hash_id != 0
+	zero_id_core := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&zero_id_core)
+	zero_db, zero_err := xitdb.database_init(&zero_id_core, xitdb.sha1_hasher())
+	testing.expect_value(t, zero_err, nil)
+	tx_z := xitdb.tx_init(&zero_db, nil, false, context.allocator)
+	testing.expect_value(t, xitdb.tx_put(&tx_z, ".k", "vz"), nil)
+	rep_z, cerr_z := xitdb.tx_commit(&tx_z)
+	xitdb.tx_destroy(&tx_z)
+	testing.expect_value(t, cerr_z, nil)
+	xitdb.tx_report_destroy(&rep_z, context.allocator)
+
+	_, zero_mismatch := xitdb.database_init(&zero_id_core, xitdb.sha1_hasher(sha1_id))
+	testing.expect_value(t, zero_mismatch, xitdb.Xitdb_Error.Invalid_Hash_Id)
+
+	// 3. Full replication (`start == 0`) enforces header_validate_hasher before wiping replica state
+	committed_end, ce_err := xitdb.database_committed_size(&src_db)
+	testing.expect_value(t, ce_err, nil)
+	payload, rd_err := xitdb.database_read_committed_bytes(&src_db, 0, committed_end, context.temp_allocator)
+	testing.expect_value(t, rd_err, nil)
+
+	rep_core := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&rep_core)
+	rep_db, rep_err := xitdb.database_init(&rep_core, xitdb.sha1_hasher(alt_id))
+	testing.expect_value(t, rep_err, nil)
+
+	tx_r := xitdb.tx_init(&rep_db, nil, false, context.allocator)
+	testing.expect_value(t, xitdb.tx_put(&tx_r, ".local", "keep"), nil)
+	rep_r, cerr_r := xitdb.tx_commit(&tx_r)
+	xitdb.tx_destroy(&tx_r)
+	testing.expect_value(t, cerr_r, nil)
+	xitdb.tx_report_destroy(&rep_r, context.allocator)
+
+	rep_before_size, rbs_err := xitdb.database_committed_size(&rep_db)
+	testing.expect_value(t, rbs_err, nil)
+	rep_before_header := rep_db.header
+
+	bytes_mismatch_err := xitdb.database_apply_replicated_bytes(&rep_db, 0, payload)
+	testing.expect_value(t, bytes_mismatch_err, xitdb.Xitdb_Error.Invalid_Hash_Id)
+	testing.expect_value(t, rep_db.header, rep_before_header)
+	after_bytes_size, abs_err := xitdb.database_committed_size(&rep_db)
+	testing.expect_value(t, abs_err, nil)
+	testing.expect_value(t, after_bytes_size, rep_before_size)
+	kept_val1, kv1_err := xitdb.get_string(&rep_db, "@0.local", context.temp_allocator)
+	testing.expect_value(t, kv1_err, nil)
+	testing.expect_value(t, kept_val1, "keep")
+
+	payload_core := xitdb.core_memory_init_from_bytes(payload, context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&payload_core)
+	stream_mismatch_err := xitdb.database_apply_replicated(&rep_db, 0, &payload_core, i64(len(payload)))
+	testing.expect_value(t, stream_mismatch_err, xitdb.Xitdb_Error.Invalid_Hash_Id)
+	testing.expect_value(t, rep_db.header, rep_before_header)
+	after_stream_size, ass_err := xitdb.database_committed_size(&rep_db)
+	testing.expect_value(t, ass_err, nil)
+	testing.expect_value(t, after_stream_size, rep_before_size)
+	kept_val2, kv2_err := xitdb.get_string(&rep_db, "@0.local", context.temp_allocator)
+	testing.expect_value(t, kv2_err, nil)
+	testing.expect_value(t, kept_val2, "keep")
+
+	// 4. Matching hash_id and wildcard (id == 0) replicas accept full replication
+	match_core := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&match_core)
+	match_db, match_init_err := xitdb.database_init(&match_core, xitdb.sha1_hasher(sha1_id))
+	testing.expect_value(t, match_init_err, nil)
+	testing.expect_value(t, xitdb.database_apply_replicated_bytes(&match_db, 0, payload), nil)
+	replicated_k1, rk1_err := xitdb.get_string(&match_db, "@0.k", context.temp_allocator)
+	testing.expect_value(t, rk1_err, nil)
+	testing.expect_value(t, replicated_k1, "v1")
+
+	wild_core := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&wild_core)
+	wild_db, wild_init_err := xitdb.database_init(&wild_core, xitdb.sha1_hasher())
+	testing.expect_value(t, wild_init_err, nil)
+	payload_core2 := xitdb.core_memory_init_from_bytes(payload, context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&payload_core2)
+	testing.expect_value(t, xitdb.database_apply_replicated(&wild_db, 0, &payload_core2, i64(len(payload))), nil)
+	replicated_k2, rk2_err := xitdb.get_string(&wild_db, "@0.k", context.temp_allocator)
+	testing.expect_value(t, rk2_err, nil)
+	testing.expect_value(t, replicated_k2, "v1")
+}
+
+@(test)
+unit_diff_collection_with_stats_and_cross_db_rejection :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	free_changes :: proc(changes: []xitdb.Collection_Change) {
+		for ch in changes {
+			delete(ch.key, context.allocator)
+		}
+		delete(changes, context.allocator)
+	}
+
+	cm_a := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&cm_a)
+	db_a, derr_a := xitdb.database_init(&cm_a, xitdb.sha1_hasher())
+	testing.expect_value(t, derr_a, nil)
+
+	cm_b := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&cm_b)
+	db_b, derr_b := xitdb.database_init(&cm_b, xitdb.sha1_hasher())
+	testing.expect_value(t, derr_b, nil)
+
+	// Populate identical moment 0 on both db_a and db_b with 200 entries in .hm and $sm
+	tx_a0 := xitdb.tx_init(&db_a, nil, false, context.allocator)
+	tx_b0 := xitdb.tx_init(&db_b, nil, false, context.allocator)
+	for i in 0 ..< 200 {
+		hm_path := fmt.tprintf(`.hm["k_%03d"]`, i)
+		sm_path := fmt.tprintf(`$sm["k_%03d"]`, i)
+		testing.expect_value(t, xitdb.tx_put(&tx_a0, hm_path, i64(i)), nil)
+		testing.expect_value(t, xitdb.tx_put(&tx_a0, sm_path, i64(i)), nil)
+		testing.expect_value(t, xitdb.tx_put(&tx_b0, hm_path, i64(i)), nil)
+		testing.expect_value(t, xitdb.tx_put(&tx_b0, sm_path, i64(i)), nil)
+	}
+	rep_a0, ca0 := xitdb.tx_commit(&tx_a0)
+	xitdb.tx_destroy(&tx_a0)
+	testing.expect_value(t, ca0, nil)
+	xitdb.tx_report_destroy(&rep_a0, context.allocator)
+
+	rep_b0, cb0 := xitdb.tx_commit(&tx_b0)
+	xitdb.tx_destroy(&tx_b0)
+	testing.expect_value(t, cb0, nil)
+	xitdb.tx_report_destroy(&rep_b0, context.allocator)
+
+	// Commit moment 1 on db_a changing only k_042
+	tx_a1 := xitdb.tx_init(&db_a, -1, false, context.allocator)
+	testing.expect_value(t, xitdb.tx_put(&tx_a1, `.hm["k_042"]`, i64(42_000)), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx_a1, `$sm["k_042"]`, i64(42_000)), nil)
+	rep_a1, ca1 := xitdb.tx_commit(&tx_a1)
+	xitdb.tx_destroy(&tx_a1)
+	testing.expect_value(t, ca1, nil)
+	xitdb.tx_report_destroy(&rep_a1, context.allocator)
+
+	hm_a0, hm_a0_err := xitdb.select_cursor(&db_a, "@0.hm")
+	hm_a1, hm_a1_err := xitdb.select_cursor(&db_a, "@1.hm")
+	sm_a0, sm_a0_err := xitdb.select_cursor(&db_a, "@0$sm")
+	sm_a1, sm_a1_err := xitdb.select_cursor(&db_a, "@1$sm")
+	hm_b0, hm_b0_err := xitdb.select_cursor(&db_b, "@0.hm")
+	sm_b0, sm_b0_err := xitdb.select_cursor(&db_b, "@0$sm")
+	testing.expect(t, hm_a0_err == nil && hm_a1_err == nil && sm_a0_err == nil && sm_a1_err == nil && hm_b0_err == nil && sm_b0_err == nil, "Expected cursors to resolve")
+
+	// 1. Structural diff stats for 1 mutated key out of 200
+	hm_stats: xitdb.Diff_Stats
+	hm_ch, hm_err := xitdb.diff_collection_with_stats(hm_a0.?, hm_a1.?, &hm_stats, context.allocator, context.allocator)
+	testing.expect_value(t, hm_err, nil)
+	testing.expect_value(t, len(hm_ch), 1)
+	if len(hm_ch) == 1 {
+		testing.expect_value(t, hm_ch[0].op, xitdb.Collection_Change_Op.Changed)
+		testing.expect_value(t, string(hm_ch[0].key), "k_042")
+	}
+	testing.expect(t, hm_stats.slots_skipped > 0, "Expected HAMT diff to skip shared slots")
+	testing.expect(t, hm_stats.keys_decoded < 200, "Expected HAMT diff not to decode unchanged keys")
+	free_changes(hm_ch)
+
+	sm_stats: xitdb.Diff_Stats
+	sm_ch, sm_err := xitdb.diff_collection_with_stats(sm_a0.?, sm_a1.?, &sm_stats, context.allocator, context.allocator)
+	testing.expect_value(t, sm_err, nil)
+	testing.expect_value(t, len(sm_ch), 1)
+	if len(sm_ch) == 1 {
+		testing.expect_value(t, sm_ch[0].op, xitdb.Collection_Change_Op.Changed)
+		testing.expect_value(t, string(sm_ch[0].key), "k_042")
+	}
+	testing.expect(t, sm_stats.slots_skipped > 0, "Expected B+Tree diff to skip shared subtrees/slots")
+	testing.expect(t, sm_stats.keys_decoded < 200, "Expected B+Tree diff not to decode all keys")
+	free_changes(sm_ch)
+
+	// 2. Identical cursors short-circuit cleanly
+	same_hm_stats: xitdb.Diff_Stats
+	same_hm_ch, same_hm_err := xitdb.diff_collection_with_stats(hm_a0.?, hm_a0.?, &same_hm_stats, context.allocator, context.allocator)
+	testing.expect_value(t, same_hm_err, nil)
+	testing.expect_value(t, len(same_hm_ch), 0)
+	testing.expect_value(t, same_hm_stats.slots_skipped, u64(1))
+	testing.expect_value(t, same_hm_stats.blocks_compared, u64(0))
+	testing.expect_value(t, same_hm_stats.keys_decoded, u64(0))
+	free_changes(same_hm_ch)
+
+	same_sm_stats: xitdb.Diff_Stats
+	same_sm_ch, same_sm_err := xitdb.diff_collection_with_stats(sm_a0.?, sm_a0.?, &same_sm_stats, context.allocator, context.allocator)
+	testing.expect_value(t, same_sm_err, nil)
+	testing.expect_value(t, len(same_sm_ch), 0)
+	testing.expect_value(t, same_sm_stats.slots_skipped, u64(1))
+	testing.expect_value(t, same_sm_stats.blocks_compared, u64(0))
+	testing.expect_value(t, same_sm_stats.keys_decoded, u64(0))
+	free_changes(same_sm_ch)
+
+	// 3. Cross-DB cursors are explicitly rejected with .Invalid_Database
+	_, cross_hm_err := xitdb.diff_collection_with_stats(hm_a0.?, hm_b0.?, nil, context.allocator, context.allocator)
+	testing.expect_value(t, cross_hm_err, xitdb.Xitdb_Error.Invalid_Database)
+	_, cross_sm_err := xitdb.diff_collection_with_stats(sm_a0.?, sm_b0.?, nil, context.allocator, context.allocator)
+	testing.expect_value(t, cross_sm_err, xitdb.Xitdb_Error.Invalid_Database)
+
+	// 4. Non-empty cursor with nil db is rejected, while empty sentinel Read_Cursor{} is allowed
+	nil_non_empty := hm_a0.?
+	nil_non_empty.db = nil
+	_, nil_err1 := xitdb.diff_collection_with_stats(nil_non_empty, hm_a0.?, nil, context.allocator, context.allocator)
+	testing.expect_value(t, nil_err1, xitdb.Xitdb_Error.Invalid_Database)
+	_, nil_err2 := xitdb.diff_collection_with_stats(hm_a0.?, nil_non_empty, nil, context.allocator, context.allocator)
+	testing.expect_value(t, nil_err2, xitdb.Xitdb_Error.Invalid_Database)
+
+	empty_sentinel := xitdb.Read_Cursor{}
+	es_a, es_a_err := xitdb.diff_collection_with_stats(empty_sentinel, hm_a0.?, nil, context.allocator, context.allocator)
+	testing.expect_value(t, es_a_err, nil)
+	testing.expect_value(t, len(es_a), 200)
+	free_changes(es_a)
+
+	es_b, es_b_err := xitdb.diff_collection_with_stats(hm_a0.?, empty_sentinel, nil, context.allocator, context.allocator)
+	testing.expect_value(t, es_b_err, nil)
+	testing.expect_value(t, len(es_b), 200)
+	free_changes(es_b)
+
+	// 5. Core_Overlay: cross-handle diff rejected; same-handle diff through overlay succeeds
+	base_size, bs_err := xitdb.database_committed_size(&db_a)
+	testing.expect_value(t, bs_err, nil)
+	ov_core, ov_err := xitdb.core_overlay_init(&cm_a, base_size, context.allocator)
+	testing.expect_value(t, ov_err, nil)
+	defer xitdb.core_destroy(&ov_core)
+
+	ov_db, ov_open_err := xitdb.database_init(&ov_core, xitdb.sha1_hasher())
+	testing.expect_value(t, ov_open_err, nil)
+
+	tx_ov := xitdb.tx_init(&ov_db, -1, false, context.allocator)
+	testing.expect_value(t, xitdb.tx_put(&tx_ov, `.hm["k_010"]`, i64(10_000)), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx_ov, `$sm["k_010"]`, i64(10_000)), nil)
+	rep_ov, c_ov := xitdb.tx_commit(&tx_ov)
+	xitdb.tx_destroy(&tx_ov)
+	testing.expect_value(t, c_ov, nil)
+	xitdb.tx_report_destroy(&rep_ov, context.allocator)
+
+	hm_ov0, hm_ov0_err := xitdb.select_cursor(&ov_db, "@0.hm")
+	hm_ov2, hm_ov2_err := xitdb.select_cursor(&ov_db, "@2.hm")
+	sm_ov0, sm_ov0_err := xitdb.select_cursor(&ov_db, "@0$sm")
+	sm_ov2, sm_ov2_err := xitdb.select_cursor(&ov_db, "@2$sm")
+	testing.expect(t, hm_ov0_err == nil && hm_ov2_err == nil && sm_ov0_err == nil && sm_ov2_err == nil, "Expected overlay cursors to resolve")
+
+	_, cross_ov_err := xitdb.diff_collection_with_stats(hm_a0.?, hm_ov2.?, nil, context.allocator, context.allocator)
+	testing.expect_value(t, cross_ov_err, xitdb.Xitdb_Error.Invalid_Database)
+
+	ov_hm_stats: xitdb.Diff_Stats
+	ov_hm_ch, ov_hm_err := xitdb.diff_collection_with_stats(hm_ov0.?, hm_ov2.?, &ov_hm_stats, context.allocator, context.allocator)
+	testing.expect_value(t, ov_hm_err, nil)
+	testing.expect_value(t, len(ov_hm_ch), 2)
+	testing.expect(t, ov_hm_stats.slots_skipped > 0, "Expected overlay HAMT diff to skip shared slots")
+	free_changes(ov_hm_ch)
+
+	ov_sm_stats: xitdb.Diff_Stats
+	ov_sm_ch, ov_sm_err := xitdb.diff_collection_with_stats(sm_ov0.?, sm_ov2.?, &ov_sm_stats, context.allocator, context.allocator)
+	testing.expect_value(t, ov_sm_err, nil)
+	testing.expect_value(t, len(ov_sm_ch), 2)
+	testing.expect(t, ov_sm_stats.slots_skipped > 0, "Expected overlay B+Tree diff to skip shared slots")
+	free_changes(ov_sm_ch)
+}
