@@ -32,12 +32,21 @@ Collection_Change :: struct {
 	new_value: Read_Cursor, // valid for `.Added` / `.Changed`
 }
 
+// Diff_Stats records structural diff telemetry (`diff_collection_with_stats`).
+Diff_Stats :: struct {
+	slots_skipped:   u64,
+	blocks_compared: u64,
+	keys_decoded:    u64,
+}
+
 @(private = "file")
 Diff_Ctx :: struct {
-	db_a:      ^Database,
-	db_b:      ^Database,
-	out:       ^[dynamic]Collection_Change,
-	allocator: runtime.Allocator,
+	db_a:              ^Database,
+	db_b:              ^Database,
+	out:               ^[dynamic]Collection_Change,
+	stats:             ^Diff_Stats,
+	allocator:         runtime.Allocator,
+	scratch_allocator: runtime.Allocator,
 }
 
 @(private = "file")
@@ -48,6 +57,18 @@ Map_Entry :: struct {
 }
 
 diff_collection :: proc(cur_a, cur_b: Read_Cursor, allocator := context.temp_allocator) -> (res: []Collection_Change, err: Error) {
+	return diff_collection_with_stats(cur_a, cur_b, nil, allocator, context.temp_allocator)
+}
+
+diff_collection_with_stats :: proc(
+	cur_a, cur_b: Read_Cursor,
+	stats: ^Diff_Stats = nil,
+	allocator := context.temp_allocator,
+	scratch_allocator := context.temp_allocator,
+) -> (res: []Collection_Change, err: Error) {
+	if stats != nil {
+		stats^ = {}
+	}
 	a := cursor_resolved_cursor(cur_a) or_return
 	b := cursor_resolved_cursor(cur_b) or_return
 	out := make([dynamic]Collection_Change, 0, 8, allocator)
@@ -57,8 +78,18 @@ diff_collection :: proc(cur_a, cur_b: Read_Cursor, allocator := context.temp_all
 		}
 		delete(out)
 	}
-	ctx := Diff_Ctx{db_a = a.db, db_b = b.db, out = &out, allocator = allocator}
-	if a.slot_ptr.slot == b.slot_ptr.slot {
+	ctx := Diff_Ctx{
+		db_a              = a.db,
+		db_b              = b.db,
+		out               = &out,
+		stats             = stats,
+		allocator         = allocator,
+		scratch_allocator = scratch_allocator,
+	}
+	if a.slot_ptr.slot == b.slot_ptr.slot && a.db == b.db {
+		if stats != nil {
+			stats.slots_skipped += 1
+		}
 		return out[:], nil
 	}
 
@@ -109,14 +140,14 @@ _diff_hash_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 		return _diff_index_blocks(ctx, pos_a, pos_b)
 	}
 	// One side is empty: everything on the other side was added / removed.
-	entries := make([dynamic]Map_Entry, 0, 16, context.temp_allocator)
+	entries := make([dynamic]Map_Entry, 0, 16, ctx.scratch_allocator)
 	if has_a {
-		_collect_index_block(ctx.db_a, pos_a, &entries) or_return
+		_collect_index_block(ctx, ctx.db_a, pos_a, &entries) or_return
 		for e in entries {
 			_emit_map(ctx, .Removed, ctx.db_a, e, {}) or_return
 		}
 	} else if has_b {
-		_collect_index_block(ctx.db_b, pos_b, &entries) or_return
+		_collect_index_block(ctx, ctx.db_b, pos_b, &entries) or_return
 		for e in entries {
 			_emit_map(ctx, .Added, ctx.db_b, {}, e) or_return
 		}
@@ -130,18 +161,30 @@ _diff_index_blocks :: proc(ctx: ^Diff_Ctx, pos_a, pos_b: i64, depth: int = 0) ->
 		return .Key_Offset_Exceeded
 	}
 	if pos_a == pos_b && ctx.db_a == ctx.db_b {
+		if ctx.stats != nil {
+			ctx.stats.slots_skipped += 1
+		}
 		return nil
+	}
+	if ctx.stats != nil {
+		ctx.stats.blocks_compared += 1
 	}
 	block_a, block_b: [INDEX_BLOCK_SIZE]u8 = ---, ---
 	core_read_exact_at(ctx.db_a.core, pos_a, block_a[:]) or_return
 	core_read_exact_at(ctx.db_b.core, pos_b, block_b[:]) or_return
 	if bytes.equal(block_a[:], block_b[:]) {
+		if ctx.stats != nil {
+			ctx.stats.slots_skipped += SLOT_COUNT
+		}
 		return nil
 	}
 	for i in 0 ..< SLOT_COUNT {
 		sa := slot_from_slice(block_a[i * SLOT_LENGTH:(i + 1) * SLOT_LENGTH]) or_return
 		sb := slot_from_slice(block_b[i * SLOT_LENGTH:(i + 1) * SLOT_LENGTH]) or_return
 		if sa == sb {
+			if ctx.stats != nil {
+				ctx.stats.slots_skipped += 1
+			}
 			continue
 		}
 		if sa.tag == .Index && sb.tag == .Index {
@@ -149,17 +192,17 @@ _diff_index_blocks :: proc(ctx: ^Diff_Ctx, pos_a, pos_b: i64, depth: int = 0) ->
 			continue
 		}
 		// Mixed / leaf-level difference: materialize both (small) subtrees and diff them by hash.
-		ea := make([dynamic]Map_Entry, 0, 4, context.temp_allocator)
-		eb := make([dynamic]Map_Entry, 0, 4, context.temp_allocator)
-		_collect_slot(ctx.db_a, sa, pos_a + i64(i * SLOT_LENGTH), &ea, depth + 1) or_return
-		_collect_slot(ctx.db_b, sb, pos_b + i64(i * SLOT_LENGTH), &eb, depth + 1) or_return
+		ea := make([dynamic]Map_Entry, 0, 4, ctx.scratch_allocator)
+		eb := make([dynamic]Map_Entry, 0, 4, ctx.scratch_allocator)
+		_collect_slot(ctx, ctx.db_a, sa, pos_a + i64(i * SLOT_LENGTH), &ea, depth + 1) or_return
+		_collect_slot(ctx, ctx.db_b, sb, pos_b + i64(i * SLOT_LENGTH), &eb, depth + 1) or_return
 		_diff_entry_sets(ctx, ea[:], eb[:]) or_return
 	}
 	return nil
 }
 
 @(private = "file")
-_collect_index_block :: proc(db: ^Database, pos: i64, out: ^[dynamic]Map_Entry, depth: int = 0) -> Error {
+_collect_index_block :: proc(ctx: ^Diff_Ctx, db: ^Database, pos: i64, out: ^[dynamic]Map_Entry, depth: int = 0) -> Error {
 	if depth > 64 {
 		return .Key_Offset_Exceeded
 	}
@@ -167,13 +210,13 @@ _collect_index_block :: proc(db: ^Database, pos: i64, out: ^[dynamic]Map_Entry, 
 	core_read_exact_at(db.core, pos, block[:]) or_return
 	for i in 0 ..< SLOT_COUNT {
 		s := slot_from_slice(block[i * SLOT_LENGTH:(i + 1) * SLOT_LENGTH]) or_return
-		_collect_slot(db, s, pos + i64(i * SLOT_LENGTH), out, depth + 1) or_return
+		_collect_slot(ctx, db, s, pos + i64(i * SLOT_LENGTH), out, depth + 1) or_return
 	}
 	return nil
 }
 
 @(private = "file")
-_collect_slot :: proc(db: ^Database, s: Slot, slot_pos: i64, out: ^[dynamic]Map_Entry, depth: int = 0) -> Error {
+_collect_slot :: proc(ctx: ^Diff_Ctx, db: ^Database, s: Slot, slot_pos: i64, out: ^[dynamic]Map_Entry, depth: int = 0) -> Error {
 	if depth > 64 {
 		return .Key_Offset_Exceeded
 	}
@@ -181,10 +224,10 @@ _collect_slot :: proc(db: ^Database, s: Slot, slot_pos: i64, out: ^[dynamic]Map_
 	case .None:
 		return nil
 	case .Index:
-		return _collect_index_block(db, s.value, out, depth)
+		return _collect_index_block(ctx, db, s.value, out, depth)
 	case .KV_Pair:
 		hash_size := int(db.header.hash_size)
-		hash := make([]u8, hash_size, context.temp_allocator)
+		hash := make([]u8, hash_size, ctx.scratch_allocator)
 		kv := kv_pair_read_buf_at(db.core, s.value, hash) or_return
 		key_pos := s.value + i64(hash_size)
 		append(out, Map_Entry{
@@ -230,7 +273,10 @@ _diff_entry_sets :: proc(ctx: ^Diff_Ctx, ea, eb: []Map_Entry) -> Error {
 }
 
 @(private = "file")
-_read_key_bytes :: proc(db: ^Database, key_slot: Slot, allocator: runtime.Allocator) -> (res: []u8, err: Error) {
+_read_key_bytes :: proc(ctx: ^Diff_Ctx, db: ^Database, key_slot: Slot, allocator: runtime.Allocator) -> (res: []u8, err: Error) {
+	if ctx.stats != nil {
+		ctx.stats.keys_decoded += 1
+	}
 	kc := Read_Cursor{slot_ptr = Slot_Pointer{position = nil, slot = key_slot}, db = db}
 	return cursor_read_bytes(kc, 0, allocator)
 }
@@ -238,7 +284,7 @@ _read_key_bytes :: proc(db: ^Database, key_slot: Slot, allocator: runtime.Alloca
 @(private = "file")
 _emit_map :: proc(ctx: ^Diff_Ctx, op: Collection_Change_Op, key_db: ^Database, a, b: Map_Entry) -> Error {
 	key_slot := b.key_slot if op == .Added || op == .Changed else a.key_slot
-	key := _read_key_bytes(key_db, key_slot, ctx.allocator) or_return
+	key := _read_key_bytes(ctx, key_db, key_slot, ctx.allocator) or_return
 	ch := Collection_Change{op = op, key = key}
 	if op != .Added {
 		ch.old_value = Read_Cursor{slot_ptr = a.value, db = ctx.db_a}
@@ -377,6 +423,9 @@ _diff_sorted_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 		}
 		// Shared subtree at the same position in key order: skip it on both sides in O(1).
 		if same_db && fa.kind == .Child && fb.kind == .Child && fa.slot == fb.slot {
+			if ctx.stats != nil {
+				ctx.stats.slots_skipped += 1
+			}
 			_walker_advance(&wa)
 			_walker_advance(&wb)
 			continue
@@ -404,9 +453,17 @@ _diff_sorted_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 			_emit_sorted(ctx, .Removed, ia, {}) or_return
 			_walker_advance(&wa)
 		case:
+			if same_db && fa.slot == fb.slot {
+				if ctx.stats != nil {
+					ctx.stats.slots_skipped += 1
+				}
+				_walker_advance(&wa)
+				_walker_advance(&wb)
+				continue
+			}
 			ia := _sorted_entry_info(ctx.db_a, fa.slot) or_return
 			ib := _sorted_entry_info(ctx.db_b, fb.slot) or_return
-			key_b := _read_key_bytes(ctx.db_b, ib.key_slot, context.temp_allocator) or_return
+			key_b := _read_key_bytes(ctx, ctx.db_b, ib.key_slot, ctx.scratch_allocator) or_return
 			cmp := compare_key(ctx.db_a, ia.key_slot, key_b) or_return
 			if cmp < 0 {
 				_emit_sorted(ctx, .Removed, ia, {}) or_return
@@ -417,6 +474,8 @@ _diff_sorted_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 			} else {
 				if fa.slot != fb.slot && ia.value.slot != ib.value.slot {
 					_emit_sorted(ctx, .Changed, ia, ib) or_return
+				} else if ctx.stats != nil {
+					ctx.stats.slots_skipped += 1
 				}
 				_walker_advance(&wa)
 				_walker_advance(&wb)
@@ -429,7 +488,7 @@ _diff_sorted_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 _emit_sorted :: proc(ctx: ^Diff_Ctx, op: Collection_Change_Op, a, b: Sorted_Entry_Info) -> Error {
 	key_db := ctx.db_b if op != .Removed else ctx.db_a
 	key_slot := b.key_slot if op != .Removed else a.key_slot
-	key := _read_key_bytes(key_db, key_slot, ctx.allocator) or_return
+	key := _read_key_bytes(ctx, key_db, key_slot, ctx.allocator) or_return
 	ch := Collection_Change{op = op, key = key}
 	if op != .Added {
 		ch.old_value = Read_Cursor{slot_ptr = a.value, db = ctx.db_a}

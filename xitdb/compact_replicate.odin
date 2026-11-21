@@ -755,7 +755,11 @@ database_compact :: proc(db: ^Database, target_core: ^Core, offset_map: ^Offset_
 	h.id = db.header.hash_id
 	h.hash_size = db.header.hash_size
 	h.file_id = 0
-	target = database_init(target_core, h) or_return
+	target = database_init_with_options(
+		target_core,
+		h,
+		Database_Options{skip_memory_crc = db.skip_memory_crc && _core_is_pure_memory(target_core)},
+	) or_return
 
 	target_root := database_read_root_slot(&target) or_return
 	if !slot_empty(target_root) {

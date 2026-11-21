@@ -85,6 +85,8 @@ Xitdb_Error :: enum {
 	Invalid_Database,
 	Invalid_Version,
 	Invalid_Hash_Size,
+	Invalid_Hash_Id,
+	Invalid_Database_Options,
 	Invalid_Format_Tag_Size,
 	Invalid_Range,
 	Invalid_BTree_Node_Kind,
@@ -373,6 +375,84 @@ sha256_hasher :: proc(id: u32 = 0, file_id: u64 = 0) -> Hasher {
 		},
 		hash_size = 32,
 		id        = id,
+		file_id   = file_id,
+	}
+}
+
+// Identifier and digest width for the opt-in non-crypto fast-memory hasher ("fh16").
+FAST_HASH_ID   :: u32(0x66683136) // "fh16"
+FAST_HASH_SIZE :: u16(16)
+
+@(private)
+_wymix64 :: #force_inline proc "contextless" (a, b: u64) -> u64 {
+	r := u128(a) * u128(b)
+	return u64(r) ~ u64(r >> 64)
+}
+
+@(private)
+_read_u64_le_padded :: #force_inline proc "contextless" (p: []u8) -> u64 #no_bounds_check {
+	n := len(p)
+	if n >= 8 {
+		v, _ := endian.get_u64(p[:8], .Little)
+		return v
+	}
+	v: u64 = 0
+	for i := 0; i < n; i += 1 {
+		v |= u64(p[i]) << u64(i * 8)
+	}
+	return v
+}
+
+// Fast non-cryptographic 128-bit digest for trusted in-memory stores (`Xitdb_Mode.Fast_Memory`).
+// NOT wire-compatible with SHA-1/SHA-256 files and NOT resistant to adversarial hash flooding.
+fast_hash128_sum_into :: proc "contextless" (data: []u8, out: []u8) #no_bounds_check {
+	s0 :: u64(0xa0761d6478bd642f)
+	s1 :: u64(0xe7037ed1a0b428db)
+	s2 :: u64(0x8ebc6af09c88c6e3)
+	s3 :: u64(0x589965cc75374cc3)
+
+	seed_a := s0 ~ _wymix64(u64(len(data)) ~ s1, s2)
+	seed_b := s1 ~ _wymix64(u64(len(data)) ~ s3, s0)
+
+	i := 0
+	for i + 16 <= len(data) {
+		v0, _ := endian.get_u64(data[i:i + 8], .Little)
+		v1, _ := endian.get_u64(data[i + 8:i + 16], .Little)
+		seed_a = _wymix64(v0 ~ s1, v1 ~ seed_a) ~ seed_b
+		seed_b = _wymix64(v1 ~ s2, v0 ~ seed_b) ~ s3
+		i += 16
+	}
+
+	rem := data[i:]
+	a := _read_u64_le_padded(rem)
+	b: u64 = 0
+	if len(rem) > 8 {
+		b = _read_u64_le_padded(rem[8:])
+	}
+
+	h0 := _wymix64(seed_a ~ a ~ s1, seed_b ~ u64(len(data)) ~ s2)
+	h1 := _wymix64(seed_b ~ b ~ s3, seed_a ~ u64(len(data)) ~ s0)
+	h0 = _wymix64(h0 ~ s0, h1 ~ s3)
+	h1 = _wymix64(h1 ~ s2, h0 ~ s1)
+
+	if len(out) >= 8 {
+		endian.unchecked_put_u64be(out[0:8], h0)
+	}
+	if len(out) >= 16 {
+		endian.unchecked_put_u64be(out[8:16], h1)
+	}
+}
+
+// Opt-in 16-byte fast non-cryptographic hasher (`hash_id = "fh16"`).
+// Strictly for trusted in-memory scratch/rule stores; never for untrusted keys or standard v2 disk stores.
+fast_hasher :: proc(id: u32 = FAST_HASH_ID, file_id: u64 = 0) -> Hasher {
+	effective_id := id if id != 0 else FAST_HASH_ID
+	return Hasher{
+		hash_proc = proc(data: []u8, out_hash: []u8, _: rawptr) {
+			fast_hash128_sum_into(data, out_hash)
+		},
+		hash_size = FAST_HASH_SIZE,
+		id        = effective_id,
 		file_id   = file_id,
 	}
 }
