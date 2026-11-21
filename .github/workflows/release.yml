@@ -57,11 +57,11 @@ jobs:
           fetch-depth: 0
           path: src
 
-      - name: Checkout hugi v0.1.0 (runner only)
+      - name: Checkout hugi v0.1.2 (runner only)
         uses: actions/checkout@v4
         with:
           repository: boxxxie/hugi
-          ref: v0.1.0
+          ref: v0.1.2
           path: hugi
           persist-credentials: false
 
