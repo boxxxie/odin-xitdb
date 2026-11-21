@@ -12,7 +12,7 @@ Read_Cursor :: struct {
 
 Write_Cursor :: struct {
 	using read_cursor: Read_Cursor,
-	transaction:       ^Transaction,
+	transaction_id:    u64,
 }
 
 Read_KV_Pair_Cursor :: struct {
@@ -36,7 +36,9 @@ new_write_cursor :: proc(slot_ptr: Slot_Pointer, db: ^Database) -> Write_Cursor 
 		},
 	}
 	if slot_ptr.position != nil && !is_root(slot_ptr) {
-		c.transaction = db.transaction
+		if active, ok := db.transaction.?; ok {
+			c.transaction_id = active.id
+		}
 	}
 	return c
 }
@@ -94,17 +96,20 @@ cursor_read_path_slot :: proc(c: Read_Cursor, path: []Path_Part) -> (res: Maybe(
 }
 
 cursor_check_writable :: proc(c: ^Write_Cursor) -> Error {
-	if c.transaction != nil && c.transaction != c.db.transaction {
-		return .Expired_Transaction
+	if c.transaction_id != 0 {
+		active, has_tx := c.db.transaction.?
+		if !has_tx || active.id != c.transaction_id {
+			return .Expired_Transaction
+		}
 	}
-	if !is_root(c.slot_ptr) && c.transaction == nil && c.db.tx_start == nil {
+	if !is_root(c.slot_ptr) && c.transaction_id == 0 && c.db.tx_start == nil {
 		return .Expected_Tx_Start
 	}
 	return database_check_frozen_slot(c.db, c.slot_ptr)
 }
 
 cursor_reload_slot :: proc(c: ^Write_Cursor) -> Error {
-	if (c.transaction != nil || c.db.tx_start != nil) && !is_root(c.slot_ptr) {
+	if (c.transaction_id != 0 || c.db.tx_start != nil) && !is_root(c.slot_ptr) {
 		if pos, ok := c.slot_ptr.position.?; ok {
 			slot := core_read_slot_at(c.db.core, pos) or_return
 			c.slot_ptr = slot_pointer_with_slot(c.slot_ptr, slot)
@@ -119,10 +124,10 @@ cursor_write_path :: proc(c: ^Write_Cursor, path: []Path_Part) -> (res: Write_Cu
 		return {}, .Nested_Top_Level_Write
 	}
 
-	tx_stack: Transaction
 	starts_transaction := c.db.transaction == nil && is_root(c.slot_ptr)
 	if starts_transaction {
-		c.db.transaction = &tx_stack
+		c.db.tx_seq += 1
+		c.db.transaction = Transaction{id = c.db.tx_seq}
 	}
 	defer if starts_transaction {
 		c.db.transaction = nil
@@ -135,7 +140,11 @@ cursor_write_path :: proc(c: ^Write_Cursor, path: []Path_Part) -> (res: Write_Cu
 		if len(path) > 0 {
 			_, is_init = init_tag(path[0])
 		}
-		if is_init || (c.db.transaction != nil && (c.db.transaction.frozen_at != nil || c.frozen_at != 0)) {
+		has_frozen_tx := false
+		if active, ok := c.db.transaction.?; ok {
+			has_frozen_tx = active.frozen_at != nil || c.frozen_at != 0
+		}
+		if is_init || has_frozen_tx {
 			err = cursor_reload_slot(c)
 		}
 	case .None, .Index, .Bytes, .Short_Bytes, .Uint, .Int, .Float, .KV_Pair, .Sorted_KV_Pair:
@@ -165,7 +174,7 @@ cursor_write_path :: proc(c: ^Write_Cursor, path: []Path_Part) -> (res: Write_Cu
 		cursor_reload_slot(&res) or_return
 	} else if c.slot_ptr.position != nil && c.slot_ptr.position == slot_ptr.position {
 		c.slot_ptr = slot_ptr
-	} else if c.db.transaction == nil || c.db.transaction.frozen_at != nil || c.frozen_at != 0 || c.slot_ptr.slot.tag == .None {
+	} else if active, ok := c.db.transaction.?; !ok || active.frozen_at != nil || c.frozen_at != 0 || c.slot_ptr.slot.tag == .None {
 		cursor_reload_slot(c) or_return
 	}
 	return res, nil
@@ -433,8 +442,8 @@ cursor_read_kv_pair_slots :: proc(c: Read_Cursor) -> (key_cursor: Read_Cursor, v
 cursor_write_kv_pair :: proc(c: Write_Cursor, allocator := context.temp_allocator) -> (res: Write_KV_Pair_Cursor, err: Error) {
 	rkv := cursor_read_kv_pair(c.read_cursor, allocator) or_return
 	return Write_KV_Pair_Cursor{
-		value_cursor = Write_Cursor{read_cursor = rkv.value_cursor, transaction = c.transaction},
-		key_cursor   = Write_Cursor{read_cursor = rkv.key_cursor, transaction = c.transaction},
+		value_cursor = Write_Cursor{read_cursor = rkv.value_cursor, transaction_id = c.transaction_id},
+		key_cursor   = Write_Cursor{read_cursor = rkv.key_cursor, transaction_id = c.transaction_id},
 		hash         = rkv.hash,
 	}, nil
 }
@@ -647,9 +656,8 @@ cursor_writer_check_writable :: proc(w: ^Cursor_Writer) -> Error {
 	if w.parent.db.tx_start == nil {
 		return .Expected_Tx_Start
 	}
-	active := w.parent.db.transaction
-	if active != nil {
-		if fa, ok := active.frozen_at.?; ok && w.slot.value < fa {
+	if active, ok := w.parent.db.transaction.?; ok {
+		if fa, has_fa := active.frozen_at.?; has_fa && w.slot.value < fa {
 			return .Frozen_Bytes
 		}
 	}

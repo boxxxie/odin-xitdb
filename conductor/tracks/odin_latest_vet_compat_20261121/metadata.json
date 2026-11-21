@@ -1,0 +1,9 @@
+{
+  "track_id": "odin_latest_vet_compat_20261121",
+  "type": "chore",
+  "status": "completed",
+  "created_at": "2026-11-21T17:28:45+08:00",
+  "updated_at": "2026-11-21T18:46:00+08:00",
+  "branch": "fix/odin-latest-vet-compat",
+  "description": "Resolve Odin dev-2026-11a stack-escape warnings and ARM64 -vet unused-import errors across xitdb and unpin CI"
+}

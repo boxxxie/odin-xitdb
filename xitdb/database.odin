@@ -5,6 +5,7 @@ import "core:math/rand"
 
 // Transaction tracks the active transaction's root slot, scratch slot, and freeze watermark.
 Transaction :: struct {
+	id:               u64,
 	root_position:    Maybe(i64),
 	scratch_position: Maybe(i64),
 	frozen_at:        Maybe(i64),
@@ -33,7 +34,8 @@ Database :: struct {
 	hasher:      Hasher,
 	header:      Header,
 	tx_start:    Maybe(i64),
-	transaction: ^Transaction,
+	tx_seq:      u64,
+	transaction: Maybe(Transaction),
 }
 
 // Path_Part Variants for read_slot_pointer traversal.
@@ -197,6 +199,7 @@ database_init :: proc(core: ^Core, hasher := Hasher{}) -> (db: Database, err: Er
 	db.core = core
 	db.hasher = h
 	db.tx_start = nil
+	db.tx_seq = 0
 	db.transaction = nil
 
 	core_seek_to(core, 0) or_return
@@ -348,12 +351,14 @@ database_run_context :: proc(db: ^Database, fn: Context_Function, user_data: raw
 
 // Freeze everything written in the current transaction so far.
 database_freeze :: proc(db: ^Database) -> Error {
-	if db.transaction == nil || db.tx_start == nil {
+	active, has_tx := db.transaction.?
+	if !has_tx || db.tx_start == nil {
 		return .Expected_Tx_Start
 	}
 	length := core_length(db.core) or_return
 	db.tx_start = length
-	db.transaction.frozen_at = length
+	active.frozen_at = length
+	db.transaction = active
 	return nil
 }
 
@@ -375,9 +380,8 @@ database_committed_size :: proc(db: ^Database) -> (res: i64, err: Error) {
 @(private)
 _database_truncate_with_header :: proc(db: ^Database, header: Root_Header) -> (final_size: i64, err: Error) {
 	committed_size, file_size := _database_committed_size_with_header(db, header) or_return
-	active := db.transaction
-	if active != nil {
-		if fa, ok := active.frozen_at.?; ok && fa > committed_size {
+	if active, ok := db.transaction.?; ok {
+		if fa, has_fa := active.frozen_at.?; has_fa && fa > committed_size {
 			if file_size > fa {
 				core_set_length(db.core, fa) or_return
 			}
@@ -544,11 +548,11 @@ database_check_hash_target :: proc(db: ^Database, target: Hash_Map_Get_Target) -
 }
 
 database_check_frozen_slot :: proc(db: ^Database, slot_ptr: Slot_Pointer) -> Error {
-	active := db.transaction
-	if active != nil {
+	if active, has_tx := db.transaction.?; has_tx {
+		active := active
 		if fa, ok := active.frozen_at.?; ok {
 			if pos, pok := slot_ptr.position.?; pok {
-				if pos < fa && !transaction_is_root_position(active, slot_ptr.position) {
+				if pos < fa && !transaction_is_root_position(&active, slot_ptr.position) {
 					return .Frozen_Slot
 				}
 			}
@@ -558,9 +562,9 @@ database_check_frozen_slot :: proc(db: ^Database, slot_ptr: Slot_Pointer) -> Err
 }
 
 database_copy_collection_if_frozen :: proc(db: ^Database, slot_ptr: Slot_Pointer, init_part: Path_Part, frozen_at: i64) -> (res: Slot_Pointer, err: Error) {
-	if db.transaction != nil {
+	if active, has_tx := db.transaction.?; has_tx {
 		fa := frozen_at
-		if tfa, ok := db.transaction.frozen_at.?; ok && tfa > fa {
+		if tfa, ok := active.frozen_at.?; ok && tfa > fa {
 			fa = tfa
 		}
 		if fa > 0 && slot_ptr.slot.value < fa {
@@ -640,9 +644,10 @@ read_slot_pointer :: proc(
 		db.tx_start = scratch_pos
 		defer db.tx_start = nil
 
-		if db.transaction != nil {
-			db.transaction.root_position = scratch_pos
-			db.transaction.scratch_position = scratch_pos
+		if active, ok := db.transaction.?; ok {
+			active.root_position = scratch_pos
+			active.scratch_position = scratch_pos
+			db.transaction = active
 		}
 
 		core_seek_to(db.core, scratch_pos) or_return
@@ -776,8 +781,12 @@ _exec_path_part :: proc(
 		core_seek_to(db.core, next_array_list_start) or_return
 		nhb := array_list_header_to_bytes(append_res.header)
 		core_write_all(db.core, nhb[:]) or_return
-		if db.transaction != nil && transaction_is_scratch_position(db.transaction, slot_ptr.position) {
-			db.transaction.root_position = append_res.slot_ptr.position
+		if active, ok := db.transaction.?; ok {
+			active := active
+			if transaction_is_scratch_position(&active, slot_ptr.position) {
+				active.root_position = append_res.slot_ptr.position
+				db.transaction = active
+			}
 		}
 		return read_slot_pointer(db, write_mode, path, path_i + 1, append_res.slot_ptr, frozen_at)
 
@@ -1476,10 +1485,11 @@ _try_encode_inline_data :: #force_inline proc(write_data: Writeable_Data) -> (sl
 	case nil:
 		return Slot{full = true}, true, nil
 	case Slot:
-		if data.tag == .None {
-			return slot_with_full(data, true), true, nil
-		}
-		return data, true, nil
+		return Slot{
+			value = data.value,
+			tag   = data.tag,
+			full  = true if data.tag == .None else data.full,
+		}, true, nil
 	case Uint:
 		return Slot{value = i64(data.value), tag = .Uint}, true, nil
 	case u64:
@@ -1531,7 +1541,7 @@ _encode_writeable_data :: proc(db: ^Database, slot_ptr: Slot_Pointer, write_data
 	case nil:
 		slot = Slot{}
 	case Slot:
-		slot = data
+		slot = Slot{value = data.value, tag = data.tag, full = data.full}
 	case Uint:
 		slot = Slot{value = i64(data.value), tag = .Uint}
 	case u64:

@@ -1206,6 +1206,17 @@ driver_verify_expired_and_nested_transaction_guards :: proc(ctx: ^Suite_Ctx) {
 
 	exp_err3 := xitdb.cursor_writer_finish(&st.escaped_writer)
 	testing.expect_value(ctx.t, exp_err3, xitdb.Xitdb_Error.Expired_Transaction)
+
+	// Escaped cursors must remain expired even inside a subsequent transaction (monotonic tx_seq)
+	reused_cb :: proc(_: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+		s := (^Guard_State)(user_data)
+		exp_err4 := xitdb.hash_map_put(&s.escaped_map, "v", i64(1000))
+		testing.expect_value(s.ctx.t, exp_err4, xitdb.Xitdb_Error.Expired_Transaction)
+		return nil
+	}
+	latest_slot, slot_err := xitdb.array_list_get_slot(history.read_array_list, -1)
+	testing.expect_value(ctx.t, slot_err, nil)
+	testing.expect_value(ctx.t, xitdb.array_list_append_context(&history, latest_slot.?, reused_cb, &st), nil)
 }
 
 @(private = "file")
