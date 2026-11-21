@@ -1,6 +1,6 @@
 # #56. `Path: 4-level nested cursor_read_path` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1878-L1899`)](../bench_xitdb.odin#L1878-L1899) · [Zig Harness (`bench_xitdb.zig#L1951-L1972`)](../bench_xitdb.zig#L1951-L1972)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L2152-L2175`)](../bench_xitdb.odin#L2152-L2175) · [Zig Harness (`bench_xitdb.zig#L1951-L1972`)](../bench_xitdb.zig#L1951-L1972)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,31 +31,33 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1878-L1899`](../bench_xitdb.odin#L1878-L1899))
+### Odin ([`benchmarks/bench_xitdb.odin#L2152-L2175`](../bench_xitdb.odin#L2152-L2175))
 
 ```odin
-1878 | 		rc := xitdb.database_root_cursor(&db).read_cursor
-1879 | 		skey := transmute([]u8)string("deep-sorted-key")
-1880 | 		read_parts := []xitdb.Path_Part{
-1881 | 			xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = h_root}},
-1882 | 			xitdb.Array_List_Get{index = 0},
-1883 | 			xitdb.Linked_Array_List_Get{index = 0},
-1884 | 			xitdb.Sorted_Map_Get{target = xitdb.Sorted_Map_Get_Value{key = skey}},
-1885 | 		}
-1886 | 
-1887 | 		t_dr := time.now()
-1888 | 		for _ in 0 ..< path_ops {
-1889 | 			mc, _ := xitdb.cursor_read_path(rc, read_parts)
-1890 | 			v, _ := xitdb.cursor_read_uint(mc.?)
-1891 | 			assert(v == u64(path_ops - 1))
-1892 | 		}
-1893 | 		elapsed_dr := time.since(t_dr)
-1894 | 
-1895 | 		print_result(Bench_Result{
-1896 | 			name    = "Path: 4-level nested cursor_read_path",
-1897 | 			ops     = path_ops,
-1898 | 			elapsed = elapsed_dr,
-1899 | 		})
+2152 | 		rc := xitdb.database_root_cursor(&db).read_cursor
+2153 | 		skey := transmute([]u8)string("deep-sorted-key")
+2154 | 		read_parts := []xitdb.Path_Part{
+2155 | 			xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = h_root}},
+2156 | 			xitdb.Array_List_Get{index = 0},
+2157 | 			xitdb.Linked_Array_List_Get{index = 0},
+2158 | 			xitdb.Sorted_Map_Get{target = xitdb.Sorted_Map_Get_Value{key = skey}},
+2159 | 		}
+2160 | 
+2161 | 		sp_dr := span_begin()
+2162 | 		for _ in 0 ..< path_ops {
+2163 | 			mc, _ := xitdb.cursor_read_path(rc, read_parts)
+2164 | 			v, _ := xitdb.cursor_read_uint(mc.?)
+2165 | 			assert(v == u64(path_ops - 1))
+2166 | 		}
+2167 | 		elapsed_dr, hw_dr, has_hw_dr := span_end(sp_dr)
+2168 | 
+2169 | 		print_result(Bench_Result{
+2170 | 			name         = "Path: 4-level nested cursor_read_path",
+2171 | 			ops          = path_ops,
+2172 | 			elapsed      = elapsed_dr,
+2173 | 			counters     = hw_dr,
+2174 | 			has_counters = has_hw_dr,
+2175 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1951-L1972`](../bench_xitdb.zig#L1951-L1972))
@@ -98,7 +100,7 @@
 | `readSlotPointer.write` | 66 | `PathPart` switch arms: `.write` and `.ctx` | [`lib.zig#L1525-L1590`](../../reference/xitdb-zig/src/lib.zig#L1525-L1590) |
 | `CoreMemory` | 111 | In-memory `Writer.Allocating` backend with unbuffered `.buffer = &.{}` `std.Io` vtables | [`lib.zig#L4917-L5027`](../../reference/xitdb-zig/src/lib.zig#L4917-L5027) |
 
-### Reached Odin Procedures (`26` procedures across `4` files · `1178` LOC)
+### Reached Odin Procedures (`26` procedures across `4` files · `1223` LOC)
 
 | File | Procedure | Role / Call Depth | Lines | Source Link (`#L<start>-L<end>`) |
 | :--- | :--- | :--- | ---: | :--- |
@@ -107,13 +109,13 @@
 | `xitdb/cursor.odin` | `cursor_read_uint` | **Entry Point** (`depth 0`) | 10 | [`xitdb/cursor.odin#L198-L207`](../../xitdb/cursor.odin#L198-L207) |
 | `xitdb/database.odin` | `database_read_root_slot` | `depth 1` (from `database_root_cursor`) | 4 | [`xitdb/database.odin#L424-L427`](../../xitdb/database.odin#L424-L427) |
 | `xitdb/cursor.odin` | `cursor_resolved` | `depth 1` (from `cursor_read_path`, `cursor_read_uint`) | 8 | [`xitdb/cursor.odin#L48-L55`](../../xitdb/cursor.odin#L48-L55) |
-| `xitdb/database.odin` | `read_slot_pointer` | `depth 1` (from `cursor_read_path`) | 67 | [`xitdb/database.odin#L595-L661`](../../xitdb/database.odin#L595-L661) |
+| `xitdb/database.odin` | `read_slot_pointer` | `depth 1` (from `cursor_read_path`) | 67 | [`xitdb/database.odin#L603-L669`](../../xitdb/database.odin#L603-L669) |
 | `xitdb/database.odin` | `database_read_root_header` | `depth 2` (from `database_read_root_slot`, `cursor_resolved`, `read_slot_pointer`) | 14 | [`xitdb/database.odin#L409-L422`](../../xitdb/database.odin#L409-L422) |
 | `xitdb/database.odin` | `is_root` | `depth 2` (from `cursor_resolved`, `read_slot_pointer`) | 6 | [`xitdb/database.odin#L460-L465`](../../xitdb/database.odin#L460-L465) |
 | `xitdb/types.odin` | `slot_empty` | `depth 2` (from `read_slot_pointer`) | 3 | [`xitdb/types.odin#L858-L860`](../../xitdb/types.odin#L858-L860) |
 | `xitdb/core.odin` | `core_seek_to` | `depth 2` (from `read_slot_pointer`) | 20 | [`xitdb/core.odin#L435-L454`](../../xitdb/core.odin#L435-L454) |
 | `xitdb/core.odin` | `core_read_slot_raw_at` | `depth 2` (from `read_slot_pointer`) | 24 | [`xitdb/core.odin#L1179-L1202`](../../xitdb/core.odin#L1179-L1202) |
-| `xitdb/database.odin` | `_exec_path_part` | `depth 2` (from `read_slot_pointer`) | 743 | [`xitdb/database.odin#L663-L1405`](../../xitdb/database.odin#L663-L1405) |
+| `xitdb/database.odin` | `_exec_path_part` | `depth 2` (from `read_slot_pointer`) | 788 | [`xitdb/database.odin#L671-L1458`](../../xitdb/database.odin#L671-L1458) |
 | `xitdb/database.odin` | `database_file_size_start` | `depth 3` (from `database_read_root_header`) | 3 | [`xitdb/database.odin#L404-L406`](../../xitdb/database.odin#L404-L406) |
 | `xitdb/core.odin` | `core_read_i64_at` | `depth 3` (from `database_read_root_header`) | 24 | [`xitdb/core.odin#L1146-L1169`](../../xitdb/core.odin#L1146-L1169) |
 | `xitdb/core.odin` | `core_length` | `depth 3` (from `database_read_root_header`) | 23 | [`xitdb/core.odin#L411-L433`](../../xitdb/core.odin#L411-L433) |

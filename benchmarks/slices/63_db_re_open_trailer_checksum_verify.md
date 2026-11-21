@@ -1,6 +1,6 @@
 # #63. `DB: Re-open & trailer checksum verify` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 06: CoreBufferedFile Coherency & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) · [Odin Harness (`bench_xitdb.odin#L2133-L2148`)](../bench_xitdb.odin#L2133-L2148) · [Zig Harness (`bench_xitdb.zig#L2265-L2279`)](../bench_xitdb.zig#L2265-L2279)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 06: CoreBufferedFile Coherency & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) · [Odin Harness (`bench_xitdb.odin#L2421-L2438`)](../bench_xitdb.odin#L2421-L2438) · [Zig Harness (`bench_xitdb.zig#L2265-L2279`)](../bench_xitdb.zig#L2265-L2279)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -29,25 +29,27 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L2133-L2148`](../bench_xitdb.odin#L2133-L2148))
+### Odin ([`benchmarks/bench_xitdb.odin#L2421-L2438`](../bench_xitdb.odin#L2421-L2438))
 
 ```odin
-2133 | 		// 5e. Database re-open & header/root-trailer checksum validation (`database_init` on populated `Core_Memory`)
-2134 | 		reopen_ops := commits * 10
-2135 | 		t_reopen := time.now()
-2136 | 		for _ in 0 ..< reopen_ops {
-2137 | 			reopened_db, r_err := xitdb.database_init(&core, xitdb.sha1_hasher())
-2138 | 			assert(r_err == nil)
-2139 | 			rc := xitdb.database_root_cursor(&reopened_db)
-2140 | 			assert(rc.slot_ptr.slot.tag == .Hash_Map)
-2141 | 		}
-2142 | 		elapsed_reopen := time.since(t_reopen)
-2143 | 
-2144 | 		print_result(Bench_Result{
-2145 | 			name    = "DB: Re-open & trailer checksum verify",
-2146 | 			ops     = reopen_ops,
-2147 | 			elapsed = elapsed_reopen,
-2148 | 		})
+2421 | 		// 5e. Database re-open & header/root-trailer checksum validation (`database_init` on populated `Core_Memory`)
+2422 | 		reopen_ops := commits * 10
+2423 | 		sp_reopen := span_begin()
+2424 | 		for _ in 0 ..< reopen_ops {
+2425 | 			reopened_db, r_err := xitdb.database_init(&core, xitdb.sha1_hasher())
+2426 | 			assert(r_err == nil)
+2427 | 			rc := xitdb.database_root_cursor(&reopened_db)
+2428 | 			assert(rc.slot_ptr.slot.tag == .Hash_Map)
+2429 | 		}
+2430 | 		elapsed_reopen, hw_reopen, has_hw_reopen := span_end(sp_reopen)
+2431 | 
+2432 | 		print_result(Bench_Result{
+2433 | 			name         = "DB: Re-open & trailer checksum verify",
+2434 | 			ops          = reopen_ops,
+2435 | 			elapsed      = elapsed_reopen,
+2436 | 			counters     = hw_reopen,
+2437 | 			has_counters = has_hw_reopen,
+2438 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L2265-L2279`](../bench_xitdb.zig#L2265-L2279))

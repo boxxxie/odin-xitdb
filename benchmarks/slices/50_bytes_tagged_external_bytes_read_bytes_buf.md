@@ -1,6 +1,6 @@
 # #50. `Bytes: Tagged External Bytes read_bytes_buf` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1704-L1713`)](../bench_xitdb.odin#L1704-L1713) · [Zig Harness (`bench_xitdb.zig#L1789-L1798`)](../bench_xitdb.zig#L1789-L1798)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1965-L1977`)](../bench_xitdb.odin#L1965-L1977) · [Zig Harness (`bench_xitdb.zig#L1789-L1798`)](../bench_xitdb.zig#L1789-L1798)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,19 +31,22 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1704-L1713`](../bench_xitdb.odin#L1704-L1713))
+### Odin ([`benchmarks/bench_xitdb.odin#L1965-L1977`](../bench_xitdb.odin#L1965-L1977))
 
 ```odin
-1704 | 		t_thp := time.now()
-1705 | 		for _ in 0 ..< reads {
-1706 | 			obj, _ := xitdb.cursor_read_bytes_buf(t_hp_cur.?, stack_buf[:])
-1707 | 			assert(len(obj.value) == 32 && len(obj.format_tag) == 2)
-1708 | 		}
-1709 | 		print_result(Bench_Result{
-1710 | 			name    = "Bytes: Tagged External Bytes read_bytes_buf",
-1711 | 			ops     = reads,
-1712 | 			elapsed = time.since(t_thp),
-1713 | 		})
+1965 | 		sp_thp := span_begin()
+1966 | 		for _ in 0 ..< reads {
+1967 | 			obj, _ := xitdb.cursor_read_bytes_buf(t_hp_cur.?, stack_buf[:])
+1968 | 			assert(len(obj.value) == 32 && len(obj.format_tag) == 2)
+1969 | 		}
+1970 | 		el_thp, hw_thp, has_hw_thp := span_end(sp_thp)
+1971 | 		print_result(Bench_Result{
+1972 | 			name         = "Bytes: Tagged External Bytes read_bytes_buf",
+1973 | 			ops          = reads,
+1974 | 			elapsed      = el_thp,
+1975 | 			counters     = hw_thp,
+1976 | 			has_counters = has_hw_thp,
+1977 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1789-L1798`](../bench_xitdb.zig#L1789-L1798))

@@ -1,6 +1,6 @@
 # #39. `Replication (genesis -> 200 moments)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 06: CoreBufferedFile Coherency & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) · [Odin Harness (`bench_xitdb.odin#L1418-L1436`)](../bench_xitdb.odin#L1418-L1436) · [Zig Harness (`bench_xitdb.zig#L1388-L1411`)](../bench_xitdb.zig#L1388-L1411)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 06: CoreBufferedFile Coherency & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) · [Odin Harness (`bench_xitdb.odin#L1646-L1666`)](../bench_xitdb.odin#L1646-L1666) · [Zig Harness (`bench_xitdb.zig#L1388-L1411`)](../bench_xitdb.zig#L1388-L1411)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -29,28 +29,30 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1418-L1436`](../bench_xitdb.odin#L1418-L1436))
+### Odin ([`benchmarks/bench_xitdb.odin#L1646-L1666`](../bench_xitdb.odin#L1646-L1666))
 
 ```odin
-1418 | 	// 4a. Replicate all moments to a fresh secondary replica
-1419 | 	rep_core: xitdb.Core = xitdb.core_memory_init()
-1420 | 	defer xitdb.core_destroy(&rep_core)
-1421 | 	rep_db, _ := xitdb.database_init(&rep_core, xitdb.sha1_hasher())
-1422 | 
-1423 | 	t0 := time.now()
-1424 | 	rep_state, _ := xitdb.database_replica_state(&rep_db)
-1425 | 	start_off, _ := xitdb.database_replication_start(&db, rep_state)
-1426 | 	end_off, _ := xitdb.database_committed_size(&db)
-1427 | 	payload, _ := xitdb.database_read_committed_bytes(&db, start_off, end_off, context.temp_allocator)
-1428 | 	_ = xitdb.database_apply_replicated_bytes(&rep_db, start_off, payload)
-1429 | 	elapsed_rep := time.since(t0)
-1430 | 
-1431 | 	print_result(Bench_Result{
-1432 | 		name       = "Replication (genesis -> 200 moments)",
-1433 | 		ops        = moments_count,
-1434 | 		elapsed    = elapsed_rep,
-1435 | 		bytes_used = end_off,
-1436 | 	})
+1646 | 	// 4a. Replicate all moments to a fresh secondary replica
+1647 | 	rep_core: xitdb.Core = xitdb.core_memory_init()
+1648 | 	defer xitdb.core_destroy(&rep_core)
+1649 | 	rep_db, _ := xitdb.database_init(&rep_core, xitdb.sha1_hasher())
+1650 | 
+1651 | 	sp0 := span_begin()
+1652 | 	rep_state, _ := xitdb.database_replica_state(&rep_db)
+1653 | 	start_off, _ := xitdb.database_replication_start(&db, rep_state)
+1654 | 	end_off, _ := xitdb.database_committed_size(&db)
+1655 | 	payload, _ := xitdb.database_read_committed_bytes(&db, start_off, end_off, context.temp_allocator)
+1656 | 	_ = xitdb.database_apply_replicated_bytes(&rep_db, start_off, payload)
+1657 | 	elapsed_rep, hw0, has_hw0 := span_end(sp0)
+1658 | 
+1659 | 	print_result(Bench_Result{
+1660 | 		name         = "Replication (genesis -> 200 moments)",
+1661 | 		ops          = moments_count,
+1662 | 		elapsed      = elapsed_rep,
+1663 | 		bytes_used   = end_off,
+1664 | 		counters     = hw0,
+1665 | 		has_counters = has_hw0,
+1666 | 	})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1388-L1411`](../bench_xitdb.zig#L1388-L1411))
