@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Wire, B-Tree, HAMT & Cursor Integrity (`xitdb/btree.odin`, `xitdb/hamt.odin`, `xitdb/cursor.odin`, `xitdb/database.odin`, `xitdb/types.odin`):**
   - Validated full node blocks, depth/height/count/rank bounds, iterator spines, counted-map bounds, and interior `.Index` tags across reads, splits, joins, and iterations.
   - Hardened wire bounds, negative slot values, OOM and allocation-failure rollback paths, DSL/Datalog parser edge cases, `_pull_range` tag validation, and LuaJIT sandbox/commit-error use-after-free guards.
+- **Odin `dev-2026-11a+` Escape Analysis & ARM64 `-vet` Compatibility (`xitdb/sha_ni_amd64.odin`, `xitdb/sha_ni_other.odin`, `xitdb/types.odin`, `xitdb/database.odin`, `xitdb/cursor.odin`):**
+  - Isolated `amd64`-only `core:simd` / `core:simd/x86` SHA-NI intrinsics into `xitdb/sha_ni_amd64.odin` (`#+build amd64`) with non-`amd64` stubs in `xitdb/sha_ni_other.odin` (`#+build !amd64`), resolving unused-import `-vet` failures on ARM64 targets (macOS/Linux).
+  - Replaced stack-pointed `Database.transaction` with value-embedded `Maybe(Transaction)` and monotonic `tx_seq` / `Write_Cursor.transaction_id`, hardening `.Expired_Transaction` enforcement across subsequent transactions and removing stack-escape warnings.
+  - Reconstructed pointer-free `Slot` values from scalar fields in `slot_with_full`, `_try_encode_inline_data`, and `_encode_writeable_data`, and kept CI/release workflows unpinned on Odin `latest` with cross-OS `-vet -warnings-as-errors`.
 
 ## [2.0.1] - 2026-11-16
 
