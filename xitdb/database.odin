@@ -28,22 +28,14 @@ transaction_is_scratch_position :: proc(t: ^Transaction, pos: Maybe(i64)) -> boo
 // Context_Function is the transaction callback signature.
 Context_Function :: proc(cursor: ^Write_Cursor, user_data: rawptr = nil) -> Error
 
-// Database_Options configures optional non-default behavior when initializing or opening a Database.
-Database_Options :: struct {
-	// Skips CRC-64/XZ root-trailer generation and verification on trusted, non-durable pure memory stores.
-	// Rejected with `.Invalid_Config` on disk-backed cores (`Core_File`, `Core_Buffered_File`).
-	skip_memory_crc: bool,
-}
-
 // Database is the primary handle to a xitdb store.
 Database :: struct {
-	core:            ^Core,
-	hasher:          Hasher,
-	header:          Header,
-	tx_start:        Maybe(i64),
-	tx_seq:          u64,
-	transaction:     Maybe(Transaction),
-	skip_memory_crc: bool,
+	core:        ^Core,
+	hasher:      Hasher,
+	header:      Header,
+	tx_start:    Maybe(i64),
+	tx_seq:      u64,
+	transaction: Maybe(Transaction),
 }
 
 // Path_Part Variants for read_slot_pointer traversal.
@@ -188,35 +180,8 @@ Path_Part :: union {
 	Context,
 }
 
-@(private)
-_core_is_pure_memory :: proc(c: ^Core) -> bool {
-	if c == nil {
-		return false
-	}
-	#partial switch &v in c {
-	case Core_Memory:
-		return true
-	case Core_Overlay:
-		return _core_is_pure_memory(v.base)
-	}
-	return false
-}
-
-// Initialize or open a xitdb database on `core` with default Safe_V2 behavior.
+// Initialize or open a xitdb database on `core`.
 database_init :: proc(core: ^Core, hasher := Hasher{}) -> (db: Database, err: Error) {
-	return database_init_with_options(core, hasher, Database_Options{})
-}
-
-// Initialize or open a xitdb database on `core` with explicit `Database_Options`.
-database_init_with_options :: proc(
-	core: ^Core,
-	hasher := Hasher{},
-	opts := Database_Options{},
-) -> (db: Database, err: Error) {
-	if opts.skip_memory_crc && !_core_is_pure_memory(core) {
-		return {}, .Invalid_Database_Options
-	}
-
 	h := hasher
 	if h.hash_proc == nil && h.hash_size == 0 {
 		h = sha1_hasher()
@@ -236,7 +201,6 @@ database_init_with_options :: proc(
 	db.tx_start = nil
 	db.tx_seq = 0
 	db.transaction = nil
-	db.skip_memory_crc = opts.skip_memory_crc
 
 	core_seek_to(core, 0) or_return
 	length := core_length(core) or_return
@@ -329,18 +293,20 @@ header_read_and_validate :: proc(r: ^Core, expected_hash_size: u16) -> (res: Hea
 	return header, nil
 }
 
+header_validate_hasher :: proc(header: Header, hasher: Hasher) -> Error {
+	if hasher.hash_size != 0 && header.hash_size != hasher.hash_size {
+		return .Invalid_Hash_Size
+	}
+	if hasher.id != 0 && header.hash_id != hasher.id {
+		return .Invalid_Hash_Id
+	}
+	return nil
+}
+
 database_read_and_validate_header :: proc(db: ^Database) -> (res: Header, err: Error) {
 	header := header_read_at(db.core, 0) or_return
 	header_validate(header) or_return
-	if (db.hasher.id == FAST_HASH_ID || header.hash_id == FAST_HASH_ID) && header.hash_id != db.hasher.id {
-		return {}, .Invalid_Hash_Id
-	}
-	if db.hasher.hash_size != 0 && header.hash_size != db.hasher.hash_size {
-		return {}, .Invalid_Hash_Size
-	}
-	if db.hasher.id != 0 && header.hash_id != db.hasher.id {
-		return {}, .Invalid_Hash_Id
-	}
+	header_validate_hasher(header, db.hasher) or_return
 	return header, nil
 }
 
@@ -480,10 +446,8 @@ database_read_root_trailer :: proc(db: ^Database, end: i64) -> (res: Root_Traile
 	b: [ROOT_TRAILER_LENGTH]u8
 	core_read_exact_at(db.core, trailer_pos, b[:]) or_return
 	trailer := root_trailer_from_bytes(b)
-	if !db.skip_memory_crc {
-		if trailer.checksum != compute_root_trailer_checksum(db.header.file_id, trailer_pos, trailer.root, trailer.commit_id) {
-			return {}, .Invalid_Database
-		}
+	if trailer.checksum != compute_root_trailer_checksum(db.header.file_id, trailer_pos, trailer.root, trailer.commit_id) {
+		return {}, .Invalid_Database
 	}
 	tag_validate(trailer.root.tag) or_return
 	return trailer, nil
@@ -492,12 +456,7 @@ database_read_root_trailer :: proc(db: ^Database, end: i64) -> (res: Root_Traile
 database_commit_root :: proc(db: ^Database, root: Slot, commit_id: u64) -> Error {
 	trailer_pos := core_length(db.core) or_return
 	core_seek_to(db.core, trailer_pos) or_return
-	rt := Root_Trailer{
-		checksum  = 0,
-		commit_id = commit_id,
-		root      = root,
-	} if db.skip_memory_crc else new_root_trailer(db.header.file_id, trailer_pos, root, commit_id)
-	trailer := root_trailer_to_bytes(rt)
+	trailer := root_trailer_to_bytes(new_root_trailer(db.header.file_id, trailer_pos, root, commit_id))
 	core_write_all(db.core, trailer[:]) or_return
 	core_sync(db.core) or_return
 	return database_write_root_header(db)

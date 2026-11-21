@@ -755,11 +755,7 @@ database_compact :: proc(db: ^Database, target_core: ^Core, offset_map: ^Offset_
 	h.id = db.header.hash_id
 	h.hash_size = db.header.hash_size
 	h.file_id = 0
-	target = database_init_with_options(
-		target_core,
-		h,
-		Database_Options{skip_memory_crc = db.skip_memory_crc && _core_is_pure_memory(target_core)},
-	) or_return
+	target = database_init(target_core, h) or_return
 
 	target_root := database_read_root_slot(&target) or_return
 	if !slot_empty(target_root) {
@@ -967,6 +963,7 @@ database_apply_replicated :: proc(db: ^Database, start: i64, source_core: ^Core,
 			return .Invalid_Range
 		}
 		header := header_read_and_validate(source_core, db.hasher.hash_size) or_return
+		header_validate_hasher(header, db.hasher) or_return
 		position = database_file_size_start(header.version) + 8
 		if length < position {
 			return .Invalid_Range
@@ -1037,9 +1034,7 @@ database_apply_replicated_bytes :: proc(db: ^Database, start: i64, data: []u8) -
 		copy(hdr_buf[:], data[:HEADER_LENGTH])
 		header := header_from_bytes(hdr_buf)
 		header_validate(header) or_return
-		if db.hasher.hash_size != 0 && header.hash_size != db.hasher.hash_size {
-			return .Invalid_Hash_Size
-		}
+		header_validate_hasher(header, db.hasher) or_return
 		position = database_file_size_start(header.version) + 8
 		if length < position {
 			return .Invalid_Range

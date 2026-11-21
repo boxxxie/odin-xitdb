@@ -17,7 +17,9 @@ import "core:bytes"
 // - B+Tree sorted maps run an ordered merge of both trees that skips any child subtree shared by both
 //   versions: O(changes x log N) when structure is shared (the common case for persistent updates),
 //   degrading gracefully towards O(N) only where node boundaries were re-split.
-// Both cursors must belong to the same database (Slot equality is only meaningful within one file).
+// Both cursors must belong to the same database (Slot equality is only meaningful within one file);
+// passing cursors from different `Database` instances returns `.Invalid_Database` (for a `Core_Overlay`,
+// diff both moments through the overlay's own `Database` handle).
 
 Collection_Change_Op :: enum u8 {
 	Added,
@@ -77,6 +79,15 @@ diff_collection_with_stats :: proc(
 	if stats != nil {
 		stats^ = {}
 	}
+	if cur_a.db != nil && cur_b.db != nil && cur_a.db != cur_b.db {
+		return nil, .Invalid_Database
+	}
+	if (cur_a.slot_ptr.slot.tag != .None || is_root(cur_a.slot_ptr)) && cur_a.db == nil {
+		return nil, .Invalid_Database
+	}
+	if (cur_b.slot_ptr.slot.tag != .None || is_root(cur_b.slot_ptr)) && cur_b.db == nil {
+		return nil, .Invalid_Database
+	}
 	a := cursor_resolved_cursor(cur_a) or_return
 	b := cursor_resolved_cursor(cur_b) or_return
 	out := make([dynamic]Collection_Change, 0, 8, allocator)
@@ -94,7 +105,7 @@ diff_collection_with_stats :: proc(
 		allocator         = allocator,
 		scratch_allocator = scratch_allocator,
 	}
-	if a.slot_ptr.slot == b.slot_ptr.slot && a.db == b.db {
+	if a.slot_ptr.slot == b.slot_ptr.slot {
 		if stats != nil {
 			stats.slots_skipped += 1
 		}
@@ -169,7 +180,7 @@ _diff_index_blocks :: proc(ctx: ^Diff_Ctx, pos_a, pos_b: i64, depth: int = 0) ->
 	if depth > 64 {
 		return .Key_Offset_Exceeded
 	}
-	if pos_a == pos_b && ctx.db_a == ctx.db_b {
+	if pos_a == pos_b {
 		if ctx.stats != nil {
 			ctx.stats.slots_skipped += 1
 		}
@@ -264,6 +275,8 @@ _diff_entry_sets :: proc(ctx: ^Diff_Ctx, ea, eb: []Map_Entry) -> Error {
 				found = true
 				if a.value.slot != b.value.slot {
 					_emit_map(ctx, .Changed, ctx.db_b, a, b) or_return
+				} else if ctx.stats != nil {
+					ctx.stats.slots_skipped += 1
 				}
 				break
 			}
@@ -428,7 +441,6 @@ _diff_sorted_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 	wa, wb: Tree_Walker
 	_walker_init(&wa, a) or_return
 	_walker_init(&wb, b) or_return
-	same_db := ctx.db_a == ctx.db_b
 
 	for {
 		fa := _walker_front(&wa)
@@ -437,7 +449,7 @@ _diff_sorted_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 			return nil
 		}
 		// Shared subtree at the same position in key order: skip it on both sides in O(1).
-		if same_db && fa.kind == .Child && fb.kind == .Child && fa.slot == fb.slot {
+		if fa.kind == .Child && fb.kind == .Child && fa.slot == fb.slot {
 			if ctx.stats != nil {
 				ctx.stats.slots_skipped += 1
 			}
@@ -468,7 +480,7 @@ _diff_sorted_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 			_emit_sorted(ctx, .Removed, ia, {}) or_return
 			_walker_advance(&wa)
 		case:
-			if same_db && fa.slot == fb.slot {
+			if fa.slot == fb.slot {
 				if ctx.stats != nil {
 					ctx.stats.slots_skipped += 1
 				}
