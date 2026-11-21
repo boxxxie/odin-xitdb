@@ -56,6 +56,14 @@ Map_Entry :: struct {
 	value:     Slot_Pointer,
 }
 
+@(private = "file")
+_free_map_entries :: proc(entries: ^[dynamic]Map_Entry, allocator: runtime.Allocator) {
+	for e in entries {
+		delete(e.hash, allocator)
+	}
+	delete(entries^)
+}
+
 diff_collection :: proc(cur_a, cur_b: Read_Cursor, allocator := context.temp_allocator) -> (res: []Collection_Change, err: Error) {
 	return diff_collection_with_stats(cur_a, cur_b, nil, allocator, context.temp_allocator)
 }
@@ -141,6 +149,7 @@ _diff_hash_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 	}
 	// One side is empty: everything on the other side was added / removed.
 	entries := make([dynamic]Map_Entry, 0, 16, ctx.scratch_allocator)
+	defer _free_map_entries(&entries, ctx.scratch_allocator)
 	if has_a {
 		_collect_index_block(ctx, ctx.db_a, pos_a, &entries) or_return
 		for e in entries {
@@ -193,7 +202,9 @@ _diff_index_blocks :: proc(ctx: ^Diff_Ctx, pos_a, pos_b: i64, depth: int = 0) ->
 		}
 		// Mixed / leaf-level difference: materialize both (small) subtrees and diff them by hash.
 		ea := make([dynamic]Map_Entry, 0, 4, ctx.scratch_allocator)
+		defer _free_map_entries(&ea, ctx.scratch_allocator)
 		eb := make([dynamic]Map_Entry, 0, 4, ctx.scratch_allocator)
+		defer _free_map_entries(&eb, ctx.scratch_allocator)
 		_collect_slot(ctx, ctx.db_a, sa, pos_a + i64(i * SLOT_LENGTH), &ea, depth + 1) or_return
 		_collect_slot(ctx, ctx.db_b, sb, pos_b + i64(i * SLOT_LENGTH), &eb, depth + 1) or_return
 		_diff_entry_sets(ctx, ea[:], eb[:]) or_return
@@ -228,7 +239,11 @@ _collect_slot :: proc(ctx: ^Diff_Ctx, db: ^Database, s: Slot, slot_pos: i64, out
 	case .KV_Pair:
 		hash_size := int(db.header.hash_size)
 		hash := make([]u8, hash_size, ctx.scratch_allocator)
-		kv := kv_pair_read_buf_at(db.core, s.value, hash) or_return
+		kv, kv_err := kv_pair_read_buf_at(db.core, s.value, hash)
+		if kv_err != nil {
+			delete(hash, ctx.scratch_allocator)
+			return kv_err
+		}
 		key_pos := s.value + i64(hash_size)
 		append(out, Map_Entry{
 			hash     = kv.hash,
@@ -464,7 +479,11 @@ _diff_sorted_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 			ia := _sorted_entry_info(ctx.db_a, fa.slot) or_return
 			ib := _sorted_entry_info(ctx.db_b, fb.slot) or_return
 			key_b := _read_key_bytes(ctx, ctx.db_b, ib.key_slot, ctx.scratch_allocator) or_return
-			cmp := compare_key(ctx.db_a, ia.key_slot, key_b) or_return
+			cmp, cmp_err := compare_key(ctx.db_a, ia.key_slot, key_b)
+			delete(key_b, ctx.scratch_allocator)
+			if cmp_err != nil {
+				return cmp_err
+			}
 			if cmp < 0 {
 				_emit_sorted(ctx, .Removed, ia, {}) or_return
 				_walker_advance(&wa)
