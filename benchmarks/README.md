@@ -6,34 +6,40 @@ This directory contains the statistical performance benchmark suite for `xitdb`,
 
 ## Running the Benchmarks
 
-Always compile benchmarks with `-o:speed` (and `-microarch:native` to enable target-specific SIMD instructions alongside runtime x86 SHA-NI detection). The primary runner is [`hugi`](../../hugi), which builds the benchmark package, passes `--packet-out` to collect exact integer `u64` batch nanosecond samples (`HPKT\x02`), and ingests runs into `benchmarks/history.hugidb`:
+Always compile benchmarks with `-o:speed` (and `-microarch:native` to enable target-specific SIMD instructions alongside runtime x86 SHA-NI detection). The primary runner is [`hugi`](https://github.com/boxxxie/hugi) (`v0.1.0+`), which reads defaults from [`hugi.json`](../hugi.json) (`runs=7`, `warmup=1`, `-microarch:native`, `db="benchmarks/history.hugidb"`), forwards `--pin`, `--counters`, `--test`, and `--host-warned`, collects exact integer `u64` batch nanosecond samples (`HPKT\x02`) plus host provenance (`HENV`), and ingests runs into `benchmarks/history.hugidb`:
 
 ```bash
-# Build & run all Odin benchmarks with hugi and ingest into benchmarks/history.hugidb
-hugi run benchmarks --db benchmarks/history.hugidb --extra-build-flags "-microarch:native" --runs 5 --warmup 1
+# Inspect host CPU governor, scaling frequency, boost state, SMT, and hugi.json config
+hugi doctor
 
-# Run a single group into an in-memory CoW Core_Overlay branch (zero disk writes to history.hugidb)
-hugi run benchmarks --db benchmarks/history.hugidb --overlay --groups hamt --runs 5 --warmup 1
+# Build & run all Odin benchmarks with hugi (honoring hugi.json: 7 runs, 1 warmup, -microarch:native)
+hugi run --counters
 
-# Run and check immediately for statistical regressions against a baseline commit
-hugi run benchmarks --db benchmarks/history.hugidb --baseline-commit bab4850e4f8e --fail-on-regression
+# Smoke-test the entire benchmark suite (1 run, 0 warmup, skips DB ingest)
+hugi run --test --counters
+
+# Pin execution to CPU 0 and run a single group into an in-memory CoW Core_Overlay branch
+hugi run --overlay --groups hamt --pin 0 --runs 7 --warmup 1
+
+# Run and gate immediately on Hodges-Lehmann CI + Mann-Whitney U regressions against a baseline commit
+hugi run --baseline-commit bab4850e4f8e --fail-on-regression
 
 # Run the embedded LuaJIT benchmark suite via hugi
-hugi run benchmarks --db benchmarks/history.hugidb --lang lua --extra-build-flags "-microarch:native" --runs 5 --warmup 1
+hugi run --lang lua
 ```
 
-You can also invoke the Odin benchmark binary directly (with `--packet-out` for `hugi ingest`, `--quiet` to suppress table stdout, or legacy JSONL output when `--packet-out` is omitted):
+You can also invoke the Odin benchmark binary directly (passing `-collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench`, which `hugi run` injects automatically from [`ols.json`](../ols.json) / `HUGI_HOME`):
 
 ```bash
 # Direct Odin invocation (writes benchmarks/odin.jsonl & benchmarks/history.jsonl)
-odin run benchmarks -o:speed -microarch:native -- --runs 5 --warmup 1
+odin run benchmarks -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench -o:speed -microarch:native -- --runs 7 --warmup 1
 
-# Emit an HPKT binary packet directly for later ingestion
-odin run benchmarks -o:speed -microarch:native -- --runs 10 --warmup 2 --packet-out .tmp/odin.hpk --quiet
+# Emit an HPKT binary packet (with HENV provenance and optional perf counters) for later ingestion
+odin run benchmarks -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench -o:speed -microarch:native -- --runs 7 --warmup 1 --pin 0 --counters --packet-out .tmp/odin.hpk --quiet
 hugi ingest --db benchmarks/history.hugidb .tmp/odin.hpk
 
 # Disable bounds checking in hot loops for peak release numbers
-odin run benchmarks -o:speed -microarch:native -no-bounds-check -- --runs 5
+odin run benchmarks -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench -o:speed -microarch:native -no-bounds-check -- --runs 7
 ```
 
 ### 1v1 Comparison with Upstream Zig (`reference/xitdb-zig` & `reference/xitdb-zig-patched`)
@@ -42,20 +48,20 @@ The upstream Zig reference implementation is tracked in `reference/xitdb-zig` (a
 
 ```bash
 # Run against upstream reference/xitdb-zig (default)
-zig build bench -Doptimize=ReleaseFast -Dcpu=native -- --runs 5 --warmup 1
+zig build bench -Doptimize=ReleaseFast -Dcpu=native -- --runs 7 --warmup 1 --output .tmp/zig.jsonl --no-history
 
 # Run against reference/xitdb-zig-patched
-zig build bench -Doptimize=ReleaseFast -Dcpu=native -Dpatched=true -- --runs 5 --warmup 1
+zig build bench -Doptimize=ReleaseFast -Dcpu=native -Dpatched=true -- --runs 7 --warmup 1 --output .tmp/zig-patched.jsonl --no-history
 
-# Ingest Zig (or Lua) JSONL snapshots into the hugi store and run 1v1 comparison
-hugi ingest --db benchmarks/history.hugidb benchmarks/zig.jsonl
+# Ingest Zig (or Lua) JSONL snapshots into the hugi store with host/runtime provenance and run 1v1 comparison
+hugi ingest --db benchmarks/history.hugidb .tmp/zig.jsonl --capture-host-env --build-flags "-Doptimize=ReleaseFast -Dcpu=native" --runtime-version "zig $(zig version)"
 hugi compare-1v1 --db benchmarks/history.hugidb --langs odin,zig
 ```
 
 Or run both Odin and Zig suites back-to-back with unified commit/run tagging and statistical significance reporting (Welch's `z`-test) using `compare_1v1.py`:
 
 ```bash
-./benchmarks/compare_1v1.py --runs 5 --warmup 1
+./benchmarks/compare_1v1.py --runs 7 --warmup 1
 ```
 
 ### Code-Change-to-Benchmark Mapping (`--plan` & `--affected`)
@@ -72,9 +78,9 @@ Before running benchmarks, `compare_1v1.py` can inspect `git diff` (down to modi
 ./benchmarks/compare_1v1.py --affected HEAD~1..HEAD
 
 # Manually target specific benchmark groups (hamt,lists,sorted_map,compaction,hashers,backends,dsl) or substring filters
-hugi run benchmarks --db benchmarks/history.hugidb --groups dsl --filter "Datalog|Secondary Index"
+hugi run --groups dsl --filter "Datalog|Secondary Index"
 ./benchmarks/compare_1v1.py --groups dsl --filter "Datalog|Secondary Index"
-odin run benchmarks -o:speed -microarch:native -- --groups sorted_map,compaction --filter "Incremental"
+odin run benchmarks -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench -o:speed -microarch:native -- --groups sorted_map,compaction --filter "Incremental"
 ```
 
 ### Multi-Run Pooling, Commit History & Regression Analysis (`history.hugidb`)
@@ -89,11 +95,12 @@ hugi compact --db benchmarks/history.hugidb --keep-hot 0
 # List stored commits, languages, run counts, and sample totals
 hugi history --db benchmarks/history.hugidb --limit 0
 
-# Inspect pooled quantiles, CV%, and footprint for matching benchmarks
+# Inspect pooled quantiles, AR(1) ci95, CV%, sample-shape warnings, and footprint for matching benchmarks
 hugi inspect --db benchmarks/history.hugidb "HAMT Hash_Map"
 
-# Compare two Git commits (Mann-Whitney U + Welch t-test) or compare Odin vs. Zig 1v1
+# Compare two Git commits (Hodges-Lehmann CI + Mann-Whitney U + Welch t-test; add --by-run for per-run medians) or compare Odin vs. Zig 1v1
 hugi compare --db benchmarks/history.hugidb --commits <baseline_sha>..<candidate_sha> --lang odin
+hugi compare --db benchmarks/history.hugidb --commits <baseline_sha>..<candidate_sha> --lang odin --by-run
 hugi compare-1v1 --db benchmarks/history.hugidb --langs odin,zig
 
 # Export pooled longitudinal history (Arrow IPC, Parquet, JSON, JSONL, CSV, TSV, Markdown)
