@@ -1,7 +1,7 @@
 # xitdb for Odin
 
 [![CI](https://github.com/boxxxie/odin-xitdb/actions/workflows/ci.yml/badge.svg)](https://github.com/boxxxie/odin-xitdb/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v2.0.1-blue.svg)](README.md)
+[![Version](https://img.shields.io/badge/version-v2.1.0-blue.svg)](CHANGELOG.md)
 [![Odin](https://img.shields.io/badge/Odin-dev--2026--09%2B-3882D2.svg)](https://odin-lang.org)
 [![Format](https://img.shields.io/badge/xitdb-v2%20wire%20format-5C6BC0.svg)](https://github.com/xit-vcs/xitdb)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -582,9 +582,12 @@ branch none {
 │   ├── CORE_API.md             # Storage cores, wire format, cursors, collections, compaction & replication
 │   ├── DSL.md                  # 5-Layer DSL, Datalog & CLI/REPL reference guide
 │   └── LUAJIT.md               # Embedded LuaJIT 2.1 host & Lua userdata API reference
+├── fuzz/                       # Coverage-guided libFuzzer + ASan/LSan harnesses (dsl, wire, lua)
 ├── tests/                      # 3-layer ATDD executable specification & unit test suite
 ├── benchmarks/                 # Throughput, latency & memory allocation benchmark suite (Odin, Zig, LuaJIT)
-└── reference/xitdb-zig/        # Upstream Zig reference submodule for feature parity & 1v1 benchmarks
+├── reference/xitdb-zig/        # Upstream Zig reference submodule for feature parity & 1v1 benchmarks
+├── CHANGELOG.md                # Release history (Keep a Changelog / SemVer)
+└── hugi.json                   # Default benchmark runner configuration for hugi
 ```
 
 ## Running Tests

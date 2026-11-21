@@ -1,0 +1,172 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Git tag to package and publish (e.g. v2.1.0)'
+        required: true
+        default: 'v2.1.0'
+        type: string
+      draft:
+        description: 'Create GitHub Release as a draft'
+        required: false
+        default: true
+        type: boolean
+      prerelease:
+        description: 'Mark GitHub Release as a prerelease'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Verify, Package & Publish Release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Determine target tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository metadata (CHANGELOG)
+        uses: actions/checkout@v4
+        with:
+          path: meta
+
+      - name: Checkout target tag (${{ steps.meta.outputs.tag }})
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+          fetch-depth: 0
+          path: src
+
+      - name: Checkout hugi v0.1.0 (runner only)
+        uses: actions/checkout@v4
+        with:
+          repository: boxxxie/hugi
+          ref: v0.1.0
+          path: hugi
+          persist-credentials: false
+
+      - name: Init hugi obench submodule
+        run: git -C hugi submodule update --init deps/obench
+
+      - name: Install LuaJIT (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libluajit-5.1-dev
+
+      - name: Setup Odin compiler
+        uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify target tag builds, passes tests, and builds docs
+        working-directory: src
+        env:
+          VER: ${{ steps.meta.outputs.version }}
+        run: |
+          odin check xitdb/luajit -no-entry-point
+          odin check xitdb -no-entry-point -vet -warnings-as-errors
+          odin check cmd/xit -vet -warnings-as-errors
+          odin check tests -no-entry-point -warnings-as-errors
+          odin check benchmarks -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench -vet -warnings-as-errors
+          odin check fuzz/dsl -collection:xitdb=./xitdb -no-entry-point -vet -warnings-as-errors
+          odin check fuzz/wire -collection:xitdb=./xitdb -no-entry-point -vet -warnings-as-errors
+          odin check fuzz/lua -collection:xitdb=./xitdb -no-entry-point -vet -warnings-as-errors
+          odin test tests -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+          odin doc xitdb > /dev/null
+          mkdir -p ../dist
+          odin build cmd/xit -o:speed -out:../dist/xit
+          ACTUAL_VER="$(../dist/xit --version)"
+          EXPECTED_VER="xit v${VER} (xitdb wire format v2)"
+          echo "Built CLI version: ${ACTUAL_VER}"
+          if [ "${ACTUAL_VER}" != "${EXPECTED_VER}" ]; then
+            echo "Error: expected '${EXPECTED_VER}', got '${ACTUAL_VER}'"
+            exit 1
+          fi
+
+      - name: Package source archives and native CLI binary
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          VER="${{ steps.meta.outputs.version }}"
+          mkdir -p dist
+
+          git -C src archive --format=tar.gz --prefix="odin-xitdb-${VER}/" HEAD > "dist/odin-xitdb-${TAG}-src.tar.gz"
+          git -C src archive --format=zip --prefix="odin-xitdb-${VER}/" HEAD > "dist/odin-xitdb-${TAG}-src.zip"
+
+          mkdir -p "dist/xit-${TAG}-linux-x86_64"
+          cp dist/xit src/LICENSE src/README.md src/CHANGELOG.md "dist/xit-${TAG}-linux-x86_64/"
+          tar -C dist -czf "dist/xit-${TAG}-linux-x86_64.tar.gz" "xit-${TAG}-linux-x86_64"
+          rm -rf "dist/xit-${TAG}-linux-x86_64" dist/xit
+
+          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS.txt)
+          ls -lh dist
+
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          VER="${{ steps.meta.outputs.version }}"
+          python3 - "$VER" meta/CHANGELOG.md dist/RELEASE_NOTES.md <<'PY'
+          import re, sys
+
+          version, changelog_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+          text = open(changelog_path, "r", encoding="utf-8").read()
+          pattern = re.compile(
+              rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
+              re.MULTILINE | re.DOTALL,
+          )
+          m = pattern.search(text)
+          if m:
+              body = m.group(1).strip()
+              open(out_path, "w", encoding="utf-8").write(body + "\n")
+              print("found=true")
+          else:
+              print("found=false")
+          PY
+          if [ -s dist/RELEASE_NOTES.md ]; then
+            echo "has_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update GitHub Release
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          FLAGS=()
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.draft }}" = "true" ]; then FLAGS+=(--draft); fi
+            if [ "${{ inputs.prerelease }}" = "true" ]; then FLAGS+=(--prerelease); fi
+          elif [[ "$TAG" == *-* ]]; then
+            FLAGS+=(--prerelease)
+          fi
+
+          if [ "${{ steps.notes.outputs.has_notes }}" = "true" ]; then
+            NOTES_FLAGS=(--notes-file dist/RELEASE_NOTES.md)
+          else
+            NOTES_FLAGS=(--generate-notes)
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS.txt \
+              --title "xitdb ${TAG}" \
+              "${NOTES_FLAGS[@]}" \
+              "${FLAGS[@]}"
+          fi
