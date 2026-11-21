@@ -1,6 +1,6 @@
 # #55. `Path: 4-level nested cursor_write_path` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1823-L1876`)](../bench_xitdb.odin#L1823-L1876) · [Zig Harness (`bench_xitdb.zig#L1903-L1949`)](../bench_xitdb.zig#L1903-L1949)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L2095-L2150`)](../bench_xitdb.odin#L2095-L2150) · [Zig Harness (`bench_xitdb.zig#L1903-L1949`)](../bench_xitdb.zig#L1903-L1949)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,63 +31,65 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1823-L1876`](../bench_xitdb.odin#L1823-L1876))
+### Odin ([`benchmarks/bench_xitdb.odin#L2095-L2150`](../bench_xitdb.odin#L2095-L2150))
 
 ```odin
-1823 | 	// 5d. Deeply Nested Multi-Part Atomic Path Traversal (`cursor_write_path` & `cursor_read_path` across 4 nested collections)
-1824 | 	{
-1825 | 		core: xitdb.Core = xitdb.core_memory_init()
-1826 | 		defer xitdb.core_destroy(&core)
-1827 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
-1828 | 
-1829 | 		path_ops := 500
-1830 | 		h_root := xitdb.database_digest_string(&db, "tenant", context.temp_allocator)
-1831 | 		h_leaf := xitdb.database_digest_string(&db, "metric", context.temp_allocator)
-1832 | 
-1833 | 		Deep_Ctx :: struct {
-1834 | 			ops:    int,
-1835 | 			h_root: []u8,
-1836 | 			h_leaf: []u8,
-1837 | 		}
-1838 | 		dctx := Deep_Ctx{ops = path_ops, h_root = h_root, h_leaf = h_leaf}
-1839 | 
-1840 | 		deep_write_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
-1841 | 			c := (^Deep_Ctx)(user_data)
-1842 | 			// Initialize 4-level hierarchy: Hash_Map -> Array_List -> Linked_Array_List -> Sorted_Map
-1843 | 			_, err := xitdb.cursor_write_path(cursor, []xitdb.Path_Part{
-1844 | 				xitdb.Hash_Map_Init{counted = false, set = false},
-1845 | 				xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = c.h_root}},
-1846 | 				xitdb.Array_List_Init{},
-1847 | 				xitdb.Array_List_Append{},
-1848 | 				xitdb.Linked_Array_List_Init{},
-1849 | 				xitdb.Linked_Array_List_Append{},
-1850 | 				xitdb.Sorted_Map_Init{set = false},
-1851 | 			})
-1852 | 			if err != nil do return err
-1853 | 
-1854 | 			skey := transmute([]u8)string("deep-sorted-key")
-1855 | 			for i in 0 ..< c.ops {
-1856 | 				_, err = xitdb.cursor_write_path(cursor, []xitdb.Path_Part{
-1857 | 					xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = c.h_root}},
-1858 | 					xitdb.Array_List_Get{index = 0},
-1859 | 					xitdb.Linked_Array_List_Get{index = 0},
-1860 | 					xitdb.Sorted_Map_Get{target = xitdb.Sorted_Map_Get_Value{key = skey}},
-1861 | 					xitdb.Write_Data{data = u64(i)},
-1862 | 				})
-1863 | 				if err != nil do return err
-1864 | 			}
-1865 | 			return nil
-1866 | 		}
-1867 | 
-1868 | 		t_dw := time.now()
-1869 | 		_ = xitdb.database_run_context(&db, deep_write_cb, &dctx)
-1870 | 		elapsed_dw := time.since(t_dw)
-1871 | 
-1872 | 		print_result(Bench_Result{
-1873 | 			name    = "Path: 4-level nested cursor_write_path",
-1874 | 			ops     = path_ops,
-1875 | 			elapsed = elapsed_dw,
-1876 | 		})
+2095 | 	// 5d. Deeply Nested Multi-Part Atomic Path Traversal (`cursor_write_path` & `cursor_read_path` across 4 nested collections)
+2096 | 	{
+2097 | 		core: xitdb.Core = xitdb.core_memory_init()
+2098 | 		defer xitdb.core_destroy(&core)
+2099 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
+2100 | 
+2101 | 		path_ops := 500
+2102 | 		h_root := xitdb.database_digest_string(&db, "tenant", context.temp_allocator)
+2103 | 		h_leaf := xitdb.database_digest_string(&db, "metric", context.temp_allocator)
+2104 | 
+2105 | 		Deep_Ctx :: struct {
+2106 | 			ops:    int,
+2107 | 			h_root: []u8,
+2108 | 			h_leaf: []u8,
+2109 | 		}
+2110 | 		dctx := Deep_Ctx{ops = path_ops, h_root = h_root, h_leaf = h_leaf}
+2111 | 
+2112 | 		deep_write_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+2113 | 			c := (^Deep_Ctx)(user_data)
+2114 | 			// Initialize 4-level hierarchy: Hash_Map -> Array_List -> Linked_Array_List -> Sorted_Map
+2115 | 			_, err := xitdb.cursor_write_path(cursor, []xitdb.Path_Part{
+2116 | 				xitdb.Hash_Map_Init{counted = false, set = false},
+2117 | 				xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = c.h_root}},
+2118 | 				xitdb.Array_List_Init{},
+2119 | 				xitdb.Array_List_Append{},
+2120 | 				xitdb.Linked_Array_List_Init{},
+2121 | 				xitdb.Linked_Array_List_Append{},
+2122 | 				xitdb.Sorted_Map_Init{set = false},
+2123 | 			})
+2124 | 			if err != nil do return err
+2125 | 
+2126 | 			skey := transmute([]u8)string("deep-sorted-key")
+2127 | 			for i in 0 ..< c.ops {
+2128 | 				_, err = xitdb.cursor_write_path(cursor, []xitdb.Path_Part{
+2129 | 					xitdb.Hash_Map_Get{target = xitdb.Hash_Map_Get_Value{hash = c.h_root}},
+2130 | 					xitdb.Array_List_Get{index = 0},
+2131 | 					xitdb.Linked_Array_List_Get{index = 0},
+2132 | 					xitdb.Sorted_Map_Get{target = xitdb.Sorted_Map_Get_Value{key = skey}},
+2133 | 					xitdb.Write_Data{data = u64(i)},
+2134 | 				})
+2135 | 				if err != nil do return err
+2136 | 			}
+2137 | 			return nil
+2138 | 		}
+2139 | 
+2140 | 		sp_dw := span_begin()
+2141 | 		_ = xitdb.database_run_context(&db, deep_write_cb, &dctx)
+2142 | 		elapsed_dw, hw_dw, has_hw_dw := span_end(sp_dw)
+2143 | 
+2144 | 		print_result(Bench_Result{
+2145 | 			name         = "Path: 4-level nested cursor_write_path",
+2146 | 			ops          = path_ops,
+2147 | 			elapsed      = elapsed_dw,
+2148 | 			counters     = hw_dw,
+2149 | 			has_counters = has_hw_dw,
+2150 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1903-L1949`](../bench_xitdb.zig#L1903-L1949))
@@ -187,7 +189,7 @@
 | `xitdb/database.odin` | `is_root` | `depth 1` (from `cursor_write_path`, `cursor_check_writable`, `cursor_reload_slot`) | 6 | [`xitdb/database.odin#L460-L465`](../../xitdb/database.odin#L460-L465) |
 | `xitdb/database.odin` | `init_tag` | `depth 1` (from `cursor_write_path`, `read_slot_pointer`) | 16 | [`xitdb/database.odin#L467-L482`](../../xitdb/database.odin#L467-L482) |
 | `xitdb/cursor.odin` | `cursor_reload_slot` | `depth 1` (from `cursor_write_path`) | 9 | [`xitdb/cursor.odin#L106-L114`](../../xitdb/cursor.odin#L106-L114) |
-| `xitdb/database.odin` | `read_slot_pointer` | `depth 1` (from `cursor_write_path`) | 67 | [`xitdb/database.odin#L595-L661`](../../xitdb/database.odin#L595-L661) |
+| `xitdb/database.odin` | `read_slot_pointer` | `depth 1` (from `cursor_write_path`) | 67 | [`xitdb/database.odin#L603-L669`](../../xitdb/database.odin#L603-L669) |
 | `xitdb/database.odin` | `database_truncate` | `depth 1` (from `cursor_write_path`) | 5 | [`xitdb/database.odin#L396-L400`](../../xitdb/database.odin#L396-L400) |
 | `xitdb/cursor.odin` | `new_write_cursor` | `depth 1` (from `cursor_write_path`, `_exec_path_part`) | 13 | [`xitdb/cursor.odin#L30-L42`](../../xitdb/cursor.odin#L30-L42) |
 | `xitdb/database.odin` | `database_root_cursor` | `depth 1` (from `database_run_context`) | 16 | [`xitdb/database.odin#L324-L339`](../../xitdb/database.odin#L324-L339) |
@@ -211,7 +213,7 @@
 | `xitdb/core.odin` | `core_write_slot` | `depth 2` (from `read_slot_pointer`) | 15 | [`xitdb/core.odin#L1097-L1111`](../../xitdb/core.odin#L1097-L1111) |
 | `xitdb/database.odin` | `init_part_for` | `depth 2` (from `read_slot_pointer`) | 21 | [`xitdb/database.odin#L484-L504`](../../xitdb/database.odin#L484-L504) |
 | `xitdb/core.odin` | `core_read_slot_raw_at` | `depth 2` (from `read_slot_pointer`, `core_read_slot_at`) | 24 | [`xitdb/core.odin#L1179-L1202`](../../xitdb/core.odin#L1179-L1202) |
-| `xitdb/database.odin` | `_exec_path_part` | `depth 2` (from `read_slot_pointer`) | 743 | [`xitdb/database.odin#L663-L1405`](../../xitdb/database.odin#L663-L1405) |
+| `xitdb/database.odin` | `_exec_path_part` | `depth 2` (from `read_slot_pointer`) | 788 | [`xitdb/database.odin#L671-L1458`](../../xitdb/database.odin#L671-L1458) |
 | `xitdb/database.odin` | `database_read_root_slot` | `depth 2` (from `database_root_cursor`) | 4 | [`xitdb/database.odin#L424-L427`](../../xitdb/database.odin#L424-L427) |
 | `xitdb/core.odin` | `core_read_exact_at` | `depth 3` (from `header_read_at`, `core_read_i64_at`, `core_read_slot_raw_at`) | 46 | [`xitdb/core.odin#L710-L755`](../../xitdb/core.odin#L710-L755) |
 | `xitdb/types.odin` | `header_from_bytes` | `depth 3` (from `header_read_at`) | 15 | [`xitdb/types.odin#L961-L975`](../../xitdb/types.odin#L961-L975) |

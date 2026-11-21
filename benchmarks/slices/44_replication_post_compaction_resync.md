@@ -1,6 +1,6 @@
 # #44. `Replication (Post-compaction resync)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 06: CoreBufferedFile Coherency & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) · [Odin Harness (`bench_xitdb.odin#L1569-L1594`)](../bench_xitdb.odin#L1569-L1594) · [Zig Harness (`bench_xitdb.zig#L1605-L1635`)](../bench_xitdb.zig#L1605-L1635)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 06: CoreBufferedFile Coherency & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) · [Odin Harness (`bench_xitdb.odin#L1817-L1844`)](../bench_xitdb.odin#L1817-L1844) · [Zig Harness (`bench_xitdb.zig#L1605-L1635`)](../bench_xitdb.zig#L1605-L1635)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -29,35 +29,37 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1569-L1594`](../bench_xitdb.odin#L1569-L1594))
+### Odin ([`benchmarks/bench_xitdb.odin#L1817-L1844`](../bench_xitdb.odin#L1817-L1844))
 
 ```odin
-1569 | 		// 4f. Post-compaction replica resync (`database_replication_start` divergence detection + full replacement sync)
-1570 | 		resync_rep_core: xitdb.Core = xitdb.core_memory_init()
-1571 | 		defer xitdb.core_destroy(&resync_rep_core)
-1572 | 		resync_rep_db, _ := xitdb.database_init(&resync_rep_core, xitdb.sha1_hasher())
-1573 | 
-1574 | 		// First sync replica with pre-compaction DAG primary
-1575 | 		orig_end, _ := xitdb.database_committed_size(&dag_db)
-1576 | 		orig_bytes, _ := xitdb.database_read_committed_bytes(&dag_db, 0, orig_end, context.temp_allocator)
-1577 | 		_ = xitdb.database_apply_replicated_bytes(&resync_rep_db, 0, orig_bytes)
-1578 | 
-1579 | 		// Now measure resync against the compacted DAG primary (`dag_comp_db`)
-1580 | 		t_resync := time.now()
-1581 | 		rep_state, _ := xitdb.database_replica_state(&resync_rep_db)
-1582 | 		resync_start, _ := xitdb.database_replication_start(&dag_comp_db, rep_state)
-1583 | 		assert(resync_start == 0)
-1584 | 		comp_end, _ := xitdb.database_committed_size(&dag_comp_db)
-1585 | 		comp_payload, _ := xitdb.database_read_committed_buf(&dag_comp_db, resync_start, comp_end, orig_bytes)
-1586 | 		_ = xitdb.database_apply_replicated_bytes(&resync_rep_db, resync_start, comp_payload)
-1587 | 		elapsed_resync := time.since(t_resync)
-1588 | 
-1589 | 		print_result(Bench_Result{
-1590 | 			name       = "Replication (Post-compaction resync)",
-1591 | 			ops        = 1,
-1592 | 			elapsed    = elapsed_resync,
-1593 | 			bytes_used = i64(len(comp_payload)),
-1594 | 		})
+1817 | 		// 4f. Post-compaction replica resync (`database_replication_start` divergence detection + full replacement sync)
+1818 | 		resync_rep_core: xitdb.Core = xitdb.core_memory_init()
+1819 | 		defer xitdb.core_destroy(&resync_rep_core)
+1820 | 		resync_rep_db, _ := xitdb.database_init(&resync_rep_core, xitdb.sha1_hasher())
+1821 | 
+1822 | 		// First sync replica with pre-compaction DAG primary
+1823 | 		orig_end, _ := xitdb.database_committed_size(&dag_db)
+1824 | 		orig_bytes, _ := xitdb.database_read_committed_bytes(&dag_db, 0, orig_end, context.temp_allocator)
+1825 | 		_ = xitdb.database_apply_replicated_bytes(&resync_rep_db, 0, orig_bytes)
+1826 | 
+1827 | 		// Now measure resync against the compacted DAG primary (`dag_comp_db`)
+1828 | 		sp_resync := span_begin()
+1829 | 		resync_rep_state, _ := xitdb.database_replica_state(&resync_rep_db)
+1830 | 		resync_start, _ := xitdb.database_replication_start(&dag_comp_db, resync_rep_state)
+1831 | 		assert(resync_start == 0)
+1832 | 		comp_end, _ := xitdb.database_committed_size(&dag_comp_db)
+1833 | 		comp_payload, _ := xitdb.database_read_committed_buf(&dag_comp_db, resync_start, comp_end, orig_bytes)
+1834 | 		_ = xitdb.database_apply_replicated_bytes(&resync_rep_db, resync_start, comp_payload)
+1835 | 		elapsed_resync, hw_resync, has_hw_resync := span_end(sp_resync)
+1836 | 
+1837 | 		print_result(Bench_Result{
+1838 | 			name         = "Replication (Post-compaction resync)",
+1839 | 			ops          = 1,
+1840 | 			elapsed      = elapsed_resync,
+1841 | 			bytes_used   = i64(len(comp_payload)),
+1842 | 			counters     = hw_resync,
+1843 | 			has_counters = has_hw_resync,
+1844 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1605-L1635`](../bench_xitdb.zig#L1605-L1635))

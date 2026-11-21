@@ -18,10 +18,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Checkout hugi v0.1.0 (runner only)
+        uses: actions/checkout@v4
+        with:
+          repository: boxxxie/hugi
+          ref: v0.1.0
+          path: .tmp/hugi
+          persist-credentials: false
+
+      - name: Init hugi obench submodule
+        run: git -C .tmp/hugi submodule update --init deps/obench
+
       - name: Setup Odin
         uses: laytan/setup-odin@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          release: dev-2026-10
 
       - name: Install LuaJIT (Linux)
         if: runner.os == 'Linux'
@@ -58,7 +70,19 @@ jobs:
           odin check cmd/xit
 
       - name: Check benchmark suite syntax & types
-        run: odin check benchmarks
+        run: odin check benchmarks -collection:hugi=.tmp/hugi/hugi -collection:obench=.tmp/hugi/deps/obench/obench
+
+      - name: Strict static checks (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          odin check xitdb -no-entry-point -vet -warnings-as-errors
+          odin check cmd/xit -vet -warnings-as-errors
+          odin check tests -no-entry-point -warnings-as-errors
+          odin check benchmarks -collection:hugi=.tmp/hugi/hugi -collection:obench=.tmp/hugi/deps/obench/obench -vet -warnings-as-errors
+          odin check fuzz/dsl -collection:xitdb=./xitdb -no-entry-point -vet -warnings-as-errors
+          odin check fuzz/wire -collection:xitdb=./xitdb -no-entry-point -vet -warnings-as-errors
+          odin check fuzz/lua -collection:xitdb=./xitdb -no-entry-point -vet -warnings-as-errors
+          odin doc xitdb > /dev/null
 
       - name: Run ATDD specification suite
-        run: odin test tests
+        run: odin test tests -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true

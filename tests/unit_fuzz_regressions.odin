@@ -321,14 +321,14 @@ unit_fuzz_regression_wire_corrupt_bytes_length_and_cyclic_nodes_no_oom :: proc(t
 				break
 			}
 		}
-		testing.expect_value(t, loop_err, xitdb.Xitdb_Error.Max_Shift_Exceeded)
+		testing.expect_value(t, loop_err, xitdb.Xitdb_Error.Key_Offset_Exceeded)
 
 		empty_cur := xitdb.Read_Cursor{db = &db}
 		_, diff_err := xitdb.diff_collection(empty_cur, hrc.?, context.temp_allocator)
 		testing.expect_value(t, diff_err, xitdb.Xitdb_Error.Key_Offset_Exceeded)
 	}
 
-	// 3. Self-cyclic B-Tree .Branch node stops cleanly with .Max_Shift_Exceeded
+	// 3. Self-cyclic B-Tree .Branch node stops cleanly with .Invalid_BTree_Node
 	{
 		mut := make([]u8, len(seed_bytes), context.temp_allocator)
 		copy(mut, seed_bytes)
@@ -348,19 +348,10 @@ unit_fuzz_regression_wire_corrupt_bytes_length_and_cyclic_nodes_no_oom :: proc(t
 		testing.expect_value(t, ll_init_err, nil)
 
 		_, get_err := xitdb.linked_array_list_get_cursor(ll_read, 0)
-		testing.expect_value(t, get_err, xitdb.Xitdb_Error.Max_Shift_Exceeded)
+		testing.expect_value(t, get_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
 
-		it, it_err := xitdb.linked_array_list_iterator(ll_read)
-		testing.expect_value(t, it_err, nil)
-		loop_err: xitdb.Error
-		for _ in 0 ..< 64 {
-			_, nerr := xitdb.cursor_iterator_next(&it)
-			if nerr != nil {
-				loop_err = nerr
-				break
-			}
-		}
-		testing.expect_value(t, loop_err, xitdb.Xitdb_Error.Max_Shift_Exceeded)
+		_, it_err := xitdb.linked_array_list_iterator(ll_read)
+		testing.expect_value(t, it_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
 	}
 }
 
@@ -578,24 +569,35 @@ unit_fuzz_regression_diff_corrupt_array_count_and_btree_write_guards :: proc(t: 
 
 	seed_bytes := xitdb.core_memory_bytes(&src_core)
 
-	// 1. Corrupted 1_000_000_000 header.size on moment 1's Array_List & Linked_Array_List must not spin/OOM in diff_moments
+	// 1. Corrupted 1_000_000_000 header.size on moment 1's Array_List & Linked_Array_List must fail cleanly without spin/OOM in diff_moments
 	{
-		mut := make([]u8, len(seed_bytes), context.temp_allocator)
-		copy(mut, seed_bytes)
+		mut_arr := make([]u8, len(seed_bytes), context.temp_allocator)
+		copy(mut_arr, seed_bytes)
 		arr_pos := arr_c.?.slot_ptr.slot.value
+		endian.put_u64(mut_arr[arr_pos : arr_pos + 8], .Big, 1_000_000_000)
+
+		mc_arr := xitdb.core_memory_init_from_bytes(mut_arr, context.allocator, reserve_size = 0)
+		defer xitdb.core_destroy(&mc_arr)
+		mdb_arr, mda_err := xitdb.database_init(&mc_arr, xitdb.sha1_hasher())
+		testing.expect_value(t, mda_err, nil)
+
+		arr_diffs, arr_diff_err := xitdb.diff_moments(&mdb_arr, 0, 1, false, context.allocator)
+		testing.expect_value(t, arr_diff_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		xitdb.diff_changes_destroy(arr_diffs, context.allocator)
+
+		mut_ll := make([]u8, len(seed_bytes), context.temp_allocator)
+		copy(mut_ll, seed_bytes)
 		ll_pos := ll_c.?.slot_ptr.slot.value
-		endian.put_u64(mut[arr_pos : arr_pos + 8], .Big, 1_000_000_000)
-		endian.put_u64(mut[ll_pos : ll_pos + 8], .Big, 1_000_000_000)
+		endian.put_u64(mut_ll[ll_pos : ll_pos + 8], .Big, 1_000_000_000)
 
-		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 0)
-		defer xitdb.core_destroy(&mc)
-		mdb, md_err := xitdb.database_init(&mc, xitdb.sha1_hasher())
-		testing.expect_value(t, md_err, nil)
+		mc_ll := xitdb.core_memory_init_from_bytes(mut_ll, context.allocator, reserve_size = 0)
+		defer xitdb.core_destroy(&mc_ll)
+		mdb_ll, mdl_err := xitdb.database_init(&mc_ll, xitdb.sha1_hasher())
+		testing.expect_value(t, mdl_err, nil)
 
-		diffs, diff_err := xitdb.diff_moments(&mdb, 0, 1, false, context.allocator)
-		testing.expect_value(t, diff_err, nil)
-		testing.expect(t, len(diffs) <= 8)
-		xitdb.diff_changes_destroy(diffs, context.allocator)
+		ll_diffs, ll_diff_err := xitdb.diff_moments(&mdb_ll, 0, 1, false, context.allocator)
+		testing.expect_value(t, ll_diff_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
+		xitdb.diff_changes_destroy(ll_diffs, context.allocator)
 	}
 
 	// 2. Self-cyclic Sorted_Map .Branch root stops safely on writes/removals (no stack overflow)
@@ -607,7 +609,7 @@ unit_fuzz_regression_diff_corrupt_array_count_and_btree_write_guards :: proc(t: 
 		first_child_pos := root_ptr + xitdb.BTREE_NODE_HEADER_SIZE
 		copy(mut[first_child_pos : first_child_pos + xitdb.SLOT_LENGTH], self_child[:])
 
-		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 0)
+		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 1024 * 1024)
 		defer xitdb.core_destroy(&mc)
 		mdb, md_err := xitdb.database_init(&mc, xitdb.sha1_hasher())
 		testing.expect_value(t, md_err, nil)
@@ -617,14 +619,14 @@ unit_fuzz_regression_diff_corrupt_array_count_and_btree_write_guards :: proc(t: 
 		testing.expect_value(t, xitdb.tx_put(&wtx, `$sm["k_00"]`, "mutated"), nil)
 		wrep, werr := xitdb.tx_commit(&wtx)
 		xitdb.tx_report_destroy(&wrep, context.allocator)
-		testing.expect_value(t, werr, xitdb.Xitdb_Error.Max_Shift_Exceeded)
+		testing.expect_value(t, werr, xitdb.Xitdb_Error.Invalid_BTree_Node)
 
 		rtx := xitdb.tx_init(&mdb, 1, false, context.allocator)
 		defer xitdb.tx_destroy(&rtx)
 		testing.expect_value(t, xitdb.tx_rm(&rtx, `$sm["k_00"]`), nil)
 		rrep, rerr := xitdb.tx_commit(&rtx)
 		xitdb.tx_report_destroy(&rrep, context.allocator)
-		testing.expect_value(t, rerr, xitdb.Xitdb_Error.Max_Shift_Exceeded)
+		testing.expect_value(t, rerr, xitdb.Xitdb_Error.Invalid_BTree_Node)
 	}
 
 	// 3. num == 0 corrupted .Branch node in Sorted_Map & Linked_Array_List rejects writes cleanly
@@ -637,7 +639,7 @@ unit_fuzz_regression_diff_corrupt_array_count_and_btree_write_guards :: proc(t: 
 		mut[ll_hdr.root_ptr] = u8(xitdb.BTree_Node_Kind.Branch)
 		mut[ll_hdr.root_ptr + 1] = 0
 
-		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 0)
+		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 1024 * 1024)
 		defer xitdb.core_destroy(&mc)
 		mdb, md_err := xitdb.database_init(&mc, xitdb.sha1_hasher())
 		testing.expect_value(t, md_err, nil)
@@ -814,4 +816,540 @@ unit_fuzz_regression_dsl_persistent_allocator_and_where_boundaries :: proc(t: ^t
 	mut_mc, _ := xitdb.select_cursor(&mut_db, "@0")
 	_, bad_pull_err := xitdb.pull(mut_mc.?, "{.items[0..2]}", context.allocator)
 	testing.expect(t, bad_pull_err != nil)
+}
+
+@(test)
+unit_fuzz_regression_btree_sibling_cycles_concat_max_size_and_shrink :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	// Build 40-item Linked_Array_List (ll), 40-item Sorted_Map (sm), and 300-item height-2 Linked_Array_List (big_ll)
+	cm := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&cm)
+	db, init_err := xitdb.database_init(&cm, xitdb.sha1_hasher())
+	testing.expect_value(t, init_err, nil)
+
+	tx := xitdb.tx_init(&db, nil, false, context.allocator)
+	defer xitdb.tx_destroy(&tx)
+	for i in 0 ..< 40 {
+		testing.expect_value(t, xitdb.tx_put(&tx, fmt.tprintf(".ll[[%d]]", i), fmt.tprintf("l_%02d", i)), nil)
+		testing.expect_value(t, xitdb.tx_put(&tx, fmt.tprintf(`$sm["k_%02d"]`, i), fmt.tprintf("v_%02d", i)), nil)
+	}
+	for i in 0 ..< 300 {
+		testing.expect_value(t, xitdb.tx_put(&tx, fmt.tprintf(".big[[%d]]", i), i64(i)), nil)
+	}
+	testing.expect_value(t, xitdb.tx_put(&tx, `.concat_b[[0]]`, "b0"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx, `.concat_b[[1]]`, "b1"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx, `.height1[[0]]`, "h0"), nil)
+	for i in 1 ..< 20 {
+		testing.expect_value(t, xitdb.tx_put(&tx, fmt.tprintf(`.height1[[%d]]`, i), fmt.tprintf("h%d", i)), nil)
+	}
+	rep, cerr := xitdb.tx_commit(&tx)
+	testing.expect_value(t, cerr, nil)
+	xitdb.tx_report_destroy(&rep, context.allocator)
+
+	ll_c, _ := xitdb.select_cursor(&db, "@0.ll")
+	sm_c, _ := xitdb.select_cursor(&db, "@0$sm")
+	big_c, _ := xitdb.select_cursor(&db, "@0.big")
+	cb_c, _ := xitdb.select_cursor(&db, "@0.concat_b")
+
+	read_hdr :: proc(c: ^xitdb.Core, hdr_pos: i64) -> xitdb.BTree_Header {
+		hb: [xitdb.BTREE_HEADER_LENGTH]u8
+		_ = xitdb.core_read_exact_at(c, hdr_pos, hb[:])
+		h, _ := xitdb.btree_header_from_bytes(hb)
+		return h
+	}
+
+	ll_hdr := read_hdr(&cm, ll_c.?.slot_ptr.slot.value)
+	sm_hdr := read_hdr(&cm, sm_c.?.slot_ptr.slot.value)
+	big_hdr := read_hdr(&cm, big_c.?.slot_ptr.slot.value)
+	_ = read_hdr(&cm, cb_c.?.slot_ptr.slot.value)
+	seed := xitdb.core_memory_bytes(&cm)
+
+	// 1. children[cycle_idx] sibling cycle in Linked_Array_List & Sorted_Map rejects on horizontal step (forward & reverse)
+	{
+		mut := make([]u8, len(seed), context.temp_allocator)
+		copy(mut, seed)
+
+		ll_root, ll_rerr := xitdb.read_btree_node(&db, ll_hdr.root_ptr)
+		testing.expect_value(t, ll_rerr, nil)
+		testing.expect(t, ll_root.kind == .Branch && ll_root.num >= 3, "Expected >= 3 leaves in 40-item Linked_Array_List")
+		ll_cycle_idx := ll_root.num - 2
+		ll_child_pos := ll_hdr.root_ptr + xitdb.BTREE_NODE_HEADER_SIZE + i64(ll_cycle_idx) * xitdb.SLOT_LENGTH
+		ll_self := xitdb.slot_to_bytes(xitdb.Slot{value = ll_hdr.root_ptr, tag = .Index})
+		copy(mut[ll_child_pos : ll_child_pos + xitdb.SLOT_LENGTH], ll_self[:])
+
+		sm_root, sm_rerr := xitdb.read_sorted_node(&db, sm_hdr.root_ptr)
+		testing.expect_value(t, sm_rerr, nil)
+		testing.expect(t, sm_root.kind == .Branch && sm_root.num >= 3, "Expected >= 3 leaves in 40-item Sorted_Map")
+		sm_cycle_idx := sm_root.num - 2
+		sm_child_pos := sm_hdr.root_ptr + xitdb.BTREE_NODE_HEADER_SIZE + i64(sm_cycle_idx) * xitdb.SLOT_LENGTH
+		sm_self := xitdb.slot_to_bytes(xitdb.Slot{value = sm_hdr.root_ptr, tag = .Index})
+		copy(mut[sm_child_pos : sm_child_pos + xitdb.SLOT_LENGTH], sm_self[:])
+
+		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 1024 * 1024)
+		defer xitdb.core_destroy(&mc)
+		mdb, md_err := xitdb.database_init(&mc, xitdb.sha1_hasher())
+		testing.expect_value(t, md_err, nil)
+
+		mlc, _ := xitdb.select_cursor(&mdb, "@0.ll")
+		ll_fwd, ll_fi_err := xitdb.cursor_iterator(mlc.?)
+		testing.expect_value(t, ll_fi_err, nil)
+		ll_before_cycle: i64 = 0
+		for k in 0 ..< ll_cycle_idx {
+			ll_before_cycle += ll_root.counts[k]
+		}
+		for _ in 0 ..< ll_before_cycle {
+			elem, step_err := xitdb.cursor_iterator_next(&ll_fwd)
+			testing.expect_value(t, step_err, nil)
+			testing.expect(t, elem != nil, "Expected valid Linked_Array_List items before cycle")
+		}
+		_, ll_cycle_err := xitdb.cursor_iterator_next(&ll_fwd)
+		testing.expect_value(t, ll_cycle_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
+		testing.expect_value(t, ll_fwd.index, ll_before_cycle)
+
+		ll_rev, ll_ri_err := xitdb.cursor_iterator_reverse(mlc.?)
+		testing.expect_value(t, ll_ri_err, nil)
+		last_cnt := ll_root.counts[ll_root.num - 1]
+		for _ in 0 ..< last_cnt {
+			elem, step_err := xitdb.cursor_iterator_prev(&ll_rev)
+			testing.expect_value(t, step_err, nil)
+			testing.expect(t, elem != nil, "Expected valid tail leaf before cycle in reverse")
+		}
+		_, ll_rcycle_err := xitdb.cursor_iterator_prev(&ll_rev)
+		testing.expect_value(t, ll_rcycle_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
+		testing.expect_value(t, ll_rev.index, i64(40) - last_cnt)
+
+		msc, _ := xitdb.select_cursor(&mdb, "@0$sm")
+		sm_fwd, sm_fi_err := xitdb.cursor_iterator(msc.?)
+		testing.expect_value(t, sm_fi_err, nil)
+		sm_before_cycle: i64 = 0
+		for k in 0 ..< sm_cycle_idx {
+			sm_before_cycle += sm_root.counts[k]
+		}
+		for _ in 0 ..< sm_before_cycle {
+			elem, step_err := xitdb.cursor_iterator_next(&sm_fwd)
+			testing.expect_value(t, step_err, nil)
+			testing.expect(t, elem != nil, "Expected valid Sorted_Map items before cycle")
+		}
+		_, sm_cycle_err := xitdb.cursor_iterator_next(&sm_fwd)
+		testing.expect_value(t, sm_cycle_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
+		testing.expect_value(t, sm_fwd.index, sm_before_cycle)
+
+		sm_rev, sm_ri_err := xitdb.cursor_iterator_reverse(msc.?)
+		testing.expect_value(t, sm_ri_err, nil)
+		sm_last_cnt := sm_root.counts[sm_root.num - 1]
+		for _ in 0 ..< sm_last_cnt {
+			elem, step_err := xitdb.cursor_iterator_prev(&sm_rev)
+			testing.expect_value(t, step_err, nil)
+			testing.expect(t, elem != nil, "Expected valid Sorted_Map tail leaf before cycle in reverse")
+		}
+		_, sm_rcycle_err := xitdb.cursor_iterator_prev(&sm_rev)
+		testing.expect_value(t, sm_rcycle_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
+	}
+
+	// 2. sorted_reverse_from_key when leaf_count == 0 && before > 0 (valid stale-separator leaf + height validation on parent step)
+	{
+		mut := make([]u8, len(seed), context.temp_allocator)
+		copy(mut, seed)
+		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 1024 * 1024)
+		defer xitdb.core_destroy(&mc)
+		mdb, md_err := xitdb.database_init(&mc, xitdb.sha1_hasher())
+		testing.expect_value(t, md_err, nil)
+
+		sm_root_pre, _ := xitdb.read_sorted_node(&mdb, sm_hdr.root_ptr)
+		leaf1_pre, _ := xitdb.read_sorted_node(&mdb, sm_root_pre.children[1].value)
+		k0_slot, _ := xitdb.sorted_entry_key_slot(&mdb, leaf1_pre.entries[0])
+		k0_rc := xitdb.Read_Cursor{slot_ptr = xitdb.Slot_Pointer{slot = k0_slot}, db = &mdb}
+		sep_key, _ := xitdb.cursor_read_string(k0_rc, 0, context.temp_allocator)
+
+		// Delete sep_key so branch sep[1] remains equal to sep_key while leaf1's first key is now > sep_key
+		dtx := xitdb.tx_init(&mdb, 0, false, context.allocator)
+		defer xitdb.tx_destroy(&dtx)
+		testing.expect_value(t, xitdb.tx_rm(&dtx, fmt.tprintf(`$sm["%s"]`, sep_key)), nil)
+		drep, dcerr := xitdb.tx_commit(&dtx)
+		testing.expect_value(t, dcerr, nil)
+		xitdb.tx_report_destroy(&drep, context.allocator)
+
+		msc2, _ := xitdb.select_cursor(&mdb, "@1$sm")
+		rit, rerr := xitdb.cursor_iterator_sorted_reverse_from_key(msc2.?, transmute([]u8)sep_key, true)
+		testing.expect_value(t, rerr, nil)
+		testing.expect_value(t, rit.index, sm_root_pre.counts[0])
+		testing.expect(t, rit.stack_len >= 2 && rit.stack[0].shift == 1, "Expected leaf pushed even when leaf_count == 0 && before > 0")
+
+		got_cnt := 0
+		for {
+			cur_m, perr := xitdb.cursor_iterator_prev(&rit)
+			testing.expect_value(t, perr, nil)
+			if cur_m == nil {
+				break
+			}
+			got_cnt += 1
+		}
+		testing.expect_value(t, i64(got_cnt), sm_root_pre.counts[0])
+	}
+
+	// 3. Linked_Array_List.concat rejects under-counted root and height-2 + height-1 cycle in children[last]
+	{
+		mut := make([]u8, len(seed), context.temp_allocator)
+		copy(mut, seed)
+		endian.put_u64(mut[cb_c.?.slot_ptr.slot.value : cb_c.?.slot_ptr.slot.value + 8], .Big, 1) // real leaf has 2
+
+		big_root, br_err := xitdb.read_btree_node(&db, big_hdr.root_ptr)
+		testing.expect_value(t, br_err, nil)
+		testing.expect(t, big_root.kind == .Branch, "Expected height-2 branch on 300-item big_ll")
+		last_slot_pos := big_hdr.root_ptr + xitdb.BTREE_NODE_HEADER_SIZE + i64(big_root.num - 1) * xitdb.SLOT_LENGTH
+		big_self := xitdb.slot_to_bytes(xitdb.Slot{value = big_hdr.root_ptr, tag = .Index})
+		copy(mut[last_slot_pos : last_slot_pos + xitdb.SLOT_LENGTH], big_self[:])
+
+		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 1024 * 1024)
+		defer xitdb.core_destroy(&mc)
+		mdb, md_err := xitdb.database_init(&mc, xitdb.sha1_hasher())
+		testing.expect_value(t, md_err, nil)
+
+		Concat_Ctx :: struct {
+			target_key: string,
+			source_key: string,
+		}
+		concat_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+			c_ctx := (^Concat_Ctx)(user_data)
+			hm := xitdb.write_hash_map_init(cursor^) or_return
+			src_slot := (xitdb.hash_map_get_slot(hm.read_hash_map, c_ctx.source_key) or_return).?
+			wlc := xitdb.hash_map_put_cursor(&hm, c_ctx.target_key) or_return
+			wl := xitdb.write_linked_array_list_init(wlc) or_return
+			return xitdb.linked_array_list_concat(&wl, src_slot)
+		}
+
+		history, _ := xitdb.write_array_list_init(xitdb.database_root_cursor(&mdb))
+		m0_slot, _ := xitdb.array_list_get_slot(history.read_array_list, 0)
+
+		// Under-counted concat target B
+		c1 := Concat_Ctx{target_key = "ll", source_key = "concat_b"}
+		concat_err1 := xitdb.array_list_append_context(&history, m0_slot.?, concat_cb, &c1)
+		testing.expect_value(t, concat_err1, xitdb.Xitdb_Error.Invalid_BTree_Node)
+
+		// Height-2 + height-1 join where big.children[last] cycles back to big_root
+		c2 := Concat_Ctx{target_key = "big", source_key = "height1"}
+		concat_err2 := xitdb.array_list_append_context(&history, m0_slot.?, concat_cb, &c2)
+		testing.expect_value(t, concat_err2, xitdb.Xitdb_Error.Invalid_BTree_Node)
+	}
+
+	// 4. Sorted_Map.put at header.size == max(i64) allows overwrite, rejects new key without writing orphans
+	{
+		mut := make([]u8, len(seed), context.temp_allocator)
+		copy(mut, seed)
+		sm_pos := sm_c.?.slot_ptr.slot.value
+		sm_root, _ := xitdb.read_sorted_node(&db, sm_hdr.root_ptr)
+		// Inflate counts[0] so total branch count == max(i64) - 1? Set both header.size and counts[0] cleanly:
+		sum_rest: i64 = 0
+		for j in 1 ..< sm_root.num {
+			sum_rest += sm_root.counts[j]
+		}
+		endian.put_u64(mut[sm_pos : sm_pos + 8], .Big, u64(max(i64)))
+		cnt0_pos := sm_hdr.root_ptr + xitdb.BTREE_NODE_HEADER_SIZE + xitdb.SLOT_LENGTH * 2 * xitdb.BTREE_SLOT_COUNT
+		endian.put_u64(mut[cnt0_pos : cnt0_pos + 8], .Big, u64(max(i64) - sum_rest))
+
+		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 1024 * 1024)
+		defer xitdb.core_destroy(&mc)
+		mdb, md_err := xitdb.database_init(&mc, xitdb.sha1_hasher())
+		testing.expect_value(t, md_err, nil)
+
+		// New key fails BEFORE writing any new nodes
+		new_tx := xitdb.tx_init(&mdb, 0, false, context.allocator)
+		defer xitdb.tx_destroy(&new_tx)
+		len_before, _ := xitdb.core_length(&mc)
+		testing.expect_value(t, xitdb.tx_put(&new_tx, `$sm["z_brand_new_key"]`, "val"), nil)
+		nrep, nerr := xitdb.tx_commit(&new_tx)
+		xitdb.tx_report_destroy(&nrep, context.allocator)
+		testing.expect_value(t, nerr, xitdb.Xitdb_Error.Invalid_BTree_Node)
+		len_after, _ := xitdb.core_length(&mc)
+		// Only root tx rollback truncated back to len_before
+		testing.expect_value(t, len_after, len_before)
+
+		// Overwrite existing key in untouched rightmost leaf succeeds
+		ov_tx := xitdb.tx_init(&mdb, 0, false, context.allocator)
+		defer xitdb.tx_destroy(&ov_tx)
+		testing.expect_value(t, xitdb.tx_put(&ov_tx, `$sm["k_39"]`, "updated"), nil)
+		orep, oerr := xitdb.tx_commit(&ov_tx)
+		testing.expect_value(t, oerr, nil)
+		xitdb.tx_report_destroy(&orep, context.allocator)
+	}
+
+	// 5. remove(-1) root-shrink loop validates untouched sibling subtree count
+	{
+		lcm := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+		defer xitdb.core_destroy(&lcm)
+		ldb, lerr := xitdb.database_init(&lcm, xitdb.sha1_hasher())
+		testing.expect_value(t, lerr, nil)
+		ltx := xitdb.tx_init(&ldb, nil, false, context.allocator)
+		defer xitdb.tx_destroy(&ltx)
+		for i in 0 ..< 17 {
+			testing.expect_value(t, xitdb.tx_put(&ltx, fmt.tprintf(".rlist[[%d]]", i), i64(i)), nil)
+		}
+		lrep, lcerr := xitdb.tx_commit(&ltx)
+		testing.expect_value(t, lcerr, nil)
+		xitdb.tx_report_destroy(&lrep, context.allocator)
+
+		rl_c, _ := xitdb.select_cursor(&ldb, "@0.rlist")
+		rl_hdr := read_hdr(&lcm, rl_c.?.slot_ptr.slot.value)
+		rl_root, _ := xitdb.read_btree_node(&ldb, rl_hdr.root_ptr)
+		testing.expect_value(t, rl_root.num, 2)
+
+		// Make leaf1 have num = 1 so removing last item hits btree_drop_child(&node, 1) -> root.num == 1,
+		// while corrupting sibling leaf0.num downward so promoted sibling subtree_count != header.size - 1.
+		lseed := xitdb.core_memory_bytes(&lcm)
+		lmut := make([]u8, len(lseed), context.temp_allocator)
+		copy(lmut, lseed)
+		leaf0_ptr := rl_root.children[0].value
+		leaf1_ptr := rl_root.children[1].value
+		orig_c0 := rl_root.counts[0]
+		endian.put_u64(lmut[rl_c.?.slot_ptr.slot.value : rl_c.?.slot_ptr.slot.value + 8], .Big, u64(orig_c0 + 1))
+		cnt1_pos := rl_hdr.root_ptr + xitdb.BTREE_NODE_HEADER_SIZE + xitdb.SLOT_LENGTH * xitdb.BTREE_SLOT_COUNT + 8
+		endian.put_u64(lmut[cnt1_pos : cnt1_pos + 8], .Big, 1)
+		lmut[leaf1_ptr + 1] = 1
+		// Corrupt sibling leaf0 header count downward by 1 (leaving trailing slots untouched? Read validates trailing slots so set leaf0.num = orig_c0 - 1 and zero last slot)
+		lmut[leaf0_ptr + 1] = u8(orig_c0 - 1)
+		last_leaf0_slot := leaf0_ptr + xitdb.BTREE_NODE_HEADER_SIZE + (orig_c0 - 1) * xitdb.SLOT_LENGTH
+		for b in 0 ..< xitdb.SLOT_LENGTH {
+			lmut[last_leaf0_slot + i64(b)] = 0
+		}
+
+		lmc := xitdb.core_memory_init_from_bytes(lmut, context.allocator, reserve_size = 0)
+		defer xitdb.core_destroy(&lmc)
+		lmdb, lm_err := xitdb.database_init(&lmc, xitdb.sha1_hasher())
+		testing.expect_value(t, lm_err, nil)
+
+		rem_cb :: proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+			whm := xitdb.write_hash_map_init(cursor^) or_return
+			wrl_c := xitdb.hash_map_put_cursor(&whm, "rlist") or_return
+			wrl := xitdb.write_linked_array_list_init(wrl_c) or_return
+			return xitdb.linked_array_list_remove(&wrl, -1)
+		}
+		history, _ := xitdb.write_array_list_init(xitdb.database_root_cursor(&lmdb))
+		m0_slot, _ := xitdb.array_list_get_slot(history.read_array_list, 0)
+		rem_err := xitdb.array_list_append_context(&history, m0_slot.?, rem_cb, nil)
+		testing.expect_value(t, rem_err, xitdb.Xitdb_Error.Invalid_BTree_Node)
+	}
+}
+
+@(test)
+unit_fuzz_regression_array_list_counted_map_and_sorted_empty_fast_paths :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	cm := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&cm)
+	db, init_err := xitdb.database_init(&cm, xitdb.sha1_hasher())
+	testing.expect_value(t, init_err, nil)
+
+	tx := xitdb.tx_init(&db, nil, false, context.allocator)
+	defer xitdb.tx_destroy(&tx)
+	for i in 0 ..< 20 {
+		testing.expect_value(t, xitdb.tx_append(&tx, ".al20", fmt.tprintf("a_%02d", i)), nil)
+	}
+	for i in 0 ..< 3 {
+		testing.expect_value(t, xitdb.tx_append(&tx, ".al3", fmt.tprintf("s_%02d", i)), nil)
+	}
+	testing.expect_value(t, xitdb.tx_put(&tx, `#chm["k1"]`, "v1"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx, `#chm["k2"]`, "v2"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx, `#empty_chm["tmp"]`, "gone"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx, `$empty_sm["tmp"]`, "gone"), nil)
+	// Slice al20_sliced -> 5 + append empty unwritten slot -> valid sliced Array_List (keep al20 at size 20!)
+	for i in 0 ..< 20 {
+		testing.expect_value(t, xitdb.tx_append(&tx, ".al20_sliced", fmt.tprintf("p_%d", i)), nil)
+	}
+	testing.expect_value(t, xitdb.tx_slice(&tx, ".al20_sliced", 5), nil)
+	rep, cerr := xitdb.tx_commit(&tx)
+	testing.expect_value(t, cerr, nil)
+	xitdb.tx_report_destroy(&rep, context.allocator)
+
+	// Remove "tmp" in moment 1 so empty_chm and empty_sm exist on disk with size == 0
+	tx1 := xitdb.tx_init(&db, 0, false, context.allocator)
+	defer xitdb.tx_destroy(&tx1)
+	testing.expect_value(t, xitdb.tx_rm(&tx1, `#empty_chm["tmp"]`), nil)
+	testing.expect_value(t, xitdb.tx_rm(&tx1, `$empty_sm["tmp"]`), nil)
+	rep1, cerr1 := xitdb.tx_commit(&tx1)
+	testing.expect_value(t, cerr1, nil)
+	xitdb.tx_report_destroy(&rep1, context.allocator)
+
+	// Valid sliced Array_List + trailing full=true empty slot iterates forward & reverse without error
+	{
+		slice_app_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+			tp := (^testing.T)(user_data)
+			whm := xitdb.write_hash_map_init(cursor^) or_return
+			wal_c := xitdb.hash_map_put_cursor(&whm, "al20_sliced") or_return
+			wal := xitdb.write_array_list_init(wal_c) or_return
+			_, app_err := xitdb.array_list_append_cursor(&wal)
+			testing.expect_value(tp, app_err, nil)
+
+			fwd, fi_err := xitdb.cursor_iterator(wal.cursor)
+			testing.expect_value(tp, fi_err, nil)
+			testing.expect_value(tp, fwd.size, i64(6))
+			fcnt := 0
+			for {
+				cur, nerr := xitdb.cursor_iterator_next(&fwd)
+				testing.expect_value(tp, nerr, nil)
+				if cur == nil {
+					break
+				}
+				fcnt += 1
+			}
+			testing.expect_value(tp, fcnt, 6)
+
+			rev, ri_err := xitdb.cursor_iterator_reverse(wal.cursor)
+			testing.expect_value(tp, ri_err, nil)
+			testing.expect_value(tp, rev.size, i64(6))
+			rcnt := 0
+			for {
+				cur, perr := xitdb.cursor_iterator_prev(&rev)
+				testing.expect_value(tp, perr, nil)
+				if cur == nil {
+					break
+				}
+				rcnt += 1
+			}
+			testing.expect_value(tp, rcnt, 6)
+			return nil
+		}
+		history, _ := xitdb.write_array_list_init(xitdb.database_root_cursor(&db))
+		m1_slot, _ := xitdb.array_list_get_slot(history.read_array_list, 1)
+		testing.expect_value(t, xitdb.array_list_append_context(&history, m1_slot.?, slice_app_cb, t), nil)
+	}
+
+	al20_c, _ := xitdb.select_cursor(&db, "@1.al20")
+	al3_c, _ := xitdb.select_cursor(&db, "@1.al3")
+	chm_c, _ := xitdb.select_cursor(&db, "@1.chm")
+	echm_c, _ := xitdb.select_cursor(&db, "@1.empty_chm")
+	esm_c, _ := xitdb.select_cursor(&db, "@1.empty_sm")
+	seed := xitdb.core_memory_bytes(&cm)
+
+	// 1. Array_List corrupted downward & upward header.size
+	{
+		mut := make([]u8, len(seed), context.temp_allocator)
+		copy(mut, seed)
+		// Downward: 20-item shift=1 trie corrupted to size=5 -> sh=0 leaf check hits .Index tag
+		endian.put_u64(mut[al20_c.?.slot_ptr.slot.value : al20_c.?.slot_ptr.slot.value + 8], .Big, 5)
+		// Upward: 3-item shift=0 leaf corrupted to size=5 -> yields 3 then slot 3 empty -> Unexpected_Tag
+		endian.put_u64(mut[al3_c.?.slot_ptr.slot.value : al3_c.?.slot_ptr.slot.value + 8], .Big, 5)
+
+		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 1024 * 1024)
+		defer xitdb.core_destroy(&mc)
+		mdb, _ := xitdb.database_init(&mc, xitdb.sha1_hasher())
+
+		mal20, _ := xitdb.select_cursor(&mdb, "@1.al20")
+		_, down_err := xitdb.cursor_iterator(mal20.?)
+		testing.expect_value(t, down_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, down_rev_err := xitdb.cursor_iterator_reverse(mal20.?)
+		testing.expect_value(t, down_rev_err, xitdb.Xitdb_Error.Unexpected_Tag)
+
+		mal3, _ := xitdb.select_cursor(&mdb, "@1.al3")
+		al3_it, up_init_err := xitdb.cursor_iterator(mal3.?)
+		testing.expect_value(t, up_init_err, nil)
+		for _ in 0 ..< 3 {
+			_, e := xitdb.cursor_iterator_next(&al3_it)
+			testing.expect_value(t, e, nil)
+		}
+		_, up_err := xitdb.cursor_iterator_next(&al3_it)
+		testing.expect_value(t, up_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		testing.expect_value(t, al3_it.index, i64(3))
+	}
+
+	// 2. Counted_Hash_Map: empty decode skip, inflated-count premature exhaustion (fwd/rev), mid-walk index preservation
+	{
+		mut := make([]u8, len(seed), context.temp_allocator)
+		copy(mut, seed)
+		// Empty map (count == 0): overwrite slot 0 tag byte with 99 -> init must skip decode and succeed
+		mut[echm_c.?.slot_ptr.slot.value + 8] = 99
+		// Inflate chm (2 real entries) count to 5
+		endian.put_u64(mut[chm_c.?.slot_ptr.slot.value : chm_c.?.slot_ptr.slot.value + 8], .Big, 5)
+
+		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 1024 * 1024)
+		defer xitdb.core_destroy(&mc)
+		mdb, _ := xitdb.database_init(&mc, xitdb.sha1_hasher())
+
+		mechm, _ := xitdb.select_cursor(&mdb, "@1.empty_chm")
+		efwd, efi_err := xitdb.cursor_iterator(mechm.?)
+		testing.expect_value(t, efi_err, nil)
+		testing.expect_value(t, efwd.size, i64(0))
+		ef_next, ef_err := xitdb.cursor_iterator_next(&efwd)
+		testing.expect_value(t, ef_err, nil)
+		testing.expect(t, ef_next == nil, "Expected nil on empty counted map")
+
+		erev, eri_err := xitdb.cursor_iterator_reverse(mechm.?)
+		testing.expect_value(t, eri_err, nil)
+		er_prev, er_err := xitdb.cursor_iterator_prev(&erev)
+		testing.expect_value(t, er_err, nil)
+		testing.expect(t, er_prev == nil, "Expected nil on empty counted map reverse")
+
+		mchm, _ := xitdb.select_cursor(&mdb, "@1.chm")
+		cfwd, cfi_err := xitdb.cursor_iterator(mchm.?)
+		testing.expect_value(t, cfi_err, nil)
+		testing.expect_value(t, cfwd.size, i64(5))
+		for _ in 0 ..< 2 {
+			_, e := xitdb.cursor_iterator_next(&cfwd)
+			testing.expect_value(t, e, nil)
+		}
+		_, c_prem_err := xitdb.cursor_iterator_next(&cfwd)
+		testing.expect_value(t, c_prem_err, xitdb.Xitdb_Error.Invalid_Database)
+		testing.expect_value(t, cfwd.index, i64(2))
+
+		crev, cri_err := xitdb.cursor_iterator_reverse(mchm.?)
+		testing.expect_value(t, cri_err, nil)
+		testing.expect_value(t, crev.index, i64(5))
+		for _ in 0 ..< 2 {
+			_, e := xitdb.cursor_iterator_prev(&crev)
+			testing.expect_value(t, e, nil)
+		}
+		_, cr_prem_err := xitdb.cursor_iterator_prev(&crev)
+		testing.expect_value(t, cr_prem_err, xitdb.Xitdb_Error.Invalid_Database)
+		testing.expect_value(t, crev.index, i64(3))
+	}
+
+	// 3. Sorted_Map header.size == 0 fast-paths ignore unreadable root_ptr
+	{
+		mut := make([]u8, len(seed), context.temp_allocator)
+		copy(mut, seed)
+		esm_pos := esm_c.?.slot_ptr.slot.value
+		endian.put_u64(mut[esm_pos + 8 : esm_pos + 16], .Big, 0x7fff_ffff_ffff_0000)
+
+		mc := xitdb.core_memory_init_from_bytes(mut, context.allocator, reserve_size = 1024 * 1024)
+		defer xitdb.core_destroy(&mc)
+		mdb, _ := xitdb.database_init(&mc, xitdb.sha1_hasher())
+
+		mesm, _ := xitdb.select_cursor(&mdb, "@1$empty_sm")
+		rsm, _ := xitdb.read_sorted_map_init(mesm.?)
+		g, gerr := xitdb.sorted_map_get_cursor(rsm, "k")
+		testing.expect_value(t, gerr, nil)
+		testing.expect(t, g == nil, "Expected nil from empty Sorted_Map get")
+		rk, rerr := xitdb.sorted_map_rank(rsm, "k")
+		testing.expect_value(t, rerr, nil)
+		testing.expect_value(t, rk, i64(0))
+
+		_, f_err := xitdb.sorted_map_iterator(rsm)
+		testing.expect_value(t, f_err, nil)
+		_, rv_err := xitdb.sorted_map_iterator_reverse(rsm)
+		testing.expect_value(t, rv_err, nil)
+		_, fk_err := xitdb.sorted_map_iterator_from_string(rsm, "k")
+		testing.expect_value(t, fk_err, nil)
+		_, rk_err := xitdb.sorted_map_iterator_reverse_from_string(rsm, "k")
+		testing.expect_value(t, rk_err, nil)
+		_, fi_err := xitdb.sorted_map_iterator_from_index(rsm, 0)
+		testing.expect_value(t, fi_err, nil)
+		_, ri_err := xitdb.sorted_map_iterator_reverse_from_index(rsm, 0)
+		testing.expect_value(t, ri_err, nil)
+
+		sm_rm_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+			tp := (^testing.T)(user_data)
+			whm := xitdb.write_hash_map_init(cursor^) or_return
+			wsm_c := xitdb.hash_map_put_cursor(&whm, "empty_sm") or_return
+			wsm := xitdb.write_sorted_map_init(wsm_c) or_return
+			removed, rm_err := xitdb.sorted_map_remove(&wsm, "k")
+			testing.expect_value(tp, removed, false)
+			testing.expect_value(tp, rm_err, nil)
+			_, raw_rm_err := xitdb.cursor_write_path(&wsm.write_cursor, []xitdb.Path_Part{xitdb.Sorted_Map_Remove{key = transmute([]u8)string("k")}})
+			testing.expect_value(tp, raw_rm_err, xitdb.Xitdb_Error.Key_Not_Found)
+			return nil
+		}
+		history, _ := xitdb.write_array_list_init(xitdb.database_root_cursor(&mdb))
+		m1_slot, _ := xitdb.array_list_get_slot(history.read_array_list, 1)
+		testing.expect_value(t, xitdb.array_list_append_context(&history, m1_slot.?, sm_rm_cb, t), nil)
+	}
 }

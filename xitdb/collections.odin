@@ -783,7 +783,7 @@ sorted_map_rank_by_bytes :: proc(m: Read_Sorted_Map, key: []u8) -> (res: i64, er
 	hb: [BTREE_HEADER_LENGTH]u8
 	core_read_exact_at(m.cursor.db.core, slot_ptr.slot.value, hb[:]) or_return
 	header := btree_header_from_bytes(hb) or_return
-	return sorted_rank(m.cursor.db, header.root_ptr, key)
+	return sorted_rank(m.cursor.db, header, key)
 }
 
 sorted_map_get_cursor :: proc(m: Read_Sorted_Map, key: string) -> (Maybe(Read_Cursor), Error) {
@@ -924,7 +924,7 @@ sorted_set_rank_by_bytes :: proc(s: Read_Sorted_Set, key: []u8) -> (res: i64, er
 	hb: [BTREE_HEADER_LENGTH]u8
 	core_read_exact_at(s.cursor.db.core, slot_ptr.slot.value, hb[:]) or_return
 	header := btree_header_from_bytes(hb) or_return
-	return sorted_rank(s.cursor.db, header.root_ptr, key)
+	return sorted_rank(s.cursor.db, header, key)
 }
 
 sorted_set_rank :: proc(s: Read_Sorted_Set, key: string) -> (res: i64, err: Error) {

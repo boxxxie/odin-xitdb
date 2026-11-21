@@ -1097,15 +1097,25 @@ _Lua_Visited_Stack :: struct {
 // Unmarshal a `Read_Cursor` directly onto the Lua stack as a Lua table or primitive.
 // Unlike `pull("*")`, tagged `Bytes` fields unmarshal directly to Lua strings so
 // round-tripping a DTO table via `marshal` -> `unmarshal` is 1:1.
-lua_unmarshal_cursor :: proc(L: ^lua.State, cursor: Read_Cursor) -> Error {
+lua_unmarshal_cursor :: proc(L: ^lua.State, cursor: Read_Cursor) -> (err: Error) {
+	top := lua.gettop(L)
+	defer if err != nil {
+		lua.settop(L, top)
+	}
 	visited: _Lua_Visited_Stack
-	return _lua_unmarshal_with_visited(L, cursor, &visited)
+	pool := _iter_pool_init(context.allocator)
+	defer _iter_pool_destroy(&pool)
+	return _lua_unmarshal_with_visited(L, cursor, &visited, &pool)
 }
 
 @(private = "file")
-_lua_unmarshal_with_visited :: proc(L: ^lua.State, cursor: Read_Cursor, visited: ^_Lua_Visited_Stack) -> Error {
+_lua_unmarshal_with_visited :: proc(L: ^lua.State, cursor: Read_Cursor, visited: ^_Lua_Visited_Stack, pool: ^_Iter_Pool) -> Error {
+	if lua.checkstack(L, 4) == 0 {
+		return .Write_Failed
+	}
 	slot := cursor_slot(cursor) or_return
 	is_col := _is_collection_tag(slot.tag)
+	pushed_visited := false
 	if is_col {
 		for i in 0 ..< visited.count {
 			if visited.ptrs[i] == slot.value {
@@ -1116,9 +1126,10 @@ _lua_unmarshal_with_visited :: proc(L: ^lua.State, cursor: Read_Cursor, visited:
 		if visited.count < len(visited.ptrs) {
 			visited.ptrs[visited.count] = slot.value
 			visited.count += 1
+			pushed_visited = true
 		}
 	}
-	defer if is_col && visited.count > 0 {
+	defer if pushed_visited {
 		visited.count -= 1
 	}
 
@@ -1148,43 +1159,59 @@ _lua_unmarshal_with_visited :: proc(L: ^lua.State, cursor: Read_Cursor, visited:
 		_push_str(L, s)
 		return nil
 	case .Array_List, .Linked_Array_List:
-		it := cursor_iterator(cursor) or_return
+		it := _iter_pool_acquire(pool) or_return
+		defer _iter_pool_release(pool, it)
+		cursor_iterator_init(it, cursor) or_return
 		lua.createtable(L, 4, 0)
 		idx: lua.Integer = 1
 		for {
-			c_maybe := cursor_iterator_next(&it) or_return
+			c_maybe := cursor_iterator_next(it) or_return
 			c, ok := c_maybe.?
-			if !ok do break
-			_lua_unmarshal_with_visited(L, c, visited) or_return
+			if !ok {
+				break
+			}
+			_lua_unmarshal_with_visited(L, c, visited, pool) or_return
 			lua.rawseti(L, -2, idx)
 			idx += 1
 		}
 		return nil
 	case .Hash_Set, .Counted_Hash_Set, .Sorted_Set:
-		it := cursor_iterator(cursor) or_return
+		it := _iter_pool_acquire(pool) or_return
+		defer _iter_pool_release(pool, it)
+		cursor_iterator_init(it, cursor) or_return
 		lua.createtable(L, 4, 0)
 		idx: lua.Integer = 1
 		for {
-			c_maybe := cursor_iterator_next(&it) or_return
+			c_maybe := cursor_iterator_next(it) or_return
 			c, ok := c_maybe.?
-			if !ok do break
+			if !ok {
+				break
+			}
 			kc, _, kv_err := cursor_read_kv_pair_slots(c)
-			if kv_err != nil do return kv_err
-			_lua_unmarshal_with_visited(L, kc, visited) or_return
+			if kv_err != nil {
+				return kv_err
+			}
+			_lua_unmarshal_with_visited(L, kc, visited, pool) or_return
 			lua.rawseti(L, -2, idx)
 			idx += 1
 		}
 		return nil
 	case .Hash_Map, .Counted_Hash_Map, .Sorted_Map:
-		it := cursor_iterator(cursor) or_return
+		it := _iter_pool_acquire(pool) or_return
+		defer _iter_pool_release(pool, it)
+		cursor_iterator_init(it, cursor) or_return
 		lua.createtable(L, 0, 8)
 		key_buf: [128]u8
 		for {
-			c_maybe := cursor_iterator_next(&it) or_return
+			c_maybe := cursor_iterator_next(it) or_return
 			c, ok := c_maybe.?
-			if !ok do break
+			if !ok {
+				break
+			}
 			kc, vc, kv_err := cursor_read_kv_pair_slots(c)
-			if kv_err != nil do return kv_err
+			if kv_err != nil {
+				return kv_err
+			}
 			if kb, b_err := cursor_read_bytes_buf(kc, key_buf[:]); b_err == nil {
 				if string(kb.value) == "__tx" {
 					continue
@@ -1197,7 +1224,7 @@ _lua_unmarshal_with_visited :: proc(L: ^lua.State, cursor: Read_Cursor, visited:
 				}
 				_push_str(L, k_str)
 			}
-			_lua_unmarshal_with_visited(L, vc, visited) or_return
+			_lua_unmarshal_with_visited(L, vc, visited, pool) or_return
 			lua.rawset(L, -3)
 		}
 		return nil

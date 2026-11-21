@@ -24,19 +24,49 @@ read_btree_node :: proc(db: ^Database, ptr: i64) -> (res: BTree_Node, err: Error
 	node := BTree_Node{kind = kind, num = num}
 	switch kind {
 	case .Leaf:
-		for i in 0 ..< num {
-			node.values[i] = slot_from_slice(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH]) or_return
+		for i in 0 ..< BTREE_SLOT_COUNT {
+			s := slot_from_slice(body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
+			if i < num {
+				if s.tag == .Index || slot_empty(s) {
+					return {}, .Invalid_BTree_Node
+				}
+				node.values[i] = s
+			} else if !slot_empty(s) {
+				return {}, .Invalid_BTree_Node
+			}
 		}
 	case .Branch:
 		if len(block) < BTREE_BRANCH_BLOCK_SIZE {
 			return {}, Xitdb_Error.Unexpected_EOF
 		}
-		for i in 0 ..< num {
-			node.children[i] = slot_from_slice(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH]) or_return
+		for i in 0 ..< BTREE_SLOT_COUNT {
+			s := slot_from_slice(body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
+			if i < num {
+				if s.tag != .Index {
+					return {}, .Invalid_BTree_Node
+				}
+				node.children[i] = s
+			} else if !slot_empty(s) {
+				return {}, .Invalid_BTree_Node
+			}
 		}
 		counts_offset := SLOT_LENGTH * BTREE_SLOT_COUNT
-		for i in 0 ..< num {
-			node.counts[i] = i64(endian.unchecked_get_u64be(body[counts_offset + i * 8 : counts_offset + i * 8 + 8]))
+		total: i64 = 0
+		for i in 0 ..< BTREE_SLOT_COUNT {
+			raw := endian.unchecked_get_u64be(body[counts_offset + i * 8 : counts_offset + (i + 1) * 8])
+			if i < num {
+				if raw == 0 || raw > u64(max(i64)) {
+					return {}, .Invalid_BTree_Node
+				}
+				ok: bool
+				total, ok = _checked_add_i64(total, i64(raw))
+				if !ok {
+					return {}, .Invalid_BTree_Node
+				}
+				node.counts[i] = i64(raw)
+			} else if raw != 0 {
+				return {}, .Invalid_BTree_Node
+			}
 		}
 	}
 	return node, nil
@@ -102,58 +132,86 @@ btree_new_root :: proc(db: ^Database) -> (res: i64, err: Error) {
 	return write_btree_node(db, BTree_Node{kind = .Leaf, num = 0})
 }
 
-descend_by_rank :: proc(db: ^Database, root_ptr, rank: i64, $BRANCH_BLOCK_SIZE: int) -> (res: Slot_Pointer, err: Error) {
-	node_ptr := root_ptr
+descend_by_rank :: proc(db: ^Database, header: BTree_Header, rank: i64, $BRANCH_BLOCK_SIZE: int) -> (res: Slot_Pointer, err: Error) {
+	is_sorted :: BRANCH_BLOCK_SIZE == SORTED_BRANCH_BLOCK_SIZE
+	node_ptr := header.root_ptr
+	expected := header.size
 	rem := rank
-	buf: [BRANCH_BLOCK_SIZE]u8 = ---
-	depth := 0
-	for {
+	for depth := 0; ; depth += 1 {
 		if depth >= ITERATOR_STACK_SIZE * 2 {
-			return {}, .Max_Shift_Exceeded
-		}
-		depth += 1
-		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
-		if len(block) < BTREE_LEAF_BLOCK_SIZE {
-			return {}, Xitdb_Error.Unexpected_EOF
-		}
-		kind_int := block[0]
-		if kind_int > u8(BTree_Node_Kind.Branch) {
-			return {}, .Invalid_BTree_Node_Kind
-		}
-		num := int(block[1])
-		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
 			return {}, .Invalid_BTree_Node
 		}
-		body := block[BTREE_NODE_HEADER_SIZE:]
-		if BTree_Node_Kind(kind_int) == .Leaf {
-			if rem < 0 || rem >= i64(num) {
-				return {}, .Invalid_BTree_Node
+		when is_sorted {
+			node := read_sorted_node(db, node_ptr) or_return
+			switch node.kind {
+			case .Leaf:
+				if i64(node.num) != expected || rem < 0 || rem >= i64(node.num) {
+					return {}, .Invalid_BTree_Node
+				}
+				pos_base, ok1 := _checked_add_i64(node_ptr, BTREE_NODE_HEADER_SIZE)
+				slot_pos, ok2 := _checked_add_i64(pos_base, rem * SLOT_LENGTH)
+				if !ok1 || !ok2 {
+					return {}, .End_Of_Stream
+				}
+				return Slot_Pointer{position = slot_pos, slot = node.entries[int(rem)]}, nil
+			case .Branch:
+				if sorted_node_subtree_count(node) != expected {
+					return {}, .Invalid_BTree_Node
+				}
+				chosen := -1
+				for j in 0 ..< node.num {
+					cnt := node.counts[j]
+					if rem < cnt {
+						chosen = j
+						break
+					}
+					rem -= cnt
+				}
+				if chosen < 0 {
+					return {}, .Invalid_BTree_Node
+				}
+				expected = node.counts[chosen]
+				node_ptr = node.children[chosen].value
 			}
-			slot_off := int(rem) * SLOT_LENGTH
-			slot := slot_from_slice(body[slot_off : slot_off + SLOT_LENGTH]) or_return
-			return Slot_Pointer{position = node_ptr + BTREE_NODE_HEADER_SIZE + i64(slot_off), slot = slot}, nil
-		}
-		if len(block) < BRANCH_BLOCK_SIZE {
-			return {}, Xitdb_Error.Unexpected_EOF
-		}
-		counts_off := BRANCH_BLOCK_SIZE - BTREE_NODE_HEADER_SIZE - 8 * BTREE_SLOT_COUNT
-		i := 0
-		for i + 1 < num {
-			cnt := i64(endian.unchecked_get_u64be(body[counts_off + i * 8 : counts_off + (i + 1) * 8]))
-			if rem < cnt {
-				break
+		} else {
+			node := read_btree_node(db, node_ptr) or_return
+			switch node.kind {
+			case .Leaf:
+				if i64(node.num) != expected || rem < 0 || rem >= i64(node.num) {
+					return {}, .Invalid_BTree_Node
+				}
+				pos_base, ok1 := _checked_add_i64(node_ptr, BTREE_NODE_HEADER_SIZE)
+				slot_pos, ok2 := _checked_add_i64(pos_base, rem * SLOT_LENGTH)
+				if !ok1 || !ok2 {
+					return {}, .End_Of_Stream
+				}
+				return Slot_Pointer{position = slot_pos, slot = node.values[int(rem)]}, nil
+			case .Branch:
+				if btree_node_subtree_count(node) != expected {
+					return {}, .Invalid_BTree_Node
+				}
+				chosen := -1
+				for j in 0 ..< node.num {
+					cnt := node.counts[j]
+					if rem < cnt {
+						chosen = j
+						break
+					}
+					rem -= cnt
+				}
+				if chosen < 0 {
+					return {}, .Invalid_BTree_Node
+				}
+				expected = node.counts[chosen]
+				node_ptr = node.children[chosen].value
 			}
-			rem -= cnt
-			i += 1
 		}
-		child_slot := slot_from_slice(body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
-		node_ptr = child_slot.value
 	}
 }
 
-btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int = 0) -> (res: BTree_Insert_Result, err: Error) {
+btree_insert :: proc(db: ^Database, node_ptr, rank, expected, frozen_at: i64, depth: int = 0) -> (res: BTree_Insert_Result, err: Error) {
 	if depth >= ITERATOR_STACK_SIZE * 2 {
-		return {}, .Max_Shift_Exceeded
+		return {}, .Invalid_BTree_Node
 	}
 	if btree_reusable(db, node_ptr, frozen_at) {
 		header_bytes: [BTREE_NODE_HEADER_SIZE]u8
@@ -168,7 +226,7 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int =
 		}
 		if BTree_Node_Kind(kind_int) == .Leaf {
 			r := int(rank)
-			if r < 0 || r > num {
+			if i64(num) != expected || r < 0 || r > num {
 				return {}, .Invalid_BTree_Node
 			}
 			if num < BTREE_SLOT_COUNT {
@@ -204,8 +262,16 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int =
 			total_count: i64 = 0
 			old_cnt_i: i64 = 0
 			for k in 0 ..< num {
-				cnt := i64(endian.unchecked_get_u64be(counts_buf[k * 8 : k * 8 + 8]))
-				total_count += cnt
+				raw := endian.unchecked_get_u64be(counts_buf[k * 8 : k * 8 + 8])
+				if raw == 0 || raw > u64(max(i64)) {
+					return {}, .Invalid_BTree_Node
+				}
+				cnt := i64(raw)
+				ok: bool
+				total_count, ok = _checked_add_i64(total_count, cnt)
+				if !ok {
+					return {}, .Invalid_BTree_Node
+				}
 				if k == i {
 					old_cnt_i = cnt
 					if i + 1 < num && rem > cnt {
@@ -214,13 +280,16 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int =
 					}
 				}
 			}
+			if total_count != expected || rem > old_cnt_i {
+				return {}, .Invalid_BTree_Node
+			}
 			child_slot_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(i) * SLOT_LENGTH
 			child_slot := core_read_slot_at(db.core, child_slot_pos) or_return
 			if child_slot.tag != .Index {
-				return {}, .Unexpected_Tag
+				return {}, .Invalid_BTree_Node
 			}
 			child_ptr := child_slot.value
-			child := btree_insert(db, child_ptr, rem, frozen_at, depth + 1) or_return
+			child := btree_insert(db, child_ptr, rem, old_cnt_i, frozen_at, depth + 1) or_return
 			if child.split == nil {
 				if child.node_ptr != child_ptr {
 					core_seek_to(db.core, child_slot_pos) or_return
@@ -252,19 +321,22 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int =
 			total := node.num + 1
 
 			if total <= BTREE_SLOT_COUNT {
+				total_cnt := _sum_counts_i64(counts[:total]) or_return
 				branch := BTree_Node{kind = .Branch, num = total}
 				copy(branch.children[:total], children[:total])
 				copy(branch.counts[:total], counts[:total])
 				ptr := btree_write_node(db, branch, node_ptr, frozen_at) or_return
 				return BTree_Insert_Result{
 					node_ptr       = ptr,
-					count          = btree_node_subtree_count(branch),
+					count          = total_cnt,
 					value_position = child.value_position,
 				}, nil
 			}
 
 			left_n := BTREE_SPLIT_COUNT
 			right_n := total - left_n
+			left_cnt := _sum_counts_i64(counts[:left_n]) or_return
+			right_cnt := _sum_counts_i64(counts[left_n:total]) or_return
 			left := BTree_Node{kind = .Branch, num = left_n}
 			copy(left.children[:left_n], children[:left_n])
 			copy(left.counts[:left_n], counts[:left_n])
@@ -275,9 +347,9 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int =
 			right_ptr := write_btree_node(db, right) or_return
 			return BTree_Insert_Result{
 				node_ptr       = left_ptr,
-				count          = btree_node_subtree_count(left),
+				count          = left_cnt,
 				value_position = child.value_position,
-				split          = BTree_Node_Ref{node_ptr = right_ptr, count = btree_node_subtree_count(right)},
+				split          = BTree_Node_Ref{node_ptr = right_ptr, count = right_cnt},
 			}, nil
 		}
 	}
@@ -286,7 +358,7 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int =
 	switch node.kind {
 	case .Leaf:
 		r := int(rank)
-		if r < 0 || r > node.num {
+		if i64(node.num) != expected || r < 0 || r > node.num {
 			return {}, .Invalid_BTree_Node
 		}
 		vals: [BTREE_SLOT_COUNT + 1]Slot
@@ -329,17 +401,20 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int =
 		}, nil
 
 	case .Branch:
+		if btree_node_subtree_count(node) != expected {
+			return {}, .Invalid_BTree_Node
+		}
 		i := 0
 		rem := rank
 		for i + 1 < node.num && rem > node.counts[i] {
 			rem -= node.counts[i]
 			i += 1
 		}
-		if node.children[i].tag != .Index {
-			return {}, .Unexpected_Tag
+		if rem > node.counts[i] {
+			return {}, .Invalid_BTree_Node
 		}
 		child_ptr := node.children[i].value
-		child := btree_insert(db, child_ptr, rem, frozen_at, depth + 1) or_return
+		child := btree_insert(db, child_ptr, rem, node.counts[i], frozen_at, depth + 1) or_return
 		if child.split == nil && btree_reusable(db, node_ptr, frozen_at) {
 			if child.node_ptr != child_ptr {
 				child_slot_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(i) * SLOT_LENGTH
@@ -353,7 +428,7 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int =
 			node.counts[i] = child.count
 			return BTree_Insert_Result{
 				node_ptr       = node_ptr,
-				count          = btree_node_subtree_count(node),
+				count          = _sum_counts_i64(node.counts[:node.num]) or_return,
 				value_position = child.value_position,
 			}, nil
 		}
@@ -376,19 +451,22 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int =
 		}
 
 		if total <= BTREE_SLOT_COUNT {
+			total_cnt := _sum_counts_i64(counts[:total]) or_return
 			branch := BTree_Node{kind = .Branch, num = total}
 			copy(branch.children[:total], children[:total])
 			copy(branch.counts[:total], counts[:total])
 			ptr := btree_write_node(db, branch, node_ptr, frozen_at) or_return
 			return BTree_Insert_Result{
 				node_ptr       = ptr,
-				count          = btree_node_subtree_count(branch),
+				count          = total_cnt,
 				value_position = child.value_position,
 			}, nil
 		}
 
 		left_n := BTREE_SPLIT_COUNT
 		right_n := total - left_n
+		left_cnt := _sum_counts_i64(counts[:left_n]) or_return
+		right_cnt := _sum_counts_i64(counts[left_n:total]) or_return
 		left := BTree_Node{kind = .Branch, num = left_n}
 		copy(left.children[:left_n], children[:left_n])
 		copy(left.counts[:left_n], counts[:left_n])
@@ -399,9 +477,9 @@ btree_insert :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int =
 		right_ptr := write_btree_node(db, right) or_return
 		return BTree_Insert_Result{
 			node_ptr       = left_ptr,
-			count          = btree_node_subtree_count(left),
+			count          = left_cnt,
 			value_position = child.value_position,
-			split          = BTree_Node_Ref{node_ptr = right_ptr, count = btree_node_subtree_count(right)},
+			split          = BTree_Node_Ref{node_ptr = right_ptr, count = right_cnt},
 		}, nil
 	}
 	return {}, .Unreachable
@@ -411,9 +489,9 @@ btree_grow_root :: proc(db: ^Database, result: BTree_Insert_Result) -> (res: i64
 	return btree_make_root(db, BTree_Join_Result{node_ptr = result.node_ptr, count = result.count, split = result.split})
 }
 
-btree_get_for_write :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth: int = 0) -> (res: BTree_Write_Slot, err: Error) {
+btree_get_for_write :: proc(db: ^Database, node_ptr, rank, expected, frozen_at: i64, depth: int = 0) -> (res: BTree_Write_Slot, err: Error) {
 	if depth >= ITERATOR_STACK_SIZE * 2 {
-		return {}, .Max_Shift_Exceeded
+		return {}, .Invalid_BTree_Node
 	}
 	header_bytes: [BTREE_NODE_HEADER_SIZE]u8
 	core_read_exact_at(db.core, node_ptr, header_bytes[:]) or_return
@@ -427,12 +505,15 @@ btree_get_for_write :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth
 	}
 	reusable := btree_reusable(db, node_ptr, frozen_at)
 	if BTree_Node_Kind(kind_int) == .Leaf {
-		if rank < 0 || rank >= i64(num) {
+		if i64(num) != expected || rank < 0 || rank >= i64(num) {
 			return {}, .Invalid_BTree_Node
 		}
 		if reusable {
 			val_pos := node_ptr + BTREE_NODE_HEADER_SIZE + rank * SLOT_LENGTH
 			slot := core_read_slot_at(db.core, val_pos) or_return
+			if slot.tag == .Index || slot_empty(slot) {
+				return {}, .Invalid_BTree_Node
+			}
 			return BTree_Write_Slot{
 				node_ptr       = node_ptr,
 				value_position = val_pos,
@@ -454,21 +535,40 @@ btree_get_for_write :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth
 		core_read_exact_at(db.core, counts_pos, counts_buf[:num * 8]) or_return
 		i := 0
 		rem := rank
-		for i + 1 < num {
-			cnt := i64(endian.unchecked_get_u64be(counts_buf[i * 8 : i * 8 + 8]))
-			if rem < cnt {
-				break
+		total_count: i64 = 0
+		chosen_cnt: i64 = 0
+		picking := true
+		for k in 0 ..< num {
+			raw := endian.unchecked_get_u64be(counts_buf[k * 8 : k * 8 + 8])
+			if raw == 0 || raw > u64(max(i64)) {
+				return {}, .Invalid_BTree_Node
 			}
-			rem -= cnt
-			i += 1
+			cnt := i64(raw)
+			ok: bool
+			total_count, ok = _checked_add_i64(total_count, cnt)
+			if !ok {
+				return {}, .Invalid_BTree_Node
+			}
+			if picking {
+				if k + 1 == num || rem < cnt {
+					chosen_cnt = cnt
+					i = k
+					picking = false
+				} else {
+					rem -= cnt
+				}
+			}
+		}
+		if total_count != expected || rem >= chosen_cnt {
+			return {}, .Invalid_BTree_Node
 		}
 		child_slot_pos := node_ptr + BTREE_NODE_HEADER_SIZE + i64(i) * SLOT_LENGTH
 		child_slot := core_read_slot_at(db.core, child_slot_pos) or_return
 		if child_slot.tag != .Index {
-			return {}, .Unexpected_Tag
+			return {}, .Invalid_BTree_Node
 		}
 		child_ptr := child_slot.value
-		child := btree_get_for_write(db, child_ptr, rem, frozen_at, depth + 1) or_return
+		child := btree_get_for_write(db, child_ptr, rem, chosen_cnt, frozen_at, depth + 1) or_return
 		if child.node_ptr != child_ptr {
 			core_seek_to(db.core, child_slot_pos) or_return
 			core_write_slot(db.core, Slot{value = child.node_ptr, tag = .Index}) or_return
@@ -477,17 +577,20 @@ btree_get_for_write :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, depth
 	}
 
 	node := read_btree_node(db, node_ptr) or_return
+	if btree_node_subtree_count(node) != expected {
+		return {}, .Invalid_BTree_Node
+	}
 	i := 0
 	rem := rank
 	for i + 1 < node.num && rem >= node.counts[i] {
 		rem -= node.counts[i]
 		i += 1
 	}
-	if node.children[i].tag != .Index {
-		return {}, .Unexpected_Tag
+	if rem >= node.counts[i] {
+		return {}, .Invalid_BTree_Node
 	}
 	child_ptr := node.children[i].value
-	child := btree_get_for_write(db, child_ptr, rem, frozen_at, depth + 1) or_return
+	child := btree_get_for_write(db, child_ptr, rem, node.counts[i], frozen_at, depth + 1) or_return
 	node.children[i] = Slot{value = child.node_ptr, tag = .Index}
 	new_ptr := write_btree_node(db, node) or_return
 	return BTree_Write_Slot{node_ptr = new_ptr, value_position = child.value_position, slot = child.slot}, nil
@@ -501,9 +604,9 @@ BTree_Remove_Result :: struct {
 	node:      BTree_Node,
 }
 
-btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: bool = false, depth: int = 0) -> (res: BTree_Remove_Result, err: Error) {
+btree_remove :: proc(db: ^Database, node_ptr, rank, expected, frozen_at: i64, is_root: bool = false, depth: int = 0) -> (res: BTree_Remove_Result, err: Error) {
 	if depth >= ITERATOR_STACK_SIZE * 2 {
-		return {}, .Max_Shift_Exceeded
+		return {}, .Invalid_BTree_Node
 	}
 	reusable := btree_reusable(db, node_ptr, frozen_at)
 	if reusable {
@@ -520,7 +623,7 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		if BTree_Node_Kind(kind_int) == .Leaf {
 			r := int(rank)
-			if r < 0 || r >= num {
+			if i64(num) != expected || r < 0 || r >= num {
 				return {}, .Invalid_BTree_Node
 			}
 			total := num - 1
@@ -560,23 +663,40 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 			core_read_exact_at(db.core, counts_pos, counts_buf[:num * 8]) or_return
 			i := 0
 			rem := rank
+			total_count: i64 = 0
 			chosen_cnt: i64 = 0
-			for i < num {
-				cnt := i64(endian.unchecked_get_u64be(counts_buf[i * 8 : i * 8 + 8]))
-				if i + 1 == num || rem < cnt {
-					chosen_cnt = cnt
-					break
+			picking := true
+			for k in 0 ..< num {
+				raw := endian.unchecked_get_u64be(counts_buf[k * 8 : k * 8 + 8])
+				if raw == 0 || raw > u64(max(i64)) {
+					return {}, .Invalid_BTree_Node
 				}
-				rem -= cnt
-				i += 1
+				cnt := i64(raw)
+				ok: bool
+				total_count, ok = _checked_add_i64(total_count, cnt)
+				if !ok {
+					return {}, .Invalid_BTree_Node
+				}
+				if picking {
+					if k + 1 == num || rem < cnt {
+						chosen_cnt = cnt
+						i = k
+						picking = false
+					} else {
+						rem -= cnt
+					}
+				}
+			}
+			if total_count != expected || rem >= chosen_cnt {
+				return {}, .Invalid_BTree_Node
 			}
 			child_slot_pos := position + i64(i) * SLOT_LENGTH
 			child_slot := core_read_slot_at(db.core, child_slot_pos) or_return
 			if child_slot.tag != .Index {
-				return {}, .Unexpected_Tag
+				return {}, .Invalid_BTree_Node
 			}
 			child_ptr := child_slot.value
-			child := btree_remove(db, child_ptr, rem, frozen_at, false, depth + 1) or_return
+			child := btree_remove(db, child_ptr, rem, chosen_cnt, frozen_at, false, depth + 1) or_return
 			if child.num >= BTREE_SPLIT_COUNT || num == 1 {
 				ptr := child.node_ptr
 				if !child.persisted {
@@ -617,6 +737,9 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 				neighbor_i = first
 			}
 			neighbor := read_btree_node(db, node.children[neighbor_i].value) or_return
+			if neighbor.kind != child_node.kind || btree_node_subtree_count(neighbor) != node.counts[neighbor_i] {
+				return {}, .Invalid_BTree_Node
+			}
 			if child_node.num + neighbor.num <= BTREE_SLOT_COUNT {
 				if first == i {
 					child_node = btree_concat_nodes(child_node, neighbor)
@@ -652,7 +775,7 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 	switch node.kind {
 	case .Leaf:
 		r := int(rank)
-		if r < 0 || r >= node.num {
+		if i64(node.num) != expected || r < 0 || r >= node.num {
 			return {}, .Invalid_BTree_Node
 		}
 		copy(node.values[r : node.num - 1], node.values[r + 1 : node.num])
@@ -660,17 +783,20 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 		node.values[node.num] = Slot{}
 
 	case .Branch:
+		if btree_node_subtree_count(node) != expected {
+			return {}, .Invalid_BTree_Node
+		}
 		i := 0
 		rem := rank
 		for i + 1 < node.num && rem >= node.counts[i] {
 			rem -= node.counts[i]
 			i += 1
 		}
-		if node.children[i].tag != .Index {
-			return {}, .Unexpected_Tag
+		if rem >= node.counts[i] {
+			return {}, .Invalid_BTree_Node
 		}
 		child_ptr := node.children[i].value
-		child := btree_remove(db, child_ptr, rem, frozen_at, false, depth + 1) or_return
+		child := btree_remove(db, child_ptr, rem, node.counts[i], frozen_at, false, depth + 1) or_return
 		if child.num == 0 {
 			btree_drop_child(&node, i)
 			return BTree_Remove_Result{
@@ -693,6 +819,9 @@ btree_remove :: proc(db: ^Database, node_ptr, rank, frozen_at: i64, is_root: boo
 				neighbor_i = first
 			}
 			neighbor := read_btree_node(db, node.children[neighbor_i].value) or_return
+			if neighbor.kind != child_node.kind || btree_node_subtree_count(neighbor) != node.counts[neighbor_i] {
+				return {}, .Invalid_BTree_Node
+			}
 			if child_node.num + neighbor.num <= BTREE_SLOT_COUNT {
 				if first == i {
 					child_node = btree_concat_nodes(child_node, neighbor)
@@ -750,7 +879,7 @@ btree_height :: proc(db: ^Database, root_ptr: i64) -> (res: int, err: Error) {
 	height := 0
 	for {
 		if height >= ITERATOR_STACK_SIZE * 2 {
-			return 0, .Max_Shift_Exceeded
+			return 0, .Invalid_BTree_Node
 		}
 		buf: [BTREE_NODE_HEADER_SIZE + SLOT_LENGTH]u8
 		core_read_exact_at(db.core, ptr, buf[:]) or_return
@@ -766,12 +895,42 @@ btree_height :: proc(db: ^Database, root_ptr: i64) -> (res: int, err: Error) {
 		}
 		height += 1
 		child_slot := slot_from_slice(buf[BTREE_NODE_HEADER_SIZE:]) or_return
+		if child_slot.tag != .Index {
+			return 0, .Invalid_BTree_Node
+		}
 		ptr = child_slot.value
+	}
+}
+
+btree_checked_height :: proc(db: ^Database, root_ptr, expected_size: i64) -> (res: int, err: Error) {
+	ptr := root_ptr
+	expected := expected_size
+	for height := 0; ; height += 1 {
+		if height >= ITERATOR_STACK_SIZE * 2 {
+			return 0, .Invalid_BTree_Node
+		}
+		node := read_btree_node(db, ptr) or_return
+		switch node.kind {
+		case .Leaf:
+			if i64(node.num) != expected {
+				return 0, .Invalid_BTree_Node
+			}
+			return height, nil
+		case .Branch:
+			if btree_node_subtree_count(node) != expected {
+				return 0, .Invalid_BTree_Node
+			}
+			expected = node.counts[0]
+			ptr = node.children[0].value
+		}
 	}
 }
 
 btree_make_root :: proc(db: ^Database, result: BTree_Join_Result) -> (res: i64, err: Error) {
 	if split, ok := result.split.?; ok {
+		if _, add_ok := _checked_add_i64(result.count, split.count); !add_ok {
+			return 0, .Invalid_BTree_Node
+		}
 		root := BTree_Node{kind = .Branch, num = 2}
 		root.children[0] = Slot{value = result.node_ptr, tag = .Index}
 		root.children[1] = Slot{value = split.node_ptr, tag = .Index}
@@ -805,13 +964,19 @@ btree_assemble_leaf :: proc(db: ^Database, vals: []Slot, total: int) -> (res: BT
 
 btree_assemble_branch :: proc(db: ^Database, children: []Slot, counts: []i64, total: int) -> (res: BTree_Join_Result, err: Error) {
 	if total <= BTREE_SLOT_COUNT {
+		branch_cnt := _sum_counts_i64(counts[:total]) or_return
 		branch := BTree_Node{kind = .Branch, num = total}
 		copy(branch.children[:total], children[:total])
 		copy(branch.counts[:total], counts[:total])
 		ptr := write_btree_node(db, branch) or_return
-		return BTree_Join_Result{node_ptr = ptr, count = btree_node_subtree_count(branch)}, nil
+		return BTree_Join_Result{node_ptr = ptr, count = branch_cnt}, nil
 	}
 	left_n := total / 2
+	left_cnt := _sum_counts_i64(counts[:left_n]) or_return
+	right_cnt := _sum_counts_i64(counts[left_n:total]) or_return
+	if _, ok := _checked_add_i64(left_cnt, right_cnt); !ok {
+		return {}, .Invalid_BTree_Node
+	}
 	left := BTree_Node{kind = .Branch, num = left_n}
 	copy(left.children[:left_n], children[:left_n])
 	copy(left.counts[:left_n], counts[:left_n])
@@ -822,13 +987,19 @@ btree_assemble_branch :: proc(db: ^Database, children: []Slot, counts: []i64, to
 	right_ptr := write_btree_node(db, right) or_return
 	return BTree_Join_Result{
 		node_ptr = left_ptr,
-		count    = btree_node_subtree_count(left),
-		split    = BTree_Node_Ref{node_ptr = right_ptr, count = btree_node_subtree_count(right)},
+		count    = left_cnt,
+		split    = BTree_Node_Ref{node_ptr = right_ptr, count = right_cnt},
 	}, nil
 }
 
-btree_merge_nodes :: proc(db: ^Database, a, b: BTree_Node) -> (res: BTree_Join_Result, err: Error) {
+btree_merge_nodes :: proc(db: ^Database, a: BTree_Node, expected_a: i64, b: BTree_Node, expected_b: i64, expected_height: int) -> (res: BTree_Join_Result, err: Error) {
 	a, b := a, b
+	if a.kind != b.kind || (expected_height == 0) != (a.kind == .Leaf) {
+		return {}, .Invalid_BTree_Node
+	}
+	if btree_node_subtree_count(a) != expected_a || btree_node_subtree_count(b) != expected_b {
+		return {}, .Invalid_BTree_Node
+	}
 	if a.kind == .Leaf {
 		vals: [2 * BTREE_SLOT_COUNT]Slot
 		copy(vals[:a.num], a.values[:a.num])
@@ -844,25 +1015,22 @@ btree_merge_nodes :: proc(db: ^Database, a, b: BTree_Node) -> (res: BTree_Join_R
 	return btree_assemble_branch(db, children[: a.num + b.num], counts[: a.num + b.num], a.num + b.num)
 }
 
-btree_join_right :: proc(db: ^Database, a_ptr: i64, ha: int, b_ptr: i64, hb: int, depth: int = 0) -> (res: BTree_Join_Result, err: Error) {
+btree_join_right :: proc(db: ^Database, a_ptr: i64, ha: int, expected_a: i64, b_ptr: i64, hb: int, expected_b: i64, depth: int = 0) -> (res: BTree_Join_Result, err: Error) {
 	if depth >= ITERATOR_STACK_SIZE * 2 || ha <= hb {
-		return {}, .Max_Shift_Exceeded
+		return {}, .Invalid_BTree_Node
 	}
 	a := read_btree_node(db, a_ptr) or_return
-	if a.kind != .Branch || a.num == 0 {
+	if a.kind != .Branch || a.num == 0 || btree_node_subtree_count(a) != expected_a {
 		return {}, .Invalid_BTree_Node
 	}
 	last := a.num - 1
-	if a.children[last].tag != .Index {
-		return {}, .Unexpected_Tag
-	}
 	sub: BTree_Join_Result
 	if ha - 1 == hb {
 		last_child := read_btree_node(db, a.children[last].value) or_return
 		b_node := read_btree_node(db, b_ptr) or_return
-		sub = btree_merge_nodes(db, last_child, b_node) or_return
+		sub = btree_merge_nodes(db, last_child, a.counts[last], b_node, expected_b, hb) or_return
 	} else {
-		sub = btree_join_right(db, a.children[last].value, ha - 1, b_ptr, hb, depth + 1) or_return
+		sub = btree_join_right(db, a.children[last].value, ha - 1, a.counts[last], b_ptr, hb, expected_b, depth + 1) or_return
 	}
 
 	children: [BTREE_SLOT_COUNT + 1]Slot
@@ -880,24 +1048,21 @@ btree_join_right :: proc(db: ^Database, a_ptr: i64, ha: int, b_ptr: i64, hb: int
 	return btree_assemble_branch(db, children[:total], counts[:total], total)
 }
 
-btree_join_left :: proc(db: ^Database, a_ptr: i64, ha: int, b_ptr: i64, hb: int, depth: int = 0) -> (res: BTree_Join_Result, err: Error) {
+btree_join_left :: proc(db: ^Database, a_ptr: i64, ha: int, expected_a: i64, b_ptr: i64, hb: int, expected_b: i64, depth: int = 0) -> (res: BTree_Join_Result, err: Error) {
 	if depth >= ITERATOR_STACK_SIZE * 2 || hb <= ha {
-		return {}, .Max_Shift_Exceeded
-	}
-	b := read_btree_node(db, b_ptr) or_return
-	if b.kind != .Branch || b.num == 0 {
 		return {}, .Invalid_BTree_Node
 	}
-	if b.children[0].tag != .Index {
-		return {}, .Unexpected_Tag
+	b := read_btree_node(db, b_ptr) or_return
+	if b.kind != .Branch || b.num == 0 || btree_node_subtree_count(b) != expected_b {
+		return {}, .Invalid_BTree_Node
 	}
 	sub: BTree_Join_Result
 	if hb - 1 == ha {
 		a_node := read_btree_node(db, a_ptr) or_return
 		first_child := read_btree_node(db, b.children[0].value) or_return
-		sub = btree_merge_nodes(db, a_node, first_child) or_return
+		sub = btree_merge_nodes(db, a_node, expected_a, first_child, b.counts[0], ha) or_return
 	} else {
-		sub = btree_join_left(db, a_ptr, ha, b.children[0].value, hb - 1, depth + 1) or_return
+		sub = btree_join_left(db, a_ptr, ha, expected_a, b.children[0].value, hb - 1, b.counts[0], depth + 1) or_return
 	}
 
 	children: [BTREE_SLOT_COUNT + 1]Slot
@@ -919,18 +1084,18 @@ btree_join_left :: proc(db: ^Database, a_ptr: i64, ha: int, b_ptr: i64, hb: int,
 	return btree_assemble_branch(db, children[:total], counts[:total], total)
 }
 
-btree_join :: proc(db: ^Database, root_a, root_b: i64) -> (res: i64, err: Error) {
-	ha := btree_height(db, root_a) or_return
-	hb := btree_height(db, root_b) or_return
+btree_join :: proc(db: ^Database, root_a, size_a, root_b, size_b: i64) -> (res: i64, err: Error) {
+	ha := btree_checked_height(db, root_a, size_a) or_return
+	hb := btree_checked_height(db, root_b, size_b) or_return
 	result: BTree_Join_Result
 	if ha == hb {
 		a := read_btree_node(db, root_a) or_return
 		b := read_btree_node(db, root_b) or_return
-		result = btree_merge_nodes(db, a, b) or_return
+		result = btree_merge_nodes(db, a, size_a, b, size_b, ha) or_return
 	} else if ha > hb {
-		result = btree_join_right(db, root_a, ha, root_b, hb) or_return
+		result = btree_join_right(db, root_a, ha, size_a, root_b, hb, size_b) or_return
 	} else {
-		result = btree_join_left(db, root_a, ha, root_b, hb) or_return
+		result = btree_join_left(db, root_a, ha, size_a, root_b, hb, size_b) or_return
 	}
 	return btree_make_root(db, result)
 }
@@ -950,22 +1115,28 @@ btree_subtree :: proc(db: ^Database, children: []Slot, counts: []i64, start, len
 	return branch_res.node_ptr, nil
 }
 
-btree_split_right :: proc(db: ^Database, root_ptr, rank: i64, depth: int = 0) -> (res: i64, err: Error) {
+btree_split_right :: proc(db: ^Database, root_ptr, rank, expected: i64, depth: int = 0) -> (res: i64, err: Error) {
 	if depth >= ITERATOR_STACK_SIZE * 2 {
-		return 0, .Max_Shift_Exceeded
-	}
-	if rank == 0 {
-		return root_ptr, nil
+		return 0, .Invalid_BTree_Node
 	}
 	node := read_btree_node(db, root_ptr) or_return
 	if node.kind == .Leaf {
 		r := int(rank)
-		if r < 0 || r > node.num {
+		if i64(node.num) != expected || r < 0 || r > node.num {
 			return 0, .Invalid_BTree_Node
+		}
+		if r == 0 {
+			return root_ptr, nil
 		}
 		right := BTree_Node{kind = .Leaf, num = node.num - r}
 		copy(right.values[: node.num - r], node.values[r:node.num])
 		return write_btree_node(db, right)
+	}
+	if btree_node_subtree_count(node) != expected {
+		return 0, .Invalid_BTree_Node
+	}
+	if rank == 0 {
+		return root_ptr, nil
 	}
 	i := 0
 	rem := rank
@@ -973,33 +1144,34 @@ btree_split_right :: proc(db: ^Database, root_ptr, rank: i64, depth: int = 0) ->
 		rem -= node.counts[i]
 		i += 1
 	}
+	if rem > node.counts[i] {
+		return 0, .Invalid_BTree_Node
+	}
 	if rem == node.counts[i] {
 		return btree_subtree(db, node.children[:], node.counts[:], i + 1, node.num - (i + 1))
 	}
-	if node.children[i].tag != .Index {
-		return 0, .Unexpected_Tag
-	}
-	child_right := btree_split_right(db, node.children[i].value, rem, depth + 1) or_return
+	child_right := btree_split_right(db, node.children[i].value, rem, node.counts[i], depth + 1) or_return
 	joined_right := child_right
 	if i + 1 < node.num {
 		right_sub := btree_subtree(db, node.children[:], node.counts[:], i + 1, node.num - (i + 1)) or_return
-		joined_right = btree_join(db, child_right, right_sub) or_return
+		right_count := _sum_counts_i64(node.counts[i + 1 : node.num]) or_return
+		joined_right = btree_join(db, child_right, node.counts[i] - rem, right_sub, right_count) or_return
 	}
 	return joined_right, nil
 }
 
-btree_split_left :: proc(db: ^Database, root_ptr, rank: i64, depth: int = 0) -> (res: i64, err: Error) {
+btree_split_left :: proc(db: ^Database, root_ptr, rank, expected: i64, depth: int = 0) -> (res: i64, err: Error) {
 	if depth >= ITERATOR_STACK_SIZE * 2 {
-		return 0, .Max_Shift_Exceeded
-	}
-	if rank == 0 {
-		return btree_new_root(db)
+		return 0, .Invalid_BTree_Node
 	}
 	node := read_btree_node(db, root_ptr) or_return
 	if node.kind == .Leaf {
 		r := int(rank)
-		if r < 0 || r > node.num {
+		if i64(node.num) != expected || r < 0 || r > node.num {
 			return 0, .Invalid_BTree_Node
+		}
+		if r == 0 {
+			return btree_new_root(db)
 		}
 		if r == node.num {
 			return root_ptr, nil
@@ -1008,11 +1180,20 @@ btree_split_left :: proc(db: ^Database, root_ptr, rank: i64, depth: int = 0) -> 
 		copy(left.values[:r], node.values[:r])
 		return write_btree_node(db, left)
 	}
+	if btree_node_subtree_count(node) != expected {
+		return 0, .Invalid_BTree_Node
+	}
+	if rank == 0 {
+		return btree_new_root(db)
+	}
 	i := 0
 	rem := rank
 	for i + 1 < node.num && rem > node.counts[i] {
 		rem -= node.counts[i]
 		i += 1
+	}
+	if rem > node.counts[i] {
+		return 0, .Invalid_BTree_Node
 	}
 	if rem == node.counts[i] {
 		if i + 1 == node.num {
@@ -1020,26 +1201,24 @@ btree_split_left :: proc(db: ^Database, root_ptr, rank: i64, depth: int = 0) -> 
 		}
 		return btree_subtree(db, node.children[:], node.counts[:], 0, i + 1)
 	}
-	if node.children[i].tag != .Index {
-		return 0, .Unexpected_Tag
-	}
-	child_left := btree_split_left(db, node.children[i].value, rem, depth + 1) or_return
+	child_left := btree_split_left(db, node.children[i].value, rem, node.counts[i], depth + 1) or_return
 	joined_left := child_left
 	if i > 0 {
 		left_sub := btree_subtree(db, node.children[:], node.counts[:], 0, i) or_return
-		joined_left = btree_join(db, left_sub, child_left) or_return
+		left_count := _sum_counts_i64(node.counts[:i]) or_return
+		joined_left = btree_join(db, left_sub, left_count, child_left, rem) or_return
 	}
 	return joined_left, nil
 }
 
-btree_split :: proc(db: ^Database, root_ptr, rank: i64, depth: int = 0) -> (res: BTree_Split_Result, err: Error) {
+btree_split :: proc(db: ^Database, root_ptr, rank, expected: i64, depth: int = 0) -> (res: BTree_Split_Result, err: Error) {
 	if depth >= ITERATOR_STACK_SIZE * 2 {
-		return {}, .Max_Shift_Exceeded
+		return {}, .Invalid_BTree_Node
 	}
 	node := read_btree_node(db, root_ptr) or_return
 	if node.kind == .Leaf {
 		r := int(rank)
-		if r < 0 || r > node.num {
+		if i64(node.num) != expected || r < 0 || r > node.num {
 			return {}, .Invalid_BTree_Node
 		}
 		left := BTree_Node{kind = .Leaf, num = r}
@@ -1050,25 +1229,30 @@ btree_split :: proc(db: ^Database, root_ptr, rank: i64, depth: int = 0) -> (res:
 		right_ptr := write_btree_node(db, right) or_return
 		return BTree_Split_Result{left = left_ptr, right = right_ptr}, nil
 	}
+	if btree_node_subtree_count(node) != expected {
+		return {}, .Invalid_BTree_Node
+	}
 	i := 0
 	rem := rank
 	for i + 1 < node.num && rem > node.counts[i] {
 		rem -= node.counts[i]
 		i += 1
 	}
-	if node.children[i].tag != .Index {
-		return {}, .Unexpected_Tag
+	if rem > node.counts[i] {
+		return {}, .Invalid_BTree_Node
 	}
-	child := btree_split(db, node.children[i].value, rem, depth + 1) or_return
+	child := btree_split(db, node.children[i].value, rem, node.counts[i], depth + 1) or_return
 	joined_left := child.left
 	if i > 0 {
 		left_sub := btree_subtree(db, node.children[:], node.counts[:], 0, i) or_return
-		joined_left = btree_join(db, left_sub, child.left) or_return
+		left_count := _sum_counts_i64(node.counts[:i]) or_return
+		joined_left = btree_join(db, left_sub, left_count, child.left, rem) or_return
 	}
 	joined_right := child.right
 	if i + 1 < node.num {
 		right_sub := btree_subtree(db, node.children[:], node.counts[:], i + 1, node.num - (i + 1)) or_return
-		joined_right = btree_join(db, child.right, right_sub) or_return
+		right_count := _sum_counts_i64(node.counts[i + 1 : node.num]) or_return
+		joined_right = btree_join(db, child.right, node.counts[i] - rem, right_sub, right_count) or_return
 	}
 	return BTree_Split_Result{left = joined_left, right = joined_right}, nil
 }
@@ -1094,23 +1278,66 @@ read_sorted_node :: proc(db: ^Database, ptr: i64) -> (res: Sorted_Node, err: Err
 	node := Sorted_Node{kind = kind, num = num}
 	switch kind {
 	case .Leaf:
-		for i in 0 ..< num {
-			node.entries[i] = slot_from_slice(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH]) or_return
+		for i in 0 ..< BTREE_SLOT_COUNT {
+			s := slot_from_slice(body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
+			if i < num {
+				if !is_sorted_entry_tag(s.tag) {
+					return {}, .Invalid_BTree_Node
+				}
+				node.entries[i] = s
+			} else if !slot_empty(s) {
+				return {}, .Invalid_BTree_Node
+			}
 		}
 	case .Branch:
 		if len(block) < SORTED_BRANCH_BLOCK_SIZE {
 			return {}, Xitdb_Error.Unexpected_EOF
 		}
-		for i in 0 ..< num {
-			node.children[i] = slot_from_slice(body[i * SLOT_LENGTH : i * SLOT_LENGTH + SLOT_LENGTH]) or_return
+		for i in 0 ..< BTREE_SLOT_COUNT {
+			s := slot_from_slice(body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
+			if i < num {
+				if s.tag != .Index {
+					return {}, .Invalid_BTree_Node
+				}
+				node.children[i] = s
+			} else if !slot_empty(s) {
+				return {}, .Invalid_BTree_Node
+			}
 		}
 		sep_offset := SLOT_LENGTH * BTREE_SLOT_COUNT
-		for i in 0 ..< num {
-			node.separators[i] = slot_from_slice(body[sep_offset + i * SLOT_LENGTH : sep_offset + i * SLOT_LENGTH + SLOT_LENGTH]) or_return
+		for i in 0 ..< BTREE_SLOT_COUNT {
+			s := slot_from_slice(body[sep_offset + i * SLOT_LENGTH : sep_offset + (i + 1) * SLOT_LENGTH]) or_return
+			if i == 0 {
+				if !slot_empty(s) && s.tag != .Bytes && s.tag != .Short_Bytes {
+					return {}, .Invalid_BTree_Node
+				}
+				node.separators[i] = s
+			} else if i < num {
+				if s.tag != .Bytes && s.tag != .Short_Bytes {
+					return {}, .Invalid_BTree_Node
+				}
+				node.separators[i] = s
+			} else if !slot_empty(s) {
+				return {}, .Invalid_BTree_Node
+			}
 		}
 		counts_offset := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
-		for i in 0 ..< num {
-			node.counts[i] = i64(endian.unchecked_get_u64be(body[counts_offset + i * 8 : counts_offset + i * 8 + 8]))
+		total: i64 = 0
+		for i in 0 ..< BTREE_SLOT_COUNT {
+			raw := endian.unchecked_get_u64be(body[counts_offset + i * 8 : counts_offset + (i + 1) * 8])
+			if i < num {
+				if raw > u64(max(i64)) {
+					return {}, .Invalid_BTree_Node
+				}
+				ok: bool
+				total, ok = _checked_add_i64(total, i64(raw))
+				if !ok {
+					return {}, .Invalid_BTree_Node
+				}
+				node.counts[i] = i64(raw)
+			} else if raw != 0 {
+				return {}, .Invalid_BTree_Node
+			}
 		}
 	}
 	return node, nil
@@ -1312,132 +1539,76 @@ sorted_branch_search :: proc(db: ^Database, node: ^Sorted_Node, key: []u8) -> (i
 	return lo - 1, nil
 }
 
-sorted_get :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: Maybe(Slot), err: Error) {
-	node_ptr := root_ptr
-	buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
-	depth := 0
-	for {
+sorted_get :: proc(db: ^Database, header: BTree_Header, key: []u8) -> (res: Maybe(Slot), err: Error) {
+	if header.size == 0 {
+		return nil, nil
+	}
+	node_ptr := header.root_ptr
+	expected := header.size
+	for depth := 0; ; depth += 1 {
 		if depth >= ITERATOR_STACK_SIZE * 2 {
-			return nil, .Max_Shift_Exceeded
-		}
-		depth += 1
-		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
-		if len(block) < SORTED_LEAF_BLOCK_SIZE {
-			return nil, Xitdb_Error.Unexpected_EOF
-		}
-		kind_int := block[0]
-		if kind_int > u8(BTree_Node_Kind.Branch) {
-			return nil, .Invalid_BTree_Node_Kind
-		}
-		num := int(block[1])
-		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
 			return nil, .Invalid_BTree_Node
 		}
-		body := block[BTREE_NODE_HEADER_SIZE:]
-		if BTree_Node_Kind(kind_int) == .Leaf {
-			lo := 0
-			hi := num
-			for lo < hi {
-				mid := int(uint(lo + hi) >> 1)
-				entry_slot := slot_from_slice(body[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH]) or_return
-				key_slot := sorted_entry_key_slot(db, entry_slot) or_return
-				cmp := compare_key(db, key_slot, key) or_return
-				if cmp == 0 {
-					return entry_slot, nil
-				} else if cmp < 0 {
-					lo = mid + 1
-				} else {
-					hi = mid
-				}
+		node := read_sorted_node(db, node_ptr) or_return
+		switch node.kind {
+		case .Leaf:
+			if i64(node.num) != expected {
+				return nil, .Invalid_BTree_Node
 			}
-			return nil, nil
-		}
-		if len(block) < SORTED_BRANCH_BLOCK_SIZE {
-			return nil, Xitdb_Error.Unexpected_EOF
-		}
-		lo := 1
-		hi := num
-		sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
-		for lo < hi {
-			mid := int(uint(lo + hi) >> 1)
-			sep_slot := slot_from_slice(body[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH]) or_return
-			c := compare_key(db, sep_slot, key) or_return
-			if c <= 0 {
-				lo = mid + 1
-			} else {
-				hi = mid
+			idx, found := sorted_leaf_search(db, &node, key) or_return
+			if !found {
+				return nil, nil
 			}
+			return node.entries[idx], nil
+		case .Branch:
+			if sorted_node_subtree_count(node) != expected {
+				return nil, .Invalid_BTree_Node
+			}
+			i := sorted_branch_search(db, &node, key) or_return
+			expected = node.counts[i]
+			node_ptr = node.children[i].value
 		}
-		child_idx := lo - 1
-		child_slot := slot_from_slice(body[child_idx * SLOT_LENGTH : (child_idx + 1) * SLOT_LENGTH]) or_return
-		node_ptr = child_slot.value
 	}
 }
 
-sorted_rank :: proc(db: ^Database, root_ptr: i64, key: []u8) -> (res: i64, err: Error) {
-	node_ptr := root_ptr
+sorted_rank :: proc(db: ^Database, header: BTree_Header, key: []u8) -> (res: i64, err: Error) {
+	if header.size == 0 {
+		return 0, nil
+	}
+	node_ptr := header.root_ptr
+	expected := header.size
 	rank: i64 = 0
-	buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
-	depth := 0
-	for {
+	for depth := 0; ; depth += 1 {
 		if depth >= ITERATOR_STACK_SIZE * 2 {
-			return 0, .Max_Shift_Exceeded
-		}
-		depth += 1
-		block := core_read_block_at(db.core, node_ptr, buf[:]) or_return
-		if len(block) < SORTED_LEAF_BLOCK_SIZE {
-			return 0, Xitdb_Error.Unexpected_EOF
-		}
-		kind_int := block[0]
-		if kind_int > u8(BTree_Node_Kind.Branch) {
-			return 0, .Invalid_BTree_Node_Kind
-		}
-		num := int(block[1])
-		if num > BTREE_SLOT_COUNT || (BTree_Node_Kind(kind_int) == .Branch && num == 0) {
 			return 0, .Invalid_BTree_Node
 		}
-		body := block[BTREE_NODE_HEADER_SIZE:]
-		if BTree_Node_Kind(kind_int) == .Leaf {
-			lo := 0
-			hi := num
-			for lo < hi {
-				mid := int(uint(lo + hi) >> 1)
-				entry_slot := slot_from_slice(body[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH]) or_return
-				key_slot := sorted_entry_key_slot(db, entry_slot) or_return
-				cmp := compare_key(db, key_slot, key) or_return
-				if cmp == 0 {
-					return rank + i64(mid), nil
-				} else if cmp < 0 {
-					lo = mid + 1
-				} else {
-					hi = mid
+		node := read_sorted_node(db, node_ptr) or_return
+		switch node.kind {
+		case .Leaf:
+			if i64(node.num) != expected {
+				return 0, .Invalid_BTree_Node
+			}
+			idx, _ := sorted_leaf_search(db, &node, key) or_return
+			total, ok := _checked_add_i64(rank, i64(idx))
+			if !ok || total > header.size {
+				return 0, .Invalid_BTree_Node
+			}
+			return total, nil
+		case .Branch:
+			if sorted_node_subtree_count(node) != expected {
+				return 0, .Invalid_BTree_Node
+			}
+			i := sorted_branch_search(db, &node, key) or_return
+			for k in 0 ..< i {
+				ok: bool
+				rank, ok = _checked_add_i64(rank, node.counts[k])
+				if !ok {
+					return 0, .Invalid_BTree_Node
 				}
 			}
-			return rank + i64(lo), nil
+			expected = node.counts[i]
+			node_ptr = node.children[i].value
 		}
-		if len(block) < SORTED_BRANCH_BLOCK_SIZE {
-			return 0, Xitdb_Error.Unexpected_EOF
-		}
-		lo := 1
-		hi := num
-		sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
-		for lo < hi {
-			mid := int(uint(lo + hi) >> 1)
-			sep_slot := slot_from_slice(body[sep_off + mid * SLOT_LENGTH : sep_off + (mid + 1) * SLOT_LENGTH]) or_return
-			c := compare_key(db, sep_slot, key) or_return
-			if c <= 0 {
-				lo = mid + 1
-			} else {
-				hi = mid
-			}
-		}
-		i := lo - 1
-		counts_off := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
-		for k in 0 ..< i {
-			rank += i64(endian.unchecked_get_u64be(body[counts_off + k * 8 : counts_off + (k + 1) * 8]))
-		}
-		child_slot := slot_from_slice(body[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
-		node_ptr = child_slot.value
 	}
 }
 
@@ -1533,9 +1704,9 @@ write_sorted_key_and_entry :: proc(db: ^Database, key: []u8, key_only: bool) -> 
 	return key_slot, entry, nil
 }
 
-sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, frozen_at: i64, depth: int = 0) -> (res: Sorted_Insert_Result, err: Error) {
+sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, expected: i64, key_only, can_add: bool, frozen_at: i64, depth: int = 0) -> (res: Sorted_Insert_Result, err: Error) {
 	if depth >= ITERATOR_STACK_SIZE * 2 {
-		return {}, .Max_Shift_Exceeded
+		return {}, .Invalid_BTree_Node
 	}
 	reusable := btree_reusable(db, node_ptr, frozen_at)
 	if reusable {
@@ -1554,6 +1725,9 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 		}
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		if BTree_Node_Kind(kind_int) == .Leaf {
+			if i64(num) != expected {
+				return {}, .Invalid_BTree_Node
+			}
 			entries_buf := block[BTREE_NODE_HEADER_SIZE : BTREE_NODE_HEADER_SIZE + SLOT_LENGTH * BTREE_SLOT_COUNT]
 			lo := 0
 			hi := num
@@ -1562,6 +1736,9 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 			for lo < hi {
 				mid := int(uint(lo + hi) >> 1)
 				entry_slot := slot_from_slice(entries_buf[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH]) or_return
+				if !is_sorted_entry_tag(entry_slot.tag) {
+					return {}, .Invalid_BTree_Node
+				}
 				key_slot := sorted_entry_key_slot(db, entry_slot) or_return
 				cmp := compare_key(db, key_slot, key) or_return
 				if cmp == 0 {
@@ -1605,6 +1782,9 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 					entry    = entry,
 					added    = false,
 				}, nil
+			}
+			if !can_add {
+				return {}, .Invalid_BTree_Node
 			}
 			idx := lo
 			key_slot, entry := write_sorted_key_and_entry(db, key, key_only) or_return
@@ -1668,6 +1848,22 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 				return {}, Xitdb_Error.Unexpected_EOF
 			}
 			branch_buf := block[BTREE_NODE_HEADER_SIZE:SORTED_BRANCH_BLOCK_SIZE]
+			counts_base := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
+			total_cnt: i64 = 0
+			for k in 0 ..< num {
+				raw := endian.unchecked_get_u64be(branch_buf[counts_base + k * 8 : counts_base + (k + 1) * 8])
+				if raw > u64(max(i64)) {
+					return {}, .Invalid_BTree_Node
+				}
+				ok: bool
+				total_cnt, ok = _checked_add_i64(total_cnt, i64(raw))
+				if !ok {
+					return {}, .Invalid_BTree_Node
+				}
+			}
+			if total_cnt != expected {
+				return {}, .Invalid_BTree_Node
+			}
 			lo := 1
 			hi := num
 			sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
@@ -1685,27 +1881,35 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 			child_slot_pos := position + i64(i) * SLOT_LENGTH
 			child_slot := slot_from_slice(branch_buf[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
 			if child_slot.tag != .Index {
-				return {}, .Unexpected_Tag
+				return {}, .Invalid_BTree_Node
 			}
+			counts_off := counts_base + i * 8
+			old_cnt := i64(endian.unchecked_get_u64be(branch_buf[counts_off : counts_off + 8]))
 			child_ptr := child_slot.value
-			child := sorted_put(db, child_ptr, key, key_only, frozen_at, depth + 1) or_return
+			child := sorted_put(db, child_ptr, key, old_cnt, key_only, can_add, frozen_at, depth + 1) or_return
 			if child.split == nil {
 				if child.node_ptr != child_ptr {
 					core_seek_to(db.core, child_slot_pos) or_return
 					core_write_slot(db.core, Slot{value = child.node_ptr, tag = .Index}) or_return
 				}
-				new_cnt: i64 = 0
+				branch_cnt := total_cnt
 				if child.added {
-					counts_off := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + i * 8
-					old_cnt := i64(endian.unchecked_get_u64be(branch_buf[counts_off : counts_off + 8]))
-					new_cnt = old_cnt + 1
+					cnt_added, add_ok := _checked_add_i64(old_cnt, 1)
+					if !add_ok {
+						return {}, .Invalid_BTree_Node
+					}
+					total_added, total_ok := _checked_add_i64(total_cnt, 1)
+					if !total_ok {
+						return {}, .Invalid_BTree_Node
+					}
+					branch_cnt = total_added
 					count_pos := position + i64(counts_off)
 					core_seek_to(db.core, count_pos) or_return
-					core_write_i64(db.core, new_cnt) or_return
+					core_write_i64(db.core, cnt_added) or_return
 				}
 				return Sorted_Insert_Result{
 					node_ptr = node_ptr,
-					count    = new_cnt,
+					count    = branch_cnt,
 					entry    = child.entry,
 					added    = child.added,
 				}, nil
@@ -1714,7 +1918,6 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 			children: [BTREE_SLOT_COUNT + 1]Slot = ---
 			separators: [BTREE_SLOT_COUNT + 1]Slot = ---
 			counts: [BTREE_SLOT_COUNT + 1]i64 = ---
-			counts_base := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
 			for k in 0 ..< num {
 				children[k] = slot_from_slice(branch_buf[k * SLOT_LENGTH : (k + 1) * SLOT_LENGTH]) or_return
 				separators[k] = slot_from_slice(branch_buf[sep_off + k * SLOT_LENGTH : sep_off + (k + 1) * SLOT_LENGTH]) or_return
@@ -1734,6 +1937,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 			total := num + 1
 
 			if total <= BTREE_SLOT_COUNT {
+				branch_cnt := _sum_counts_i64(counts[:total]) or_return
 				branch := Sorted_Node{kind = .Branch, num = total}
 				copy(branch.children[:total], children[:total])
 				copy(branch.separators[:total], separators[:total])
@@ -1741,7 +1945,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 				ptr := sorted_write_node(db, branch, node_ptr, frozen_at) or_return
 				return Sorted_Insert_Result{
 					node_ptr = ptr,
-					count    = sorted_node_subtree_count(branch),
+					count    = branch_cnt,
 					entry    = child.entry,
 					added    = child.added,
 				}, nil
@@ -1749,6 +1953,8 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 
 			left_n := BTREE_SPLIT_COUNT
 			right_n := total - left_n
+			left_cnt := _sum_counts_i64(counts[:left_n]) or_return
+			right_cnt := _sum_counts_i64(counts[left_n:total]) or_return
 			left := Sorted_Node{kind = .Branch, num = left_n}
 			copy(left.children[:left_n], children[:left_n])
 			copy(left.separators[:left_n], separators[:left_n])
@@ -1762,10 +1968,10 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 			right_ptr := write_sorted_node(db, right) or_return
 			return Sorted_Insert_Result{
 				node_ptr = left_ptr,
-				count    = sorted_node_subtree_count(left),
+				count    = left_cnt,
 				entry    = child.entry,
 				added    = child.added,
-				split    = Sorted_Split{node_ptr = right_ptr, count = sorted_node_subtree_count(right), separator = separator},
+				split    = Sorted_Split{node_ptr = right_ptr, count = right_cnt, separator = separator},
 			}, nil
 		}
 	}
@@ -1773,6 +1979,9 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 	node := read_sorted_node(db, node_ptr) or_return
 	switch node.kind {
 	case .Leaf:
+		if i64(node.num) != expected {
+			return {}, .Invalid_BTree_Node
+		}
 		idx, found := sorted_leaf_search(db, &node, key) or_return
 
 		if found {
@@ -1802,6 +2011,9 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 			}, nil
 		}
 
+		if !can_add {
+			return {}, .Invalid_BTree_Node
+		}
 		key_slot, entry := write_sorted_key_and_entry(db, key, key_only) or_return
 		entries: [BTREE_SLOT_COUNT + 1]Slot
 		copy(entries[:idx], node.entries[:idx])
@@ -1844,12 +2056,12 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 		}, nil
 
 	case .Branch:
-		i := sorted_branch_search(db, &node, key) or_return
-		if node.children[i].tag != .Index {
-			return {}, .Unexpected_Tag
+		if sorted_node_subtree_count(node) != expected {
+			return {}, .Invalid_BTree_Node
 		}
+		i := sorted_branch_search(db, &node, key) or_return
 		child_ptr := node.children[i].value
-		child := sorted_put(db, child_ptr, key, key_only, frozen_at, depth + 1) or_return
+		child := sorted_put(db, child_ptr, key, node.counts[i], key_only, can_add, frozen_at, depth + 1) or_return
 		if !child.added && child.node_ptr == child_ptr {
 			return Sorted_Insert_Result{
 				node_ptr = node_ptr,
@@ -1866,7 +2078,17 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 		copy(separators[:node.num], node.separators[:node.num])
 		copy(counts[:node.num], node.counts[:node.num])
 		children[i] = Slot{value = child.node_ptr, tag = .Index}
-		counts[i] = child.count if child.split != nil else (node.counts[i] + (1 if child.added else 0))
+		if child.split != nil {
+			counts[i] = child.count
+		} else if child.added {
+			cnt_added, add_ok := _checked_add_i64(node.counts[i], 1)
+			if !add_ok {
+				return {}, .Invalid_BTree_Node
+			}
+			counts[i] = cnt_added
+		} else {
+			counts[i] = node.counts[i]
+		}
 		total := node.num
 		if split, ok := child.split.?; ok {
 			for j := node.num; j > i + 1; j -= 1 {
@@ -1881,6 +2103,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 		}
 
 		if total <= BTREE_SLOT_COUNT {
+			branch_cnt := _sum_counts_i64(counts[:total]) or_return
 			branch := Sorted_Node{kind = .Branch, num = total}
 			copy(branch.children[:total], children[:total])
 			copy(branch.separators[:total], separators[:total])
@@ -1888,7 +2111,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 			ptr := sorted_write_node(db, branch, node_ptr, frozen_at) or_return
 			return Sorted_Insert_Result{
 				node_ptr = ptr,
-				count    = sorted_node_subtree_count(branch),
+				count    = branch_cnt,
 				entry    = child.entry,
 				added    = child.added,
 			}, nil
@@ -1896,6 +2119,8 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 
 		left_n := BTREE_SPLIT_COUNT
 		right_n := total - left_n
+		left_cnt := _sum_counts_i64(counts[:left_n]) or_return
+		right_cnt := _sum_counts_i64(counts[left_n:total]) or_return
 		left := Sorted_Node{kind = .Branch, num = left_n}
 		copy(left.children[:left_n], children[:left_n])
 		copy(left.separators[:left_n], separators[:left_n])
@@ -1909,18 +2134,18 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, key_only: bool, froz
 		right_ptr := write_sorted_node(db, right) or_return
 		return Sorted_Insert_Result{
 			node_ptr = left_ptr,
-			count    = sorted_node_subtree_count(left),
+			count    = left_cnt,
 			entry    = child.entry,
 			added    = child.added,
-			split    = Sorted_Split{node_ptr = right_ptr, count = sorted_node_subtree_count(right), separator = separator},
+			split    = Sorted_Split{node_ptr = right_ptr, count = right_cnt, separator = separator},
 		}, nil
 	}
 	return {}, .Unreachable
 }
 
-sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64, depth: int = 0) -> (res: Sorted_Remove_Result, err: Error) {
+sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, expected, frozen_at: i64, depth: int = 0) -> (res: Sorted_Remove_Result, err: Error) {
 	if depth >= ITERATOR_STACK_SIZE * 2 {
-		return {}, .Max_Shift_Exceeded
+		return {}, .Invalid_BTree_Node
 	}
 	if btree_reusable(db, node_ptr, frozen_at) {
 		node_buf: [SORTED_BRANCH_BLOCK_SIZE]u8 = ---
@@ -1938,6 +2163,9 @@ sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64, d
 		}
 		position := node_ptr + BTREE_NODE_HEADER_SIZE
 		if BTree_Node_Kind(kind_int) == .Leaf {
+			if i64(num) != expected {
+				return {}, .Invalid_BTree_Node
+			}
 			entries_buf := block[BTREE_NODE_HEADER_SIZE : BTREE_NODE_HEADER_SIZE + SLOT_LENGTH * BTREE_SLOT_COUNT]
 			lo := 0
 			hi := num
@@ -1945,6 +2173,9 @@ sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64, d
 			for lo < hi {
 				mid := int(uint(lo + hi) >> 1)
 				entry_slot := slot_from_slice(entries_buf[mid * SLOT_LENGTH : (mid + 1) * SLOT_LENGTH]) or_return
+				if !is_sorted_entry_tag(entry_slot.tag) {
+					return {}, .Invalid_BTree_Node
+				}
 				key_slot := sorted_entry_key_slot(db, entry_slot) or_return
 				cmp := compare_key(db, key_slot, key) or_return
 				if cmp == 0 {
@@ -1979,6 +2210,22 @@ sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64, d
 				return {}, Xitdb_Error.Unexpected_EOF
 			}
 			branch_buf := block[BTREE_NODE_HEADER_SIZE:SORTED_BRANCH_BLOCK_SIZE]
+			counts_base := SLOT_LENGTH * 2 * BTREE_SLOT_COUNT
+			total_cnt: i64 = 0
+			for k in 0 ..< num {
+				raw := endian.unchecked_get_u64be(branch_buf[counts_base + k * 8 : counts_base + (k + 1) * 8])
+				if raw > u64(max(i64)) {
+					return {}, .Invalid_BTree_Node
+				}
+				ok: bool
+				total_cnt, ok = _checked_add_i64(total_cnt, i64(raw))
+				if !ok {
+					return {}, .Invalid_BTree_Node
+				}
+			}
+			if total_cnt != expected {
+				return {}, .Invalid_BTree_Node
+			}
 			lo := 1
 			hi := num
 			sep_off := SLOT_LENGTH * BTREE_SLOT_COUNT
@@ -1996,15 +2243,18 @@ sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64, d
 			child_slot_pos := position + i64(i) * SLOT_LENGTH
 			child_slot := slot_from_slice(branch_buf[i * SLOT_LENGTH : (i + 1) * SLOT_LENGTH]) or_return
 			if child_slot.tag != .Index {
-				return {}, .Unexpected_Tag
+				return {}, .Invalid_BTree_Node
 			}
+			old_cnt := i64(endian.unchecked_get_u64be(branch_buf[counts_base + i * 8 : counts_base + (i + 1) * 8]))
 			child_ptr := child_slot.value
-			child := sorted_remove(db, child_ptr, key, frozen_at, depth + 1) or_return
+			child := sorted_remove(db, child_ptr, key, old_cnt, frozen_at, depth + 1) or_return
 			if !child.found {
 				return Sorted_Remove_Result{node_ptr = node_ptr, found = false}, nil
 			}
-			count_pos := position + SLOT_LENGTH * 2 * BTREE_SLOT_COUNT + i64(i) * 8
-			old_cnt := core_read_i64_at(db.core, count_pos) or_return
+			if old_cnt <= 0 {
+				return {}, .Invalid_BTree_Node
+			}
+			count_pos := position + i64(counts_base + i * 8)
 			if !(old_cnt == 1 && num > 1) {
 				if child.node_ptr != child_ptr {
 					core_seek_to(db.core, child_slot_pos) or_return
@@ -2031,6 +2281,9 @@ sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64, d
 	node := read_sorted_node(db, node_ptr) or_return
 	switch node.kind {
 	case .Leaf:
+		if i64(node.num) != expected {
+			return {}, .Invalid_BTree_Node
+		}
 		idx, found := sorted_leaf_search(db, &node, key) or_return
 		if !found {
 			return Sorted_Remove_Result{node_ptr = node_ptr, found = false}, nil
@@ -2042,16 +2295,19 @@ sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, frozen_at: i64, d
 		return Sorted_Remove_Result{node_ptr = ptr, found = true}, nil
 
 	case .Branch:
-		i := sorted_branch_search(db, &node, key) or_return
-		if node.children[i].tag != .Index {
-			return {}, .Unexpected_Tag
+		if sorted_node_subtree_count(node) != expected {
+			return {}, .Invalid_BTree_Node
 		}
+		i := sorted_branch_search(db, &node, key) or_return
 		child_ptr := node.children[i].value
-		child := sorted_remove(db, child_ptr, key, frozen_at, depth + 1) or_return
+		child := sorted_remove(db, child_ptr, key, node.counts[i], frozen_at, depth + 1) or_return
 		if !child.found {
 			return Sorted_Remove_Result{node_ptr = node_ptr, found = false}, nil
 		}
 		branch := node
+		if branch.counts[i] <= 0 {
+			return {}, .Invalid_BTree_Node
+		}
 		if branch.counts[i] == 1 && branch.num > 1 {
 			copy(branch.children[i : branch.num - 1], branch.children[i + 1 : branch.num])
 			copy(branch.separators[i : branch.num - 1], branch.separators[i + 1 : branch.num])
@@ -2095,7 +2351,11 @@ sorted_target_slot :: proc(db: ^Database, entry: Slot, target: Sorted_Map_Get_Ta
 		if is_key_only_entry(entry) {
 			return Slot_Pointer{position = nil, slot = Slot{}}, nil
 		}
-		pos := entry.value + database_kv_key_offset(db, entry.tag) + SLOT_LENGTH
+		pos_maybe := database_kv_value_position(db, entry) or_return
+		pos, has_pos := pos_maybe.?
+		if !has_pos {
+			return {}, .Unexpected_Tag
+		}
 		val_slot := core_read_slot_at(db.core, pos) or_return
 		return Slot_Pointer{position = pos, slot = val_slot}, nil
 	}

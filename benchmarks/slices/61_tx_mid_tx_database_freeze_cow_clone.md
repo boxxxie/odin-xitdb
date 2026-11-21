@@ -1,6 +1,6 @@
 # #61. `Tx: Mid-tx database_freeze + CoW clone` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 06: CoreBufferedFile Coherency & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) · [Odin Harness (`bench_xitdb.odin#L2067-L2108`)](../bench_xitdb.odin#L2067-L2108) · [Zig Harness (`bench_xitdb.zig#L2181-L2231`)](../bench_xitdb.zig#L2181-L2231)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 06: CoreBufferedFile Coherency & Compaction**](../zig-guide/06_buffered_file_tail_cache_and_compaction.md) · [Odin Harness (`bench_xitdb.odin#L2351-L2394`)](../bench_xitdb.odin#L2351-L2394) · [Zig Harness (`bench_xitdb.zig#L2181-L2231`)](../bench_xitdb.zig#L2181-L2231)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -29,51 +29,53 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L2067-L2108`](../bench_xitdb.odin#L2067-L2108))
+### Odin ([`benchmarks/bench_xitdb.odin#L2351-L2394`](../bench_xitdb.odin#L2351-L2394))
 
 ```odin
-2067 | 	// 5d. Mid-transaction `database_freeze` + CoW subtree cloning & transaction rollback truncation
-2068 | 	{
-2069 | 		core: xitdb.Core = xitdb.core_memory_init()
-2070 | 		defer xitdb.core_destroy(&core)
-2071 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
-2072 | 
-2073 | 		Freeze_Ctx :: struct {
-2074 | 			db:    ^xitdb.Database,
-2075 | 			iters: int,
-2076 | 		}
-2077 | 		fctx := Freeze_Ctx{db = &db, iters = commits}
-2078 | 
-2079 | 		freeze_cow_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
-2080 | 			c := (^Freeze_Ctx)(user_data)
-2081 | 			top := xitdb.write_hash_map_init(cursor^) or_return
-2082 | 			base_wc := xitdb.hash_map_put_cursor(&top, "base") or_return
-2083 | 			base_map := xitdb.write_hash_map_init(base_wc) or_return
-2084 | 			for j in 0 ..< 16 {
-2085 | 				xitdb.hash_map_put(&base_map, fmt.tprintf("k-%02d", j), u64(j)) or_return
-2086 | 			}
-2087 | 			base_slot := xitdb.hash_map_slot(base_map.read_hash_map) or_return
-2088 | 
-2089 | 			for i in 0 ..< c.iters {
-2090 | 				xitdb.database_freeze(c.db) or_return
-2091 | 				fork_key := fmt.tprintf("fork-%04d", i)
-2092 | 				xitdb.hash_map_put(&top, fork_key, base_slot) or_return
-2093 | 				fork_wc := xitdb.hash_map_put_cursor(&top, fork_key) or_return
-2094 | 				fork_map := xitdb.write_hash_map_init(fork_wc) or_return
-2095 | 				xitdb.hash_map_put(&fork_map, "k-00", u64(1000 + i)) or_return
-2096 | 			}
-2097 | 			return nil
-2098 | 		}
-2099 | 
-2100 | 		t_fc := time.now()
-2101 | 		_ = xitdb.database_run_context(&db, freeze_cow_cb, &fctx)
-2102 | 		elapsed_fc := time.since(t_fc)
-2103 | 
-2104 | 		print_result(Bench_Result{
-2105 | 			name    = "Tx: Mid-tx database_freeze + CoW clone",
-2106 | 			ops     = commits,
-2107 | 			elapsed = elapsed_fc,
-2108 | 		})
+2351 | 	// 5d. Mid-transaction `database_freeze` + CoW subtree cloning & transaction rollback truncation
+2352 | 	{
+2353 | 		core: xitdb.Core = xitdb.core_memory_init()
+2354 | 		defer xitdb.core_destroy(&core)
+2355 | 		db, _ := xitdb.database_init(&core, xitdb.sha1_hasher())
+2356 | 
+2357 | 		Freeze_Ctx :: struct {
+2358 | 			db:    ^xitdb.Database,
+2359 | 			iters: int,
+2360 | 		}
+2361 | 		fctx := Freeze_Ctx{db = &db, iters = commits}
+2362 | 
+2363 | 		freeze_cow_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+2364 | 			c := (^Freeze_Ctx)(user_data)
+2365 | 			top := xitdb.write_hash_map_init(cursor^) or_return
+2366 | 			base_wc := xitdb.hash_map_put_cursor(&top, "base") or_return
+2367 | 			base_map := xitdb.write_hash_map_init(base_wc) or_return
+2368 | 			for j in 0 ..< 16 {
+2369 | 				xitdb.hash_map_put(&base_map, fmt.tprintf("k-%02d", j), u64(j)) or_return
+2370 | 			}
+2371 | 			base_slot := xitdb.hash_map_slot(base_map.read_hash_map) or_return
+2372 | 
+2373 | 			for i in 0 ..< c.iters {
+2374 | 				xitdb.database_freeze(c.db) or_return
+2375 | 				fork_key := fmt.tprintf("fork-%04d", i)
+2376 | 				xitdb.hash_map_put(&top, fork_key, base_slot) or_return
+2377 | 				fork_wc := xitdb.hash_map_put_cursor(&top, fork_key) or_return
+2378 | 				fork_map := xitdb.write_hash_map_init(fork_wc) or_return
+2379 | 				xitdb.hash_map_put(&fork_map, "k-00", u64(1000 + i)) or_return
+2380 | 			}
+2381 | 			return nil
+2382 | 		}
+2383 | 
+2384 | 		sp_fc := span_begin()
+2385 | 		_ = xitdb.database_run_context(&db, freeze_cow_cb, &fctx)
+2386 | 		elapsed_fc, hw_fc, has_hw_fc := span_end(sp_fc)
+2387 | 
+2388 | 		print_result(Bench_Result{
+2389 | 			name         = "Tx: Mid-tx database_freeze + CoW clone",
+2390 | 			ops          = commits,
+2391 | 			elapsed      = elapsed_fc,
+2392 | 			counters     = hw_fc,
+2393 | 			has_counters = has_hw_fc,
+2394 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L2181-L2231`](../bench_xitdb.zig#L2181-L2231))
@@ -148,7 +150,7 @@
 | `commitRoot` | 26 | Transaction trailer append, `core.sync()`, and `writeRootHeader` commit sequence | [`lib.zig#L776-L801`](../../reference/xitdb-zig/src/lib.zig#L776-L801) |
 | `readSlotPointer` | 733 | Central path-traversal engine & root transaction dispatcher | [`lib.zig#L859-L1591`](../../reference/xitdb-zig/src/lib.zig#L859-L1591) |
 
-### Reached Odin Procedures (`107` procedures across `6` files · `2332` LOC) (Active `_exec_path_part` arms: `Hash_Map_Init`, `Hash_Map_Get`, `Write_Data`, `Write_KV_Data`, `Context`)
+### Reached Odin Procedures (`108` procedures across `6` files · `2346` LOC) (Active `_exec_path_part` arms: `Hash_Map_Init`, `Hash_Map_Get`, `Write_Data`, `Write_KV_Data`, `Context`)
 
 | File | Procedure | Role / Call Depth | Lines | Source Link (`#L<start>-L<end>`) |
 | :--- | :--- | :--- | ---: | :--- |
@@ -202,7 +204,7 @@
 | `xitdb/database.odin` | `is_root` | `depth 2` (from `cursor_write_path`, `cursor_check_writable`, `cursor_reload_slot`) | 6 | [`xitdb/database.odin#L460-L465`](../../xitdb/database.odin#L460-L465) |
 | `xitdb/database.odin` | `init_tag` | `depth 2` (from `cursor_write_path`, `read_slot_pointer`) | 16 | [`xitdb/database.odin#L467-L482`](../../xitdb/database.odin#L467-L482) |
 | `xitdb/cursor.odin` | `cursor_reload_slot` | `depth 2` (from `cursor_write_path`) | 9 | [`xitdb/cursor.odin#L106-L114`](../../xitdb/cursor.odin#L106-L114) |
-| `xitdb/database.odin` | `read_slot_pointer` | `depth 2` (from `cursor_write_path`, `_exec_path_part`, `database_copy_collection_if_frozen`) | 67 | [`xitdb/database.odin#L595-L661`](../../xitdb/database.odin#L595-L661) |
+| `xitdb/database.odin` | `read_slot_pointer` | `depth 2` (from `cursor_write_path`, `_exec_path_part`, `database_copy_collection_if_frozen`) | 67 | [`xitdb/database.odin#L603-L669`](../../xitdb/database.odin#L603-L669) |
 | `xitdb/database.odin` | `database_truncate` | `depth 2` (from `cursor_write_path`) | 5 | [`xitdb/database.odin#L396-L400`](../../xitdb/database.odin#L396-L400) |
 | `xitdb/cursor.odin` | `new_write_cursor` | `depth 2` (from `cursor_write_path`, `_exec_path_part`) | 13 | [`xitdb/cursor.odin#L30-L42`](../../xitdb/cursor.odin#L30-L42) |
 | `xitdb/cursor.odin` | `cursor_resolved` | `depth 2` (from `read_hash_map_init`, `cursor_slot`) | 8 | [`xitdb/cursor.odin#L48-L55`](../../xitdb/cursor.odin#L48-L55) |
@@ -226,17 +228,18 @@
 | `xitdb/core.odin` | `core_write_slot` | `depth 3` (from `read_slot_pointer`, `_exec_path_part`, `read_map_slot`) | 15 | [`xitdb/core.odin#L1097-L1111`](../../xitdb/core.odin#L1097-L1111) |
 | `xitdb/database.odin` | `init_part_for` | `depth 3` (from `read_slot_pointer`) | 21 | [`xitdb/database.odin#L484-L504`](../../xitdb/database.odin#L484-L504) |
 | `xitdb/core.odin` | `core_read_slot_raw_at` | `depth 3` (from `read_slot_pointer`, `core_read_slot_at`, `read_map_slot`) | 24 | [`xitdb/core.odin#L1179-L1202`](../../xitdb/core.odin#L1179-L1202) |
-| `xitdb/database.odin` | `_exec_path_part` | `depth 3` (from `read_slot_pointer`) | 743 | [`xitdb/database.odin#L663-L1405`](../../xitdb/database.odin#L663-L1405) |
-| `xitdb/database.odin` | `_encode_writeable_data` | `depth 4` (from `_exec_path_part`) | 32 | [`xitdb/database.odin#L1475-L1506`](../../xitdb/database.odin#L1475-L1506) |
-| `xitdb/database.odin` | `database_kv_key_offset` | `depth 4` (from `_exec_path_part`) | 6 | [`xitdb/database.odin#L573-L578`](../../xitdb/database.odin#L573-L578) |
-| `xitdb/database.odin` | `_try_encode_inline_data` | `depth 4` (from `_exec_path_part`) | 54 | [`xitdb/database.odin#L1420-L1473`](../../xitdb/database.odin#L1420-L1473) |
-| `xitdb/database.odin` | `_extract_bytes_data` | `depth 4` (from `_exec_path_part`) | 12 | [`xitdb/database.odin#L1407-L1418`](../../xitdb/database.odin#L1407-L1418) |
-| `xitdb/types.odin` | `bytes_is_short` | `depth 4` (from `_exec_path_part`, `_try_encode_inline_data`, `_encode_bytes_slot`) | 12 | [`xitdb/types.odin#L1398-L1409`](../../xitdb/types.odin#L1398-L1409) |
-| `xitdb/types.odin` | `slot_with_full` | `depth 4` (from `_exec_path_part`, `_encode_writeable_data`, `_try_encode_inline_data`) | 5 | [`xitdb/types.odin#L868-L872`](../../xitdb/types.odin#L868-L872) |
+| `xitdb/database.odin` | `_exec_path_part` | `depth 3` (from `read_slot_pointer`) | 788 | [`xitdb/database.odin#L671-L1458`](../../xitdb/database.odin#L671-L1458) |
+| `xitdb/database.odin` | `_encode_writeable_data` | `depth 4` (from `_exec_path_part`) | 32 | [`xitdb/database.odin#L1528-L1559`](../../xitdb/database.odin#L1528-L1559) |
 | `xitdb/core.odin` | `core_write_long` | `depth 4` (from `_exec_path_part`, `_encode_bytes_slot`) | 6 | [`xitdb/core.odin#L1015-L1020`](../../xitdb/core.odin#L1015-L1020) |
 | `xitdb/database.odin` | `database_is_old` | `depth 4` (from `_exec_path_part`, `read_map_slot`, `database_copy_index_block_if_old`) | 7 | [`xitdb/database.odin#L506-L512`](../../xitdb/database.odin#L506-L512) |
 | `xitdb/core.odin` | `core_read_long_at` | `depth 4` (from `_exec_path_part`) | 7 | [`xitdb/core.odin#L1171-L1177`](../../xitdb/core.odin#L1171-L1177) |
+| `xitdb/database.odin` | `database_kv_key_offset` | `depth 4` (from `_exec_path_part`) | 6 | [`xitdb/database.odin#L573-L578`](../../xitdb/database.odin#L573-L578) |
+| `xitdb/database.odin` | `_try_encode_inline_data` | `depth 4` (from `_exec_path_part`) | 54 | [`xitdb/database.odin#L1473-L1526`](../../xitdb/database.odin#L1473-L1526) |
+| `xitdb/database.odin` | `_extract_bytes_data` | `depth 4` (from `_exec_path_part`) | 12 | [`xitdb/database.odin#L1460-L1471`](../../xitdb/database.odin#L1460-L1471) |
+| `xitdb/types.odin` | `bytes_is_short` | `depth 4` (from `_exec_path_part`, `_try_encode_inline_data`, `_encode_bytes_slot`) | 12 | [`xitdb/types.odin#L1407-L1418`](../../xitdb/types.odin#L1407-L1418) |
+| `xitdb/types.odin` | `slot_with_full` | `depth 4` (from `_exec_path_part`, `_encode_writeable_data`, `_try_encode_inline_data`) | 5 | [`xitdb/types.odin#L868-L872`](../../xitdb/types.odin#L868-L872) |
 | `xitdb/database.odin` | `database_copy_collection_if_frozen` | `depth 4` (from `_exec_path_part`) | 12 | [`xitdb/database.odin#L560-L571`](../../xitdb/database.odin#L560-L571) |
+| `xitdb/types.odin` | `_checked_add_i64` | `depth 4` (from `_exec_path_part`) | 7 | [`xitdb/types.odin#L1498-L1504`](../../xitdb/types.odin#L1498-L1504) |
 | `xitdb/database.odin` | `database_check_hash_target` | `depth 4` (from `_exec_path_part`) | 11 | [`xitdb/database.odin#L534-L544`](../../xitdb/database.odin#L534-L544) |
 | `xitdb/hamt.odin` | `read_map_slot` | `depth 4` (from `_exec_path_part`) | 224 | [`xitdb/hamt.odin#L15-L238`](../../xitdb/hamt.odin#L15-L238) |
 | `xitdb/core.odin` | `core_read_at` | `depth 4` (from `core_read_exact_at`) | 47 | [`xitdb/core.odin#L661-L707`](../../xitdb/core.odin#L661-L707) |
@@ -248,9 +251,9 @@
 | `xitdb/database.odin` | `_database_committed_size_with_header` | `depth 4` (from `_database_truncate_with_header`) | 8 | [`xitdb/database.odin#L360-L367`](../../xitdb/database.odin#L360-L367) |
 | `xitdb/types.odin` | `slot_from_slice_raw` | `depth 4` (from `core_read_slot_raw_at`, `read_map_slot`, `kv_pair_read_buf_at`) | 10 | [`xitdb/types.odin#L895-L904`](../../xitdb/types.odin#L895-L904) |
 | `xitdb/types.odin` | `slot_from_bytes_raw` | `depth 4` (from `core_read_slot_raw_at`, `root_trailer_from_bytes`) | 11 | [`xitdb/types.odin#L883-L893`](../../xitdb/types.odin#L883-L893) |
-| `xitdb/database.odin` | `_encode_bytes_slot` | `depth 5` (from `_encode_writeable_data`) | 49 | [`xitdb/database.odin#L1508-L1556`](../../xitdb/database.odin#L1508-L1556) |
+| `xitdb/database.odin` | `_encode_bytes_slot` | `depth 5` (from `_encode_writeable_data`) | 49 | [`xitdb/database.odin#L1561-L1609`](../../xitdb/database.odin#L1561-L1609) |
 | `xitdb/database.odin` | `database_check_hash` | `depth 5` (from `database_check_hash_target`) | 6 | [`xitdb/database.odin#L527-L532`](../../xitdb/database.odin#L527-L532) |
-| `xitdb/types.odin` | `hamt_nibble` | `depth 5` (from `read_map_slot`) | 6 | [`xitdb/types.odin#L1467-L1472`](../../xitdb/types.odin#L1467-L1472) |
+| `xitdb/types.odin` | `hamt_nibble` | `depth 5` (from `read_map_slot`) | 6 | [`xitdb/types.odin#L1476-L1481`](../../xitdb/types.odin#L1476-L1481) |
 | `xitdb/types.odin` | `kv_pair_write` | `depth 5` (from `read_map_slot`) | 3 | [`xitdb/types.odin#L1156-L1158`](../../xitdb/types.odin#L1156-L1158) |
 | `xitdb/database.odin` | `database_copy_index_block_if_old` | `depth 5` (from `read_map_slot`) | 12 | [`xitdb/database.odin#L514-L525`](../../xitdb/database.odin#L514-L525) |
 | `xitdb/core.odin` | `core_slice_at` | `depth 5` (from `read_map_slot`, `_overlay_slice_at`) | 23 | [`xitdb/core.odin#L948-L970`](../../xitdb/core.odin#L948-L970) |

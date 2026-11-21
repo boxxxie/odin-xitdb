@@ -577,18 +577,26 @@ database_kv_key_offset :: proc(db: ^Database, tag: Tag) -> i64 {
 	return 0
 }
 
-database_kv_key_position :: proc(db: ^Database, entry: Slot) -> Maybe(i64) {
+database_kv_key_position :: proc(db: ^Database, entry: Slot) -> (res: Maybe(i64), err: Error) {
 	if is_key_only_entry(entry) {
-		return nil
+		return nil, nil
 	}
-	return entry.value + database_kv_key_offset(db, entry.tag)
+	pos, ok := _checked_add_i64(entry.value, database_kv_key_offset(db, entry.tag))
+	if !ok {
+		return nil, .End_Of_Stream
+	}
+	return pos, nil
 }
 
-database_kv_value_position :: proc(db: ^Database, entry: Slot) -> Maybe(i64) {
-	if key_pos, ok := database_kv_key_position(db, entry).?; ok {
-		return key_pos + SLOT_LENGTH
+database_kv_value_position :: proc(db: ^Database, entry: Slot) -> (res: Maybe(i64), err: Error) {
+	if key_pos, has_pos := (database_kv_key_position(db, entry) or_return).?; has_pos {
+		pos, ok := _checked_add_i64(key_pos, SLOT_LENGTH)
+		if !ok {
+			return nil, .End_Of_Stream
+		}
+		return pos, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // Central path-traversal method.
@@ -858,10 +866,10 @@ _exec_path_part :: proc(
 		}
 		rank := (header.size + index) if index < 0 else index
 		if write_mode == .Read_Only {
-			final_slot_ptr := descend_by_rank(db, header.root_ptr, rank, BTREE_BRANCH_BLOCK_SIZE) or_return
+			final_slot_ptr := descend_by_rank(db, header, rank, BTREE_BRANCH_BLOCK_SIZE) or_return
 			return read_slot_pointer(db, write_mode, path, path_i + 1, final_slot_ptr, frozen_at)
 		}
-		write_slot := btree_get_for_write(db, header.root_ptr, rank, frozen_at) or_return
+		write_slot := btree_get_for_write(db, header.root_ptr, rank, header.size, frozen_at) or_return
 		if write_slot.node_ptr != header.root_ptr {
 			core_seek_to(db.core, header_ptr) or_return
 			nhb := btree_header_to_bytes(BTree_Header{root_ptr = write_slot.node_ptr, size = header.size})
@@ -881,10 +889,14 @@ _exec_path_part :: proc(
 		hb: [BTREE_HEADER_LENGTH]u8
 		core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
-		res := btree_insert(db, header.root_ptr, header.size, frozen_at) or_return
+		next_size, size_ok := _checked_add_i64(header.size, 1)
+		if !size_ok {
+			return {}, .Invalid_BTree_Node
+		}
+		res := btree_insert(db, header.root_ptr, header.size, header.size, frozen_at) or_return
 		new_root_ptr := btree_grow_root(db, res) or_return
 		core_seek_to(db.core, header_ptr) or_return
-		nhb := btree_header_to_bytes(BTree_Header{root_ptr = new_root_ptr, size = header.size + 1})
+		nhb := btree_header_to_bytes(BTree_Header{root_ptr = new_root_ptr, size = next_size})
 		core_write_all(db.core, nhb[:]) or_return
 		return read_slot_pointer(db, write_mode, path, path_i + 1, Slot_Pointer{position = res.value_position, slot = Slot{}}, frozen_at)
 
@@ -907,11 +919,11 @@ _exec_path_part :: proc(
 		if p.size == 0 {
 			new_root_ptr = btree_new_root(db) or_return
 		} else {
-			after_offset := btree_split_right(db, header.root_ptr, p.offset) or_return
+			after_offset := btree_split_right(db, header.root_ptr, p.offset, header.size) or_return
 			if p.size == header.size - p.offset {
 				new_root_ptr = after_offset
 			} else {
-				new_root_ptr = btree_split_left(db, after_offset, p.size) or_return
+				new_root_ptr = btree_split_left(db, after_offset, p.size, header.size - p.offset) or_return
 			}
 		}
 		core_seek_to(db.core, header_ptr) or_return
@@ -936,11 +948,16 @@ _exec_path_part :: proc(
 		core_read_exact_at(db.core, p.list.value, hbb[:]) or_return
 		header_b := btree_header_from_bytes(hbb) or_return
 
+		combined_size, size_ok := _checked_add_i64(header_a.size, header_b.size)
+		if !size_ok {
+			return {}, .Invalid_BTree_Node
+		}
+
 		tx_s := core_length(db.core) or_return
 		db.tx_start = tx_s
-		new_root_ptr := btree_join(db, header_a.root_ptr, header_b.root_ptr) or_return
+		new_root_ptr := btree_join(db, header_a.root_ptr, header_a.size, header_b.root_ptr, header_b.size) or_return
 		core_seek_to(db.core, header_ptr) or_return
-		nhb := btree_header_to_bytes(BTree_Header{root_ptr = new_root_ptr, size = header_a.size + header_b.size})
+		nhb := btree_header_to_bytes(BTree_Header{root_ptr = new_root_ptr, size = combined_size})
 		core_write_all(db.core, nhb[:]) or_return
 		return read_slot_pointer(db, write_mode, path, path_i + 1, slot_ptr, frozen_at)
 
@@ -960,11 +977,15 @@ _exec_path_part :: proc(
 		if index >= header.size || index < -header.size {
 			return {}, .Key_Not_Found
 		}
+		next_size, size_ok := _checked_add_i64(header.size, 1)
+		if !size_ok {
+			return {}, .Invalid_BTree_Node
+		}
 		rank := (header.size + index) if index < 0 else index
-		res := btree_insert(db, header.root_ptr, rank, frozen_at) or_return
+		res := btree_insert(db, header.root_ptr, rank, header.size, frozen_at) or_return
 		new_root_ptr := btree_grow_root(db, res) or_return
 		core_seek_to(db.core, header_ptr) or_return
-		nhb := btree_header_to_bytes(BTree_Header{root_ptr = new_root_ptr, size = header.size + 1})
+		nhb := btree_header_to_bytes(BTree_Header{root_ptr = new_root_ptr, size = next_size})
 		core_write_all(db.core, nhb[:]) or_return
 		return read_slot_pointer(db, write_mode, path, path_i + 1, Slot_Pointer{position = res.value_position, slot = Slot{}}, frozen_at)
 
@@ -989,7 +1010,7 @@ _exec_path_part :: proc(
 		if header.size == 1 {
 			new_root_ptr = btree_new_root(db) or_return
 		} else {
-			root_res := btree_remove(db, header.root_ptr, rank, frozen_at, true) or_return
+			root_res := btree_remove(db, header.root_ptr, rank, header.size, frozen_at, true) or_return
 			if root_res.kind == .Branch && root_res.num == 1 {
 				root := root_res.node
 				if root_res.persisted {
@@ -998,11 +1019,14 @@ _exec_path_part :: proc(
 				collapse_steps := 0
 				for root.kind == .Branch && root.num == 1 {
 					if collapse_steps >= ITERATOR_STACK_SIZE * 2 {
-						return {}, .Max_Shift_Exceeded
+						return {}, .Invalid_BTree_Node
 					}
 					collapse_steps += 1
 					new_root_ptr = root.children[0].value
 					root = read_btree_node(db, new_root_ptr) or_return
+					if btree_node_subtree_count(root) != header.size - 1 {
+						return {}, .Invalid_BTree_Node
+					}
 				}
 			} else if root_res.persisted {
 				new_root_ptr = root_res.node_ptr
@@ -1106,7 +1130,14 @@ _exec_path_part :: proc(
 			is_set := slot_ptr.slot.tag == .Hash_Set || slot_ptr.slot.tag == .Counted_Hash_Set
 			slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Hash_Map_Init{counted = counted, set = is_set}, frozen_at) or_return
 		}
-		index_pos := (slot_ptr.slot.value + 8) if counted else slot_ptr.slot.value
+		index_pos := slot_ptr.slot.value
+		if counted {
+			ok: bool
+			index_pos, ok = _checked_add_i64(slot_ptr.slot.value, 8)
+			if !ok {
+				return {}, .End_Of_Stream
+			}
+		}
 		key_hash := database_check_hash_target(db, p.target) or_return
 		res := read_map_slot(db, index_pos, key_hash, 0, write_mode, p.target, frozen_at) or_return
 		if write_mode == .Read_Write && counted && res.is_empty {
@@ -1136,7 +1167,14 @@ _exec_path_part :: proc(
 		}
 		is_set := slot_ptr.slot.tag == .Hash_Set || slot_ptr.slot.tag == .Counted_Hash_Set
 		slot_ptr = database_copy_collection_if_frozen(db, slot_ptr, Hash_Map_Init{counted = counted, set = is_set}, frozen_at) or_return
-		index_pos := (slot_ptr.slot.value + 8) if counted else slot_ptr.slot.value
+		index_pos := slot_ptr.slot.value
+		if counted {
+			ok: bool
+			index_pos, ok = _checked_add_i64(slot_ptr.slot.value, 8)
+			if !ok {
+				return {}, .End_Of_Stream
+			}
+		}
 		key_hash := database_check_hash(db, p.hash) or_return
 		key_found := true
 		_, rem_err := remove_map_slot(db, index_pos, key_hash, 0, frozen_at)
@@ -1230,7 +1268,7 @@ _exec_path_part :: proc(
 		header := btree_header_from_bytes(hb) or_return
 
 		if write_mode == .Read_Only {
-			entry_maybe := sorted_get(db, header.root_ptr, key) or_return
+			entry_maybe := sorted_get(db, header, key) or_return
 			entry, has_found := entry_maybe.?
 			if !has_found {
 				return {}, .Key_Not_Found
@@ -1241,17 +1279,29 @@ _exec_path_part :: proc(
 
 		_, is_key_target := p.target.(Sorted_Map_Get_Key)
 		key_only := slot_ptr.slot.tag == .Sorted_Set && is_key_target
-		res := sorted_put(db, header.root_ptr, key, key_only, frozen_at) or_return
+		can_add := header.size < max(i64)
+		res := sorted_put(db, header.root_ptr, key, header.size, key_only, can_add, frozen_at) or_return
 		new_root_ptr := sorted_grow_root(db, res) or_return
 		if new_root_ptr != header.root_ptr || res.added {
+			new_size := header.size
+			if res.added {
+				ok: bool
+				new_size, ok = _checked_add_i64(header.size, 1)
+				if !ok {
+					return {}, .Invalid_BTree_Node
+				}
+			}
 			core_seek_to(db.core, header_ptr) or_return
-			new_size := header.size + (1 if res.added else 0)
 			nhb := btree_header_to_bytes(BTree_Header{root_ptr = new_root_ptr, size = new_size})
 			core_write_all(db.core, nhb[:]) or_return
 		}
 		target_slot: Slot_Pointer
 		if _, is_val := p.target.(Sorted_Map_Get_Value); is_val && res.added {
-			target_slot = Slot_Pointer{position = res.entry.value + SLOT_LENGTH, slot = Slot{}}
+			val_pos, v_ok := _checked_add_i64(res.entry.value, SLOT_LENGTH)
+			if !v_ok {
+				return {}, .End_Of_Stream
+			}
+			target_slot = Slot_Pointer{position = val_pos, slot = Slot{}}
 		} else {
 			target_slot = sorted_target_slot(db, res.entry, p.target) or_return
 		}
@@ -1277,7 +1327,7 @@ _exec_path_part :: proc(
 			return {}, .Key_Not_Found
 		}
 		rank := (header.size + index) if index < 0 else index
-		target_slot := descend_by_rank(db, header.root_ptr, rank, SORTED_BRANCH_BLOCK_SIZE) or_return
+		target_slot := descend_by_rank(db, header, rank, SORTED_BRANCH_BLOCK_SIZE) or_return
 		return read_slot_pointer(db, write_mode, path, path_i + 1, target_slot, frozen_at)
 
 	case Sorted_Map_Remove:
@@ -1296,7 +1346,10 @@ _exec_path_part :: proc(
 		hb: [BTREE_HEADER_LENGTH]u8
 		core_read_exact_at(db.core, header_ptr, hb[:]) or_return
 		header := btree_header_from_bytes(hb) or_return
-		res := sorted_remove(db, header.root_ptr, p.key, frozen_at) or_return
+		if header.size == 0 {
+			return {}, .Key_Not_Found
+		}
+		res := sorted_remove(db, header.root_ptr, p.key, header.size, frozen_at) or_return
 		if !res.found {
 			return {}, .Key_Not_Found
 		}

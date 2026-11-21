@@ -1,6 +1,6 @@
 # #52. `Stream: Cursor_Reader (256 x 4KB = 1MB)` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1755-L1771`)](../bench_xitdb.odin#L1755-L1771) · [Zig Harness (`bench_xitdb.zig#L1838-L1854`)](../bench_xitdb.zig#L1838-L1854)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L2021-L2039`)](../bench_xitdb.odin#L2021-L2039) · [Zig Harness (`bench_xitdb.zig#L1838-L1854`)](../bench_xitdb.zig#L1838-L1854)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,26 +31,28 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1755-L1771`](../bench_xitdb.odin#L1755-L1771))
+### Odin ([`benchmarks/bench_xitdb.odin#L2021-L2039`](../bench_xitdb.odin#L2021-L2039))
 
 ```odin
-1755 | 		t_sr := time.now()
-1756 | 		reader, _ := xitdb.cursor_reader(sctx.blob_rc)
-1757 | 		read_buf: [4096]u8
-1758 | 		read_chunks := 0
-1759 | 		for {
-1760 | 			nr, _ := xitdb.cursor_reader_read(&reader, read_buf[:])
-1761 | 			if nr == 0 do break
-1762 | 			read_chunks += 1
-1763 | 		}
-1764 | 		assert(read_chunks == chunks_count)
-1765 | 		elapsed_sr := time.since(t_sr)
-1766 | 
-1767 | 		print_result(Bench_Result{
-1768 | 			name    = "Stream: Cursor_Reader (256 x 4KB = 1MB)",
-1769 | 			ops     = chunks_count,
-1770 | 			elapsed = elapsed_sr,
-1771 | 		})
+2021 | 		sp_sr := span_begin()
+2022 | 		reader, _ := xitdb.cursor_reader(sctx.blob_rc)
+2023 | 		read_buf: [4096]u8
+2024 | 		read_chunks := 0
+2025 | 		for {
+2026 | 			nr, _ := xitdb.cursor_reader_read(&reader, read_buf[:])
+2027 | 			if nr == 0 do break
+2028 | 			read_chunks += 1
+2029 | 		}
+2030 | 		assert(read_chunks == chunks_count)
+2031 | 		elapsed_sr, hw_sr, has_hw_sr := span_end(sp_sr)
+2032 | 
+2033 | 		print_result(Bench_Result{
+2034 | 			name         = "Stream: Cursor_Reader (256 x 4KB = 1MB)",
+2035 | 			ops          = chunks_count,
+2036 | 			elapsed      = elapsed_sr,
+2037 | 			counters     = hw_sr,
+2038 | 			has_counters = has_hw_sr,
+2039 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1838-L1854`](../bench_xitdb.zig#L1838-L1854))
@@ -92,8 +94,8 @@
 
 | File | Procedure | Role / Call Depth | Lines | Source Link (`#L<start>-L<end>`) |
 | :--- | :--- | :--- | ---: | :--- |
-| `xitdb/cursor.odin` | `cursor_reader` | **Entry Point** (`depth 0`) | 49 | [`xitdb/cursor.odin#L483-L531`](../../xitdb/cursor.odin#L483-L531) |
-| `xitdb/cursor.odin` | `cursor_reader_read` | **Entry Point** (`depth 0`) | 23 | [`xitdb/cursor.odin#L533-L555`](../../xitdb/cursor.odin#L533-L555) |
+| `xitdb/cursor.odin` | `cursor_reader` | **Entry Point** (`depth 0`) | 49 | [`xitdb/cursor.odin#L489-L537`](../../xitdb/cursor.odin#L489-L537) |
+| `xitdb/cursor.odin` | `cursor_reader_read` | **Entry Point** (`depth 0`) | 23 | [`xitdb/cursor.odin#L539-L561`](../../xitdb/cursor.odin#L539-L561) |
 | `xitdb/cursor.odin` | `cursor_resolved` | `depth 1` (from `cursor_reader`) | 8 | [`xitdb/cursor.odin#L48-L55`](../../xitdb/cursor.odin#L48-L55) |
 | `xitdb/core.odin` | `core_read_long_at` | `depth 1` (from `cursor_reader`) | 7 | [`xitdb/core.odin#L1171-L1177`](../../xitdb/core.odin#L1171-L1177) |
 | `xitdb/core.odin` | `core_length` | `depth 1` (from `cursor_reader`, `database_read_root_header`) | 23 | [`xitdb/core.odin#L411-L433`](../../xitdb/core.odin#L411-L433) |

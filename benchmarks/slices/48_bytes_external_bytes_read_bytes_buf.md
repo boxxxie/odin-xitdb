@@ -1,6 +1,6 @@
 # #48. `Bytes: External Bytes read_bytes_buf` — Odin vs. Zig Code Slice & Analysis
 
-[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1675-L1684`)](../bench_xitdb.odin#L1675-L1684) · [Zig Harness (`bench_xitdb.zig#L1754-L1763`)](../bench_xitdb.zig#L1754-L1763)
+[← Back to Benchmark Suite](../README.md) · [← All Slices](README.md) · [**📘 Guide 05: Cursor Bytes, Stream Vtables & Nested Paths**](../zig-guide/05_cursor_bytes_streams_and_paths.md) · [Odin Harness (`bench_xitdb.odin#L1930-L1942`)](../bench_xitdb.odin#L1930-L1942) · [Zig Harness (`bench_xitdb.zig#L1754-L1763`)](../bench_xitdb.zig#L1754-L1763)
 
 ## 1. 1v1 Statistical Performance Summary
 
@@ -31,19 +31,22 @@
 
 ## 3. Benchmark Harness Code (`#L<start>-L<end>`)
 
-### Odin ([`benchmarks/bench_xitdb.odin#L1675-L1684`](../bench_xitdb.odin#L1675-L1684))
+### Odin ([`benchmarks/bench_xitdb.odin#L1930-L1942`](../bench_xitdb.odin#L1930-L1942))
 
 ```odin
-1675 | 		t_hp := time.now()
-1676 | 		for _ in 0 ..< reads {
-1677 | 			obj, _ := xitdb.cursor_read_bytes_buf(heap_cur.?, stack_buf[:])
-1678 | 			assert(len(obj.value) == 32)
-1679 | 		}
-1680 | 		print_result(Bench_Result{
-1681 | 			name    = "Bytes: External Bytes read_bytes_buf",
-1682 | 			ops     = reads,
-1683 | 			elapsed = time.since(t_hp),
-1684 | 		})
+1930 | 		sp_hp := span_begin()
+1931 | 		for _ in 0 ..< reads {
+1932 | 			obj, _ := xitdb.cursor_read_bytes_buf(heap_cur.?, stack_buf[:])
+1933 | 			assert(len(obj.value) == 32)
+1934 | 		}
+1935 | 		el_hp, hw_hp, has_hw_hp := span_end(sp_hp)
+1936 | 		print_result(Bench_Result{
+1937 | 			name         = "Bytes: External Bytes read_bytes_buf",
+1938 | 			ops          = reads,
+1939 | 			elapsed      = el_hp,
+1940 | 			counters     = hw_hp,
+1941 | 			has_counters = has_hw_hp,
+1942 | 		})
 ```
 
 ### Zig ([`benchmarks/bench_xitdb.zig#L1754-L1763`](../bench_xitdb.zig#L1754-L1763))

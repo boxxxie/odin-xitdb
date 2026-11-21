@@ -8,13 +8,16 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 import hugi "hugi:."
+import obench "obench:."
 import xitdb "../xitdb"
 
 Bench_Result :: struct {
-	name:       string,
-	ops:        int,
-	elapsed:    time.Duration,
-	bytes_used: i64,
+	name:         string,
+	ops:          int,
+	elapsed:      time.Duration,
+	bytes_used:   i64,
+	counters:     obench.Counter_Values,
+	has_counters: bool,
 }
 
 MAX_GROUP_BENCHES :: 32
@@ -28,6 +31,11 @@ Bench_Accum :: struct {
 	samples_ns:       [MAX_RUNS]f64,
 	samples_ms:       [MAX_RUNS]f64,
 	count:            int,
+	hw_count:         int,
+	hw_instructions:  [MAX_RUNS]f64,
+	hw_cycles:        [MAX_RUNS]f64,
+	hw_branch_misses: [MAX_RUNS]f64,
+	hw_cache_misses:  [MAX_RUNS]f64,
 }
 
 g_jsonl_file:     ^os.File
@@ -35,6 +43,10 @@ g_history_file:   ^os.File
 g_bench_rank:     int
 g_runs:           int = 7
 g_warmup:         int = 1
+g_pin_cpu:        int = -1
+g_counters:       bool = false
+g_test_mode:      bool = false
+g_host_warned:    bool = false
 g_commit_sha:     string = "unknown"
 g_run_id:         string = "run-0"
 g_append_primary: bool = false
@@ -55,9 +67,11 @@ g_group_name:      string = ""
 g_group_slot:      int = 0
 g_group_count:     int = 0
 g_group_accum:     [MAX_GROUP_BENCHES]Bench_Accum
-g_packet:          hugi.Run_Packet
-g_has_packet:      bool = false
-g_host_allocator:  runtime.Allocator
+g_packet:           hugi.Run_Packet
+g_has_packet:       bool = false
+g_host_allocator:   runtime.Allocator
+g_counter_group:    obench.Counter_Group
+g_counter_overhead: obench.Counter_Values
 
 MAX_TOTAL_RANKS :: 128
 g_selective_run:  bool = false
@@ -82,6 +96,22 @@ parse_cli_args :: proc() {
 			g_save_history = false
 		} else if arg == "--quiet" || arg == "-quiet" {
 			g_quiet = true
+		} else if arg == "--test" || arg == "-test" {
+			g_test_mode = true
+		} else if arg == "--counters" || arg == "-counters" {
+			g_counters = true
+		} else if arg == "--host-warned" || arg == "-host-warned" {
+			g_host_warned = true
+		} else if (arg == "--pin" || arg == "-pin") && i + 1 < len(args) {
+			if v, ok := strconv.parse_int(args[i + 1]); ok && v >= 0 {
+				g_pin_cpu = v
+			}
+			i += 1
+		} else if strings.has_prefix(arg, "--pin=") || strings.has_prefix(arg, "-pin:") {
+			eq := strings.index_any(arg, "=:")
+			if v, ok := strconv.parse_int(arg[eq + 1:]); ok && v >= 0 {
+				g_pin_cpu = v
+			}
 		} else if (arg == "--runs" || arg == "-runs") && i + 1 < len(args) {
 			if v, ok := strconv.parse_int(args[i + 1]); ok && v > 0 {
 				g_runs = clamp(v, 1, MAX_RUNS)
@@ -156,6 +186,10 @@ parse_cli_args :: proc() {
 			g_name_filter = arg[eq + 1:]
 		}
 		i += 1
+	}
+	if g_test_mode {
+		g_runs = 1
+		g_warmup = 0
 	}
 	if g_lang == "lua" && g_jsonl_path == "benchmarks/odin.jsonl" {
 		g_jsonl_path = "benchmarks/lua.jsonl"
@@ -267,6 +301,85 @@ print_header :: proc() {
 	fmt.println("-----------------------------------------------------------------------------------------------------------------------------------------------------------------")
 }
 
+Bench_Span :: struct {
+	t0:          time.Time,
+	c_before:    obench.Counter_Values,
+	counters_ok: bool,
+}
+
+calibrate_counter_overhead :: proc(counters: ^obench.Counter_Group) -> obench.Counter_Values {
+	if counters == nil || !counters.open {
+		return {}
+	}
+	WARMUP :: 8
+	SAMPLES :: 32
+	for _ in 0 ..< WARMUP {
+		b, _ := obench.counter_group_read(counters)
+		obench.clobber_memory()
+		t0 := time.now()
+		el := time.since(t0)
+		obench.clobber_memory()
+		a, _ := obench.counter_group_read(counters)
+		_ = obench.black_box(el)
+		_ = obench.black_box(b)
+		_ = obench.black_box(a)
+	}
+	best := obench.Counter_Values {
+		instructions  = max(f64),
+		cycles        = max(f64),
+		branch_misses = max(f64),
+		cache_misses  = max(f64),
+	}
+	got_any := false
+	for _ in 0 ..< SAMPLES {
+		before, ok1 := obench.counter_group_read(counters)
+		obench.clobber_memory()
+		t0 := time.now()
+		el := time.since(t0)
+		obench.clobber_memory()
+		after, ok2 := obench.counter_group_read(counters)
+		_ = obench.black_box(el)
+		if ok1 && ok2 {
+			got_any = true
+			best.instructions = min(best.instructions, max(after.instructions - before.instructions, 0.0))
+			best.cycles = min(best.cycles, max(after.cycles - before.cycles, 0.0))
+			best.branch_misses = min(best.branch_misses, max(after.branch_misses - before.branch_misses, 0.0))
+			best.cache_misses = min(best.cache_misses, max(after.cache_misses - before.cache_misses, 0.0))
+		}
+	}
+	if !got_any {
+		return {}
+	}
+	return best
+}
+
+span_begin :: proc() -> Bench_Span {
+	sp: Bench_Span
+	if g_counter_group.open && !g_is_warmup {
+		sp.c_before, sp.counters_ok = obench.counter_group_read(&g_counter_group)
+	}
+	obench.clobber_memory()
+	sp.t0 = time.now()
+	return sp
+}
+
+span_end :: proc(sp: Bench_Span) -> (elapsed: time.Duration, hw: obench.Counter_Values, has_hw: bool) {
+	elapsed = time.since(sp.t0)
+	obench.clobber_memory()
+	if sp.counters_ok && g_counter_group.open && !g_is_warmup {
+		if c_after, ok := obench.counter_group_read(&g_counter_group); ok {
+			hw = obench.Counter_Values {
+				instructions  = max(c_after.instructions - sp.c_before.instructions - g_counter_overhead.instructions, 0.0),
+				cycles        = max(c_after.cycles - sp.c_before.cycles - g_counter_overhead.cycles, 0.0),
+				branch_misses = max(c_after.branch_misses - sp.c_before.branch_misses - g_counter_overhead.branch_misses, 0.0),
+				cache_misses  = max(c_after.cache_misses - sp.c_before.cache_misses - g_counter_overhead.cache_misses, 0.0),
+			}
+			has_hw = true
+		}
+	}
+	return
+}
+
 print_result :: proc(r: Bench_Result) {
 	if g_is_warmup {
 		return
@@ -291,6 +404,14 @@ print_result :: proc(r: Bench_Result) {
 		acc.samples_batch_ns[acc.count] = batch_ns
 		acc.samples_ms[acc.count] = total_ns / 1e6
 		acc.samples_ns[acc.count] = total_ns / f64(max(r.ops, 1))
+		if r.has_counters && acc.hw_count < MAX_RUNS {
+			per_op := f64(max(r.ops, 1))
+			acc.hw_instructions[acc.hw_count] = r.counters.instructions / per_op
+			acc.hw_cycles[acc.hw_count] = r.counters.cycles / per_op
+			acc.hw_branch_misses[acc.hw_count] = r.counters.branch_misses / per_op
+			acc.hw_cache_misses[acc.hw_count] = r.counters.cache_misses / per_op
+			acc.hw_count += 1
+		}
 		acc.count += 1
 	}
 }
@@ -389,6 +510,37 @@ flush_group_results :: proc() {
 			for i in 0 ..< n {
 				samples_batch[i] = acc.samples_batch_ns[i]
 			}
+			metrics := make([dynamic]hugi.Metric, context.allocator)
+			if acc.hw_count > 0 {
+				hw_n := acc.hw_count
+				hw_scratch: [MAX_RUNS]f64
+				hw_arrays := [4]^[MAX_RUNS]f64{
+					&acc.hw_instructions,
+					&acc.hw_cycles,
+					&acc.hw_branch_misses,
+					&acc.hw_cache_misses,
+				}
+				hw_units := [4]string{
+					"instructions/op",
+					"cycles/op",
+					"branch_misses/op",
+					"cache_misses/op",
+				}
+				for k in 0 ..< 4 {
+					for i in 0 ..< hw_n {
+						hw_scratch[i] = hw_arrays[k][i]
+					}
+					sort_f64(hw_scratch[:hw_n])
+					med := calc_percentile(hw_scratch[:hw_n], 0.50)
+					allow_zero := k >= 2 && g_counter_group.open && g_counter_group.fds[k] >= 0
+					if med > 0 || allow_zero {
+						append(&metrics, hugi.Metric{
+							unit  = strings.clone(hw_units[k], context.allocator),
+							value = med,
+						})
+					}
+				}
+			}
 			rec := hugi.Record {
 				rank               = rank,
 				group_name         = strings.clone(g_group_name, context.allocator),
@@ -401,7 +553,7 @@ flush_group_results :: proc() {
 				allocs_per_op      = 0,
 				alloc_bytes_per_op = 0,
 				error              = strings.clone("", context.allocator),
-				metrics            = make([dynamic]hugi.Metric, context.allocator),
+				metrics            = metrics,
 				samples_batch_ns   = samples_batch,
 			}
 			hugi.recompute_record_stats_from_samples(&rec)
@@ -486,7 +638,7 @@ run_group :: proc(group_name: string, base_rank: int, group_fn: proc(int), param
 	}
 	g_group_count = 0
 	runs := clamp(g_runs, 1, MAX_RUNS)
-	for run_idx in 0 ..< runs {
+	for _ in 0 ..< runs {
 		g_group_slot = 0
 		group_fn(param)
 		if g_group_slot > g_group_count {
@@ -529,34 +681,38 @@ bench_hamt :: proc(n: int) {
 		return nil
 	}
 
-	t0 := time.now()
+	sp0 := span_begin()
 	_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, insert_cb, &ictx)
-	elapsed_insert := time.since(t0)
+	elapsed_insert, hw0, has_hw0 := span_end(sp0)
 	size_after_insert, _ := xitdb.database_committed_size(&db)
 
 	print_result(Bench_Result{
-		name       = "HAMT Hash_Map bulk put (1 tx)",
-		ops        = n,
-		elapsed    = elapsed_insert,
-		bytes_used = size_after_insert,
+		name         = "HAMT Hash_Map bulk put (1 tx)",
+		ops          = n,
+		elapsed      = elapsed_insert,
+		bytes_used   = size_after_insert,
+		counters     = hw0,
+		has_counters = has_hw0,
 	})
 
 	// 1b. Point lookup N keys from Moment 0 (with SHA-1 key hashing vs pre-computed digest)
 	m0_cur, _ := xitdb.array_list_get_cursor(history, 0)
 	m0, _ := xitdb.read_hash_map_init(m0_cur.?)
 
-	t1 := time.now()
+	sp1 := span_begin()
 	for k, idx in keys {
 		vc, _ := xitdb.hash_map_get_cursor(m0, k)
 		v, _ := xitdb.cursor_read_uint(vc.?)
 		assert(v == u64(idx))
 	}
-	elapsed_get := time.since(t1)
+	elapsed_get, hw1, has_hw1 := span_end(sp1)
 
 	print_result(Bench_Result{
-		name    = "HAMT Hash_Map point lookup (with SHA-1)",
-		ops     = n,
-		elapsed = elapsed_get,
+		name         = "HAMT Hash_Map point lookup (with SHA-1)",
+		ops          = n,
+		elapsed      = elapsed_get,
+		counters     = hw1,
+		has_counters = has_hw1,
 	})
 
 	digests := make([][]u8, n, context.temp_allocator)
@@ -564,18 +720,20 @@ bench_hamt :: proc(n: int) {
 		digests[idx] = xitdb.database_digest_string(&db, k, context.temp_allocator)
 	}
 
-	t1_pre := time.now()
+	sp1_pre := span_begin()
 	for d, idx in digests {
 		vc, _ := xitdb.hash_map_get_cursor_by_hash(m0, d)
 		v, _ := xitdb.cursor_read_uint(vc.?)
 		assert(v == u64(idx))
 	}
-	elapsed_get_pre := time.since(t1_pre)
+	elapsed_get_pre, hw1_pre, has_hw1_pre := span_end(sp1_pre)
 
 	print_result(Bench_Result{
-		name    = "HAMT Hash_Map lookup (pre-hashed digest)",
-		ops     = n,
-		elapsed = elapsed_get_pre,
+		name         = "HAMT Hash_Map lookup (pre-hashed digest)",
+		ops          = n,
+		elapsed      = elapsed_get_pre,
+		counters     = hw1_pre,
+		has_counters = has_hw1_pre,
 	})
 
 	// 1c. Incremental branched moments (CoW structural sharing on 500 commits)
@@ -592,7 +750,7 @@ bench_hamt :: proc(n: int) {
 		return xitdb.hash_map_put(&m, b.key, b.val)
 	}
 
-	t2 := time.now()
+	sp2 := span_begin()
 	for i in 0 ..< branch_commits {
 		bctx = Branch_Ctx{
 			key = keys[i % len(keys)],
@@ -601,14 +759,16 @@ bench_hamt :: proc(n: int) {
 		prev_slot, _ := xitdb.array_list_get_slot(history, -1)
 		_ = xitdb.array_list_append_context(&history, prev_slot.?, branch_cb, &bctx)
 	}
-	elapsed_branch := time.since(t2)
+	elapsed_branch, hw2, has_hw2 := span_end(sp2)
 	size_after_branch, _ := xitdb.database_committed_size(&db)
 
 	print_result(Bench_Result{
-		name       = "HAMT CoW branched moment commits",
-		ops        = branch_commits,
-		elapsed    = elapsed_branch,
-		bytes_used = size_after_branch - size_after_insert,
+		name         = "HAMT CoW branched moment commits",
+		ops          = branch_commits,
+		elapsed      = elapsed_branch,
+		bytes_used   = size_after_branch - size_after_insert,
+		counters     = hw2,
+		has_counters = has_hw2,
 	})
 
 	// 1d. HAMT key removal & branch shortening (remove half of the keys in 1 tx)
@@ -629,18 +789,20 @@ bench_hamt :: proc(n: int) {
 	}
 
 	m0_slot, _ := xitdb.array_list_get_slot(history, 0)
-	t3 := time.now()
+	sp3 := span_begin()
 	_ = xitdb.array_list_append_context(&history, m0_slot.?, remove_hamt_cb, &rhctx)
-	elapsed_rem := time.since(t3)
+	elapsed_rem, hw3, has_hw3 := span_end(sp3)
 
 	print_result(Bench_Result{
-		name    = "HAMT Hash_Map remove & branch shortening",
-		ops     = remove_count,
-		elapsed = elapsed_rem,
+		name         = "HAMT Hash_Map remove & branch shortening",
+		ops          = remove_count,
+		elapsed      = elapsed_rem,
+		counters     = hw3,
+		has_counters = has_hw3,
 	})
 
 	// 1e. HAMT unordered full-tree iterator scan
-	t4 := time.now()
+	sp4 := span_begin()
 	hit, _ := xitdb.hash_map_iterator(m0)
 	hcnt := 0
 	for {
@@ -649,12 +811,14 @@ bench_hamt :: proc(n: int) {
 		hcnt += 1
 	}
 	assert(hcnt == n)
-	elapsed_hiter := time.since(t4)
+	elapsed_hiter, hw4, has_hw4 := span_end(sp4)
 
 	print_result(Bench_Result{
-		name    = "HAMT Hash_Map unordered iterator scan",
-		ops     = n,
-		elapsed = elapsed_hiter,
+		name         = "HAMT Hash_Map unordered iterator scan",
+		ops          = n,
+		elapsed      = elapsed_hiter,
+		counters     = hw4,
+		has_counters = has_hw4,
 	})
 
 	// 1f. HAMT in-place key overwrite (same tx, updating existing value slots)
@@ -672,14 +836,16 @@ bench_hamt :: proc(n: int) {
 		return nil
 	}
 
-	t5 := time.now()
+	sp5 := span_begin()
 	_ = xitdb.array_list_append_context(&history, m0_slot.?, overwrite_hamt_cb, &ohctx)
-	elapsed_overwrite := time.since(t5)
+	elapsed_overwrite, hw5, has_hw5 := span_end(sp5)
 
 	print_result(Bench_Result{
-		name    = "HAMT Hash_Map in-place overwrite (1 tx)",
-		ops     = n,
-		elapsed = elapsed_overwrite,
+		name         = "HAMT Hash_Map in-place overwrite (1 tx)",
+		ops          = n,
+		elapsed      = elapsed_overwrite,
+		counters     = hw5,
+		has_counters = has_hw5,
 	})
 
 	// 1g. Counted_Hash_Map bulk put + O(1) count tracking vs remove
@@ -692,9 +858,9 @@ bench_hamt :: proc(n: int) {
 		return nil
 	}
 
-	t6 := time.now()
+	sp6 := span_begin()
 	_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, counted_put_cb, &ictx)
-	elapsed_cput := time.since(t6)
+	elapsed_cput, hw6, has_hw6 := span_end(sp6)
 
 	cm_slot, _ := xitdb.array_list_get_slot(history, -1)
 	cm_cur, _ := xitdb.array_list_get_cursor(history, -1)
@@ -703,9 +869,11 @@ bench_hamt :: proc(n: int) {
 	assert(cm_cnt == i64(n))
 
 	print_result(Bench_Result{
-		name    = "HAMT Counted_Hash_Map bulk put (1 tx)",
-		ops     = n,
-		elapsed = elapsed_cput,
+		name         = "HAMT Counted_Hash_Map bulk put (1 tx)",
+		ops          = n,
+		elapsed      = elapsed_cput,
+		counters     = hw6,
+		has_counters = has_hw6,
 	})
 
 	counted_rem_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
@@ -718,14 +886,16 @@ bench_hamt :: proc(n: int) {
 		return nil
 	}
 
-	t7 := time.now()
+	sp7 := span_begin()
 	_ = xitdb.array_list_append_context(&history, cm_slot.?, counted_rem_cb, &rhctx)
-	elapsed_crem := time.since(t7)
+	elapsed_crem, hw7, has_hw7 := span_end(sp7)
 
 	print_result(Bench_Result{
-		name    = "HAMT Counted_Hash_Map remove",
-		ops     = remove_count,
-		elapsed = elapsed_crem,
+		name         = "HAMT Counted_Hash_Map remove",
+		ops          = remove_count,
+		elapsed      = elapsed_crem,
+		counters     = hw7,
+		has_counters = has_hw7,
 	})
 
 	// 1h. HAMT deep suffix-collision splitting (10 shared trailing nibbles = 5 bytes) & collapse
@@ -760,14 +930,16 @@ bench_hamt :: proc(n: int) {
 		return nil
 	}
 
-	t8 := time.now()
+	sp8 := span_begin()
 	_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, coll_put_cb, &col_ctx)
-	elapsed_coll_put := time.since(t8)
+	elapsed_coll_put, hw8, has_hw8 := span_end(sp8)
 
 	print_result(Bench_Result{
-		name    = "HAMT deep suffix-collision put (depth 10+)",
-		ops     = coll_n,
-		elapsed = elapsed_coll_put,
+		name         = "HAMT deep suffix-collision put (depth 10+)",
+		ops          = coll_n,
+		elapsed      = elapsed_coll_put,
+		counters     = hw8,
+		has_counters = has_hw8,
 	})
 
 	coll_slot, _ := xitdb.array_list_get_slot(history, -1)
@@ -782,14 +954,16 @@ bench_hamt :: proc(n: int) {
 		return nil
 	}
 
-	t9 := time.now()
+	sp9 := span_begin()
 	_ = xitdb.array_list_append_context(&history, coll_slot.?, coll_rem_cb, &col_ctx)
-	elapsed_coll_rem := time.since(t9)
+	elapsed_coll_rem, hw9, has_hw9 := span_end(sp9)
 
 	print_result(Bench_Result{
-		name    = "HAMT deep suffix-collision branch collapse",
-		ops     = coll_n,
-		elapsed = elapsed_coll_rem,
+		name         = "HAMT deep suffix-collision branch collapse",
+		ops          = coll_n,
+		elapsed      = elapsed_coll_rem,
+		counters     = hw9,
+		has_counters = has_hw9,
 	})
 
 	// 1i. Counted_Hash_Set key-only put (`Hash_Map_Get_Key` with `if_empty = true`) & lookup
@@ -802,14 +976,16 @@ bench_hamt :: proc(n: int) {
 		return nil
 	}
 
-	t10 := time.now()
+	sp10 := span_begin()
 	_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, cset_put_cb, &ictx)
-	elapsed_cset_put := time.since(t10)
+	elapsed_cset_put, hw10, has_hw10 := span_end(sp10)
 
 	print_result(Bench_Result{
-		name    = "HAMT Counted_Hash_Set key-only put (1 tx)",
-		ops     = n,
-		elapsed = elapsed_cset_put,
+		name         = "HAMT Counted_Hash_Set key-only put (1 tx)",
+		ops          = n,
+		elapsed      = elapsed_cset_put,
+		counters     = hw10,
+		has_counters = has_hw10,
 	})
 
 	cset_cur, _ := xitdb.array_list_get_cursor(history, -1)
@@ -817,17 +993,19 @@ bench_hamt :: proc(n: int) {
 	cset_cnt, _ := xitdb.counted_hash_set_count(rcset)
 	assert(cset_cnt == i64(n))
 
-	t11 := time.now()
+	sp11 := span_begin()
 	for k in keys {
 		kc, _ := xitdb.hash_set_get_cursor(rcset.read_hash_set, k)
 		assert(kc != nil)
 	}
-	elapsed_cset_get := time.since(t11)
+	elapsed_cset_get, hw11, has_hw11 := span_end(sp11)
 
 	print_result(Bench_Result{
-		name    = "HAMT Counted_Hash_Set membership check",
-		ops     = n,
-		elapsed = elapsed_cset_get,
+		name         = "HAMT Counted_Hash_Set membership check",
+		ops          = n,
+		elapsed      = elapsed_cset_get,
+		counters     = hw11,
+		has_counters = has_hw11,
 	})
 
 	free_all(context.temp_allocator)
@@ -861,36 +1039,40 @@ bench_lists :: proc(n: int) {
 			return nil
 		}
 
-		t0 := time.now()
+		sp0 := span_begin()
 		_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, append_cb, &lctx)
-		elapsed_append := time.since(t0)
+		elapsed_append, hw0, has_hw0 := span_end(sp0)
 		sz, _ := xitdb.database_committed_size(&db)
 
 		print_result(Bench_Result{
-			name       = "Array_List (Radix Trie) append",
-			ops        = n,
-			elapsed    = elapsed_append,
-			bytes_used = sz,
+			name         = "Array_List (Radix Trie) append",
+			ops          = n,
+			elapsed      = elapsed_append,
+			bytes_used   = sz,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 
 		l_cur, _ := xitdb.array_list_get_cursor(history, 0)
 		rlist, _ := xitdb.read_array_list_init(l_cur.?)
 
-		t1 := time.now()
+		sp1 := span_begin()
 		for i in 0 ..< n {
 			ic, _ := xitdb.array_list_get_cursor(rlist, i64(i))
 			v, _ := xitdb.cursor_read_uint(ic.?)
 			assert(v == u64(i))
 		}
-		elapsed_get := time.since(t1)
+		elapsed_get, hw1, has_hw1 := span_end(sp1)
 
 		print_result(Bench_Result{
-			name    = "Array_List (Radix Trie) random get",
-			ops     = n,
-			elapsed = elapsed_get,
+			name         = "Array_List (Radix Trie) random get",
+			ops          = n,
+			elapsed      = elapsed_get,
+			counters     = hw1,
+			has_counters = has_hw1,
 		})
 
-		t2 := time.now()
+		sp2 := span_begin()
 		it, _ := xitdb.array_list_iterator(rlist)
 		cnt := 0
 		for {
@@ -901,12 +1083,14 @@ bench_lists :: proc(n: int) {
 			cnt += 1
 		}
 		assert(cnt == n)
-		elapsed_iter := time.since(t2)
+		elapsed_iter, hw2, has_hw2 := span_end(sp2)
 
 		print_result(Bench_Result{
-			name    = "Array_List (Radix Trie) iterator scan",
-			ops     = n,
-			elapsed = elapsed_iter,
+			name         = "Array_List (Radix Trie) iterator scan",
+			ops          = n,
+			elapsed      = elapsed_iter,
+			counters     = hw2,
+			has_counters = has_hw2,
 		})
 
 		put_arr_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
@@ -919,17 +1103,19 @@ bench_lists :: proc(n: int) {
 		}
 
 		m0_arr_slot, _ := xitdb.array_list_get_slot(history, 0)
-		t3 := time.now()
+		sp3 := span_begin()
 		_ = xitdb.array_list_append_context(&history, m0_arr_slot.?, put_arr_cb, &lctx)
-		elapsed_put_arr := time.since(t3)
+		elapsed_put_arr, hw3, has_hw3 := span_end(sp3)
 
 		print_result(Bench_Result{
-			name    = "Array_List (Radix Trie) in-place put",
-			ops     = n,
-			elapsed = elapsed_put_arr,
+			name         = "Array_List (Radix Trie) in-place put",
+			ops          = n,
+			elapsed      = elapsed_put_arr,
+			counters     = hw3,
+			has_counters = has_hw3,
 		})
 
-		t4 := time.now()
+		sp4 := span_begin()
 		for i in 0 ..< n {
 			ait, _ := xitdb.array_list_iterator_from(rlist, i64(i))
 			for _ in 0 ..< 10 {
@@ -937,12 +1123,14 @@ bench_lists :: proc(n: int) {
 				if c_maybe == nil do break
 			}
 		}
-		elapsed_arr_seek := time.since(t4)
+		elapsed_arr_seek, hw4, has_hw4 := span_end(sp4)
 
 		print_result(Bench_Result{
-			name    = "Array_List (Radix Trie) index-seek page(10)",
-			ops     = n,
-			elapsed = elapsed_arr_seek,
+			name         = "Array_List (Radix Trie) index-seek page(10)",
+			ops          = n,
+			elapsed      = elapsed_arr_seek,
+			counters     = hw4,
+			has_counters = has_hw4,
 		})
 
 		slice_iters := 500
@@ -951,16 +1139,18 @@ bench_lists :: proc(n: int) {
 			return xitdb.array_list_slice(&list, 10)
 		}
 
-		t5 := time.now()
+		sp5 := span_begin()
 		for _ in 0 ..< slice_iters {
 			_ = xitdb.array_list_append_context(&history, m0_arr_slot.?, slice_arr_cb, nil)
 		}
-		elapsed_arr_slice := time.since(t5)
+		elapsed_arr_slice, hw5, has_hw5 := span_end(sp5)
 
 		print_result(Bench_Result{
-			name    = "Array_List (Radix Trie) depth-collapse slice",
-			ops     = slice_iters,
-			elapsed = elapsed_arr_slice,
+			name         = "Array_List (Radix Trie) depth-collapse slice",
+			ops          = slice_iters,
+			elapsed      = elapsed_arr_slice,
+			counters     = hw5,
+			has_counters = has_hw5,
 		})
 	}
 
@@ -987,36 +1177,40 @@ bench_lists :: proc(n: int) {
 			return nil
 		}
 
-		t0 := time.now()
+		sp0 := span_begin()
 		_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, append_cb, &lctx)
-		elapsed_append := time.since(t0)
+		elapsed_append, hw0, has_hw0 := span_end(sp0)
 		sz, _ := xitdb.database_committed_size(&db)
 
 		print_result(Bench_Result{
-			name       = "Linked_Array_List (B-Tree) append",
-			ops        = n,
-			elapsed    = elapsed_append,
-			bytes_used = sz,
+			name         = "Linked_Array_List (B-Tree) append",
+			ops          = n,
+			elapsed      = elapsed_append,
+			bytes_used   = sz,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 
 		l_cur, _ := xitdb.array_list_get_cursor(history, 0)
 		rlist, _ := xitdb.read_linked_array_list_init(l_cur.?)
 
-		t1 := time.now()
+		sp1 := span_begin()
 		for i in 0 ..< n {
 			ic, _ := xitdb.linked_array_list_get_cursor(rlist, i64(i))
 			v, _ := xitdb.cursor_read_uint(ic.?)
 			assert(v == u64(i))
 		}
-		elapsed_get := time.since(t1)
+		elapsed_get, hw1, has_hw1 := span_end(sp1)
 
 		print_result(Bench_Result{
-			name    = "Linked_Array_List (B-Tree) random get",
-			ops     = n,
-			elapsed = elapsed_get,
+			name         = "Linked_Array_List (B-Tree) random get",
+			ops          = n,
+			elapsed      = elapsed_get,
+			counters     = hw1,
+			has_counters = has_hw1,
 		})
 
-		t2 := time.now()
+		sp2 := span_begin()
 		it, _ := xitdb.linked_array_list_iterator(rlist)
 		cnt := 0
 		for {
@@ -1027,12 +1221,14 @@ bench_lists :: proc(n: int) {
 			cnt += 1
 		}
 		assert(cnt == n)
-		elapsed_iter := time.since(t2)
+		elapsed_iter, hw2, has_hw2 := span_end(sp2)
 
 		print_result(Bench_Result{
-			name    = "Linked_Array_List (B-Tree) iterator scan",
-			ops     = n,
-			elapsed = elapsed_iter,
+			name         = "Linked_Array_List (B-Tree) iterator scan",
+			ops          = n,
+			elapsed      = elapsed_iter,
+			counters     = hw2,
+			has_counters = has_hw2,
 		})
 
 		// 2c. B-Tree structural rope ops: middle insert, middle remove, slice (`btree_split`) & concat (`btree_join`)
@@ -1053,14 +1249,16 @@ bench_lists :: proc(n: int) {
 		}
 
 		m0_slot, _ := xitdb.array_list_get_slot(history, 0)
-		t3 := time.now()
+		sp3 := span_begin()
 		_ = xitdb.array_list_append_context(&history, m0_slot.?, insert_mid_cb, &mctx)
-		elapsed_mid_ins := time.since(t3)
+		elapsed_mid_ins, hw3, has_hw3 := span_end(sp3)
 
 		print_result(Bench_Result{
-			name    = "Linked_Array_List (B-Tree) middle insert",
-			ops     = mid_ops,
-			elapsed = elapsed_mid_ins,
+			name         = "Linked_Array_List (B-Tree) middle insert",
+			ops          = mid_ops,
+			elapsed      = elapsed_mid_ins,
+			counters     = hw3,
+			has_counters = has_hw3,
 		})
 
 		remove_mid_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
@@ -1074,14 +1272,16 @@ bench_lists :: proc(n: int) {
 		}
 
 		m1_slot, _ := xitdb.array_list_get_slot(history, 1)
-		t4 := time.now()
+		sp4 := span_begin()
 		_ = xitdb.array_list_append_context(&history, m1_slot.?, remove_mid_cb, &mctx)
-		elapsed_mid_rem := time.since(t4)
+		elapsed_mid_rem, hw4, has_hw4 := span_end(sp4)
 
 		print_result(Bench_Result{
-			name    = "Linked_Array_List (B-Tree) middle remove",
-			ops     = mid_ops,
-			elapsed = elapsed_mid_rem,
+			name         = "Linked_Array_List (B-Tree) middle remove",
+			ops          = mid_ops,
+			elapsed      = elapsed_mid_rem,
+			counters     = hw4,
+			has_counters = has_hw4,
 		})
 
 		Rope_Ctx :: struct {
@@ -1101,14 +1301,16 @@ bench_lists :: proc(n: int) {
 			return nil
 		}
 
-		t5 := time.now()
+		sp5 := span_begin()
 		_ = xitdb.array_list_append_context(&history, m0_slot.?, rope_cb, &rctx)
-		elapsed_rope := time.since(t5)
+		elapsed_rope, hw5, has_hw5 := span_end(sp5)
 
 		print_result(Bench_Result{
-			name    = "Linked_Array_List (B-Tree) concat + slice",
-			ops     = rctx.iters * 2,
-			elapsed = elapsed_rope,
+			name         = "Linked_Array_List (B-Tree) concat + slice",
+			ops          = rctx.iters * 2,
+			elapsed      = elapsed_rope,
+			counters     = hw5,
+			has_counters = has_hw5,
 		})
 
 		put_lal_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
@@ -1120,17 +1322,19 @@ bench_lists :: proc(n: int) {
 			return nil
 		}
 
-		t6 := time.now()
+		sp6 := span_begin()
 		_ = xitdb.array_list_append_context(&history, m0_slot.?, put_lal_cb, &lctx)
-		elapsed_put_lal := time.since(t6)
+		elapsed_put_lal, hw6, has_hw6 := span_end(sp6)
 
 		print_result(Bench_Result{
-			name    = "Linked_Array_List (B-Tree) in-place put",
-			ops     = n,
-			elapsed = elapsed_put_lal,
+			name         = "Linked_Array_List (B-Tree) in-place put",
+			ops          = n,
+			elapsed      = elapsed_put_lal,
+			counters     = hw6,
+			has_counters = has_hw6,
 		})
 
-		t7 := time.now()
+		sp7 := span_begin()
 		for i in 0 ..< n {
 			lit, _ := xitdb.linked_array_list_iterator_from(rlist, i64(i))
 			for _ in 0 ..< 10 {
@@ -1138,12 +1342,14 @@ bench_lists :: proc(n: int) {
 				if c_maybe == nil do break
 			}
 		}
-		elapsed_lal_seek := time.since(t7)
+		elapsed_lal_seek, hw7, has_hw7 := span_end(sp7)
 
 		print_result(Bench_Result{
-			name    = "Linked_Array_List (B-Tree) index-seek page(10)",
-			ops     = n,
-			elapsed = elapsed_lal_seek,
+			name         = "Linked_Array_List (B-Tree) index-seek page(10)",
+			ops          = n,
+			elapsed      = elapsed_lal_seek,
+			counters     = hw7,
+			has_counters = has_hw7,
 		})
 	}
 }
@@ -1181,49 +1387,55 @@ bench_sorted_map :: proc(n: int) {
 		return nil
 	}
 
-	t0 := time.now()
+	sp0 := span_begin()
 	_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, put_cb, &sctx)
-	elapsed_put := time.since(t0)
+	elapsed_put, hw0, has_hw0 := span_end(sp0)
 	sz, _ := xitdb.database_committed_size(&db)
 
 	print_result(Bench_Result{
-		name       = "Sorted_Map (B+Tree) out-of-order put",
-		ops        = n,
-		elapsed    = elapsed_put,
-		bytes_used = sz,
+		name         = "Sorted_Map (B+Tree) out-of-order put",
+		ops          = n,
+		elapsed      = elapsed_put,
+		bytes_used   = sz,
+		counters     = hw0,
+		has_counters = has_hw0,
 	})
 
 	sm_cur, _ := xitdb.array_list_get_cursor(history, 0)
 	sm, _ := xitdb.read_sorted_map_init(sm_cur.?)
 
-	t1 := time.now()
+	sp1 := span_begin()
 	for k, idx in keys {
 		vc, _ := xitdb.sorted_map_get_cursor(sm, k)
 		v, _ := xitdb.cursor_read_uint(vc.?)
 		assert(v == u64(idx))
 	}
-	elapsed_get := time.since(t1)
+	elapsed_get, hw1, has_hw1 := span_end(sp1)
 
 	print_result(Bench_Result{
-		name    = "Sorted_Map (B+Tree) key lookup",
-		ops     = n,
-		elapsed = elapsed_get,
+		name         = "Sorted_Map (B+Tree) key lookup",
+		ops          = n,
+		elapsed      = elapsed_get,
+		counters     = hw1,
+		has_counters = has_hw1,
 	})
 
-	t2 := time.now()
+	sp2 := span_begin()
 	for k in keys {
 		rk, _ := xitdb.sorted_map_rank(sm, k)
 		assert(rk >= 0 && rk < i64(n))
 	}
-	elapsed_rank := time.since(t2)
+	elapsed_rank, hw2, has_hw2 := span_end(sp2)
 
 	print_result(Bench_Result{
-		name    = "Sorted_Map (B+Tree) rank query",
-		ops     = n,
-		elapsed = elapsed_rank,
+		name         = "Sorted_Map (B+Tree) rank query",
+		ops          = n,
+		elapsed      = elapsed_rank,
+		counters     = hw2,
+		has_counters = has_hw2,
 	})
 
-	t3 := time.now()
+	sp3 := span_begin()
 	it, _ := xitdb.sorted_map_iterator(sm)
 	cnt := 0
 	for {
@@ -1232,16 +1444,18 @@ bench_sorted_map :: proc(n: int) {
 		cnt += 1
 	}
 	assert(cnt == n)
-	elapsed_iter := time.since(t3)
+	elapsed_iter, hw3, has_hw3 := span_end(sp3)
 
 	print_result(Bench_Result{
-		name    = "Sorted_Map (B+Tree) ordered scan",
-		ops     = n,
-		elapsed = elapsed_iter,
+		name         = "Sorted_Map (B+Tree) ordered scan",
+		ops          = n,
+		elapsed      = elapsed_iter,
+		counters     = hw3,
+		has_counters = has_hw3,
 	})
 
 	// 3b. Lower-bound range seek (`sorted_map_iterator_from_string`) + 10-item page read
-	t4 := time.now()
+	sp4 := span_begin()
 	for k in keys {
 		rit, _ := xitdb.sorted_map_iterator_from_string(sm, k)
 		for _ in 0 ..< 10 {
@@ -1249,12 +1463,14 @@ bench_sorted_map :: proc(n: int) {
 			if c_maybe == nil do break
 		}
 	}
-	elapsed_range_seek := time.since(t4)
+	elapsed_range_seek, hw4, has_hw4 := span_end(sp4)
 
 	print_result(Bench_Result{
-		name    = "Sorted_Map (B+Tree) lower-bound page(10)",
-		ops     = n,
-		elapsed = elapsed_range_seek,
+		name         = "Sorted_Map (B+Tree) lower-bound page(10)",
+		ops          = n,
+		elapsed      = elapsed_range_seek,
+		counters     = hw4,
+		has_counters = has_hw4,
 	})
 
 	// 3c. Out-of-order B+Tree key removal & node rebalancing/merging
@@ -1275,32 +1491,36 @@ bench_sorted_map :: proc(n: int) {
 	}
 
 	m0_slot, _ := xitdb.array_list_get_slot(history, 0)
-	t5 := time.now()
+	sp5 := span_begin()
 	_ = xitdb.array_list_append_context(&history, m0_slot.?, rem_sorted_cb, &srctx)
-	elapsed_rem := time.since(t5)
+	elapsed_rem, hw5, has_hw5 := span_end(sp5)
 
 	print_result(Bench_Result{
-		name    = "Sorted_Map (B+Tree) remove & rebalance",
-		ops     = rem_count,
-		elapsed = elapsed_rem,
+		name         = "Sorted_Map (B+Tree) remove & rebalance",
+		ops          = rem_count,
+		elapsed      = elapsed_rem,
+		counters     = hw5,
+		has_counters = has_hw5,
 	})
 
 	// 3d. Order-Statistic B+Tree positional select (`sorted_map_get_index_kv_pair`)
-	t6 := time.now()
+	sp6 := span_begin()
 	for i in 0 ..< n {
 		kv_maybe, _ := xitdb.sorted_map_get_index_kv_pair(sm, i64(i))
 		assert(kv_maybe != nil)
 	}
-	elapsed_select := time.since(t6)
+	elapsed_select, hw6, has_hw6 := span_end(sp6)
 
 	print_result(Bench_Result{
-		name    = "Sorted_Map (B+Tree) get_index select",
-		ops     = n,
-		elapsed = elapsed_select,
+		name         = "Sorted_Map (B+Tree) get_index select",
+		ops          = n,
+		elapsed      = elapsed_select,
+		counters     = hw6,
+		has_counters = has_hw6,
 	})
 
 	// 3e. Order-Statistic B+Tree positional index seek (`sorted_map_iterator_from_index`) + 10-item page
-	t7 := time.now()
+	sp7 := span_begin()
 	for i in 0 ..< n {
 		iit, _ := xitdb.sorted_map_iterator_from_index(sm, i64(i))
 		for _ in 0 ..< 10 {
@@ -1308,12 +1528,14 @@ bench_sorted_map :: proc(n: int) {
 			if c_maybe == nil do break
 		}
 	}
-	elapsed_index_seek := time.since(t7)
+	elapsed_index_seek, hw7, has_hw7 := span_end(sp7)
 
 	print_result(Bench_Result{
-		name    = "Sorted_Map (B+Tree) index-seek page(10)",
-		ops     = n,
-		elapsed = elapsed_index_seek,
+		name         = "Sorted_Map (B+Tree) index-seek page(10)",
+		ops          = n,
+		elapsed      = elapsed_index_seek,
+		counters     = hw7,
+		has_counters = has_hw7,
 	})
 
 	// 3f. Sorted_Map in-place overwrite of existing keys (`found == true` in `sorted_put`)
@@ -1326,14 +1548,16 @@ bench_sorted_map :: proc(n: int) {
 		return nil
 	}
 
-	t8 := time.now()
+	sp8 := span_begin()
 	_ = xitdb.array_list_append_context(&history, m0_slot.?, overwrite_sorted_cb, &sctx)
-	elapsed_overwrite := time.since(t8)
+	elapsed_overwrite, hw8, has_hw8 := span_end(sp8)
 
 	print_result(Bench_Result{
-		name    = "Sorted_Map (B+Tree) in-place overwrite",
-		ops     = n,
-		elapsed = elapsed_overwrite,
+		name         = "Sorted_Map (B+Tree) in-place overwrite",
+		ops          = n,
+		elapsed      = elapsed_overwrite,
+		counters     = hw8,
+		has_counters = has_hw8,
 	})
 
 	// 3g. Sorted_Set key-only put (`Sorted_Map_Get_Key` without value slot write) & `sorted_set_contains`
@@ -1347,32 +1571,36 @@ bench_sorted_map :: proc(n: int) {
 	}
 
 	sz_before_sset, _ := xitdb.database_committed_size(&db)
-	t9 := time.now()
+	sp9 := span_begin()
 	_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, sset_put_cb, &sctx)
-	elapsed_sset_put := time.since(t9)
+	elapsed_sset_put, hw9, has_hw9 := span_end(sp9)
 	sz_after_sset, _ := xitdb.database_committed_size(&db)
 
 	print_result(Bench_Result{
-		name       = "Sorted_Set (B+Tree) key-only put (1 tx)",
-		ops        = n,
-		elapsed    = elapsed_sset_put,
-		bytes_used = sz_after_sset - sz_before_sset,
+		name         = "Sorted_Set (B+Tree) key-only put (1 tx)",
+		ops          = n,
+		elapsed      = elapsed_sset_put,
+		bytes_used   = sz_after_sset - sz_before_sset,
+		counters     = hw9,
+		has_counters = has_hw9,
 	})
 
 	ss_cur, _ := xitdb.array_list_get_cursor(history, -1)
 	rss, _ := xitdb.read_sorted_set_init(ss_cur.?)
 
-	t10 := time.now()
+	sp10 := span_begin()
 	for k in keys {
 		ok, _ := xitdb.sorted_set_contains(rss, k)
 		assert(ok)
 	}
-	elapsed_sset_contains := time.since(t10)
+	elapsed_sset_contains, hw10, has_hw10 := span_end(sp10)
 
 	print_result(Bench_Result{
-		name    = "Sorted_Set (B+Tree) contains lookup",
-		ops     = n,
-		elapsed = elapsed_sset_contains,
+		name         = "Sorted_Set (B+Tree) contains lookup",
+		ops          = n,
+		elapsed      = elapsed_sset_contains,
+		counters     = hw10,
+		has_counters = has_hw10,
 	})
 
 	free_all(context.temp_allocator)
@@ -1420,24 +1648,28 @@ bench_compaction_and_replication :: proc(moments_count: int) {
 	defer xitdb.core_destroy(&rep_core)
 	rep_db, _ := xitdb.database_init(&rep_core, xitdb.sha1_hasher())
 
-	t0 := time.now()
+	sp0 := span_begin()
 	rep_state, _ := xitdb.database_replica_state(&rep_db)
 	start_off, _ := xitdb.database_replication_start(&db, rep_state)
 	end_off, _ := xitdb.database_committed_size(&db)
 	payload, _ := xitdb.database_read_committed_bytes(&db, start_off, end_off, context.temp_allocator)
 	_ = xitdb.database_apply_replicated_bytes(&rep_db, start_off, payload)
-	elapsed_rep := time.since(t0)
+	elapsed_rep, hw0, has_hw0 := span_end(sp0)
 
 	print_result(Bench_Result{
-		name       = "Replication (genesis -> 200 moments)",
-		ops        = moments_count,
-		elapsed    = elapsed_rep,
-		bytes_used = end_off,
+		name         = "Replication (genesis -> 200 moments)",
+		ops          = moments_count,
+		elapsed      = elapsed_rep,
+		bytes_used   = end_off,
+		counters     = hw0,
+		has_counters = has_hw0,
 	})
 
 	// 4a-delta. Incremental delta replication (100 single-moment commits synced incrementally)
 	delta_commits := 100
 	t_delta := time.Duration(0)
+	c_delta: obench.Counter_Values
+	c_delta_ok := false
 	delta_bytes := i64(0)
 	delta_buf := make([]u8, 16384, context.temp_allocator)
 	for i in 0 ..< delta_commits {
@@ -1445,21 +1677,31 @@ bench_compaction_and_replication :: proc(moments_count: int) {
 		s_maybe, _ := xitdb.array_list_get_slot(history, -1)
 		_ = xitdb.array_list_append_context(&history, s_maybe.?, commit_cb, &cctx)
 
-		td0 := time.now()
+		sp_d := span_begin()
 		d_state, _ := xitdb.database_replica_state(&rep_db)
 		d_start, _ := xitdb.database_replication_start(&db, d_state)
 		d_end, _ := xitdb.database_committed_size(&db)
 		d_payload, _ := xitdb.database_read_committed_buf(&db, d_start, d_end, delta_buf)
 		_ = xitdb.database_apply_replicated_bytes(&rep_db, d_start, d_payload)
-		t_delta += time.since(td0)
+		d_el, d_hw, d_ok := span_end(sp_d)
+		t_delta += d_el
+		if d_ok {
+			c_delta.instructions += d_hw.instructions
+			c_delta.cycles += d_hw.cycles
+			c_delta.branch_misses += d_hw.branch_misses
+			c_delta.cache_misses += d_hw.cache_misses
+			c_delta_ok = true
+		}
 		delta_bytes += (d_end - d_start)
 	}
 
 	print_result(Bench_Result{
-		name       = "Replication (incremental 1-moment delta)",
-		ops        = delta_commits,
-		elapsed    = t_delta,
-		bytes_used = delta_bytes,
+		name         = "Replication (incremental 1-moment delta)",
+		ops          = delta_commits,
+		elapsed      = t_delta,
+		bytes_used   = delta_bytes,
+		counters     = c_delta,
+		has_counters = c_delta_ok,
 	})
 
 	// 4b. Prune to latest 1 moment & compact database
@@ -1468,18 +1710,20 @@ bench_compaction_and_replication :: proc(moments_count: int) {
 	comp_core: xitdb.Core = xitdb.core_memory_init()
 	defer xitdb.core_destroy(&comp_core)
 
-	t1 := time.now()
+	sp1 := span_begin()
 	offset_map: xitdb.Offset_Map = xitdb.memory_offset_map_init()
 	defer xitdb.offset_map_destroy(&offset_map)
 	comp_db, _ := xitdb.database_compact(&db, &comp_core, &offset_map)
-	elapsed_compact := time.since(t1)
+	elapsed_compact, hw1, has_hw1 := span_end(sp1)
 	comp_size, _ := xitdb.database_committed_size(&comp_db)
 
 	print_result(Bench_Result{
-		name       = "Compaction (Memory_Offset_Map, 200 -> 1)",
-		ops        = 1,
-		elapsed    = elapsed_compact,
-		bytes_used = comp_size,
+		name         = "Compaction (Memory_Offset_Map, 200 -> 1)",
+		ops          = 1,
+		elapsed      = elapsed_compact,
+		bytes_used   = comp_size,
+		counters     = hw1,
+		has_counters = has_hw1,
 	})
 
 	// 4c. Compact using disk-backed `File_Offset_Map`
@@ -1493,16 +1737,18 @@ bench_compaction_and_replication :: proc(moments_count: int) {
 	file_om, _ := xitdb.file_offset_map_init(om_rc)
 	file_offset_map: xitdb.Offset_Map = file_om
 
-	t2 := time.now()
+	sp2 := span_begin()
 	comp_db2, _ := xitdb.database_compact(&db, &comp_file_core, &file_offset_map)
-	elapsed_file_compact := time.since(t2)
+	elapsed_file_compact, hw2, has_hw2 := span_end(sp2)
 	comp_size2, _ := xitdb.database_committed_size(&comp_db2)
 
 	print_result(Bench_Result{
-		name       = "Compaction (File_Offset_Map, 200 -> 1)",
-		ops        = 1,
-		elapsed    = elapsed_file_compact,
-		bytes_used = comp_size2,
+		name         = "Compaction (File_Offset_Map, 200 -> 1)",
+		ops          = 1,
+		elapsed      = elapsed_file_compact,
+		bytes_used   = comp_size2,
+		counters     = hw2,
+		has_counters = has_hw2,
 	})
 
 	// 4d. Heterogeneous DAG Compaction (`Array_List` + `Linked_Array_List` + `Sorted_Map` + `Counted_Hash_Map` + DAG shared subtrees)
@@ -1554,16 +1800,18 @@ bench_compaction_and_replication :: proc(moments_count: int) {
 		dag_om: xitdb.Offset_Map = xitdb.memory_offset_map_init()
 		defer xitdb.offset_map_destroy(&dag_om)
 
-		t_dag := time.now()
+		sp_dag := span_begin()
 		dag_comp_db, _ := xitdb.database_compact(&dag_db, &dag_dst_core, &dag_om)
-		elapsed_dag := time.since(t_dag)
+		elapsed_dag, hw_dag, has_hw_dag := span_end(sp_dag)
 		dag_comp_sz, _ := xitdb.database_committed_size(&dag_comp_db)
 
 		print_result(Bench_Result{
-			name       = "Compaction (Heterogeneous DAG + dedup)",
-			ops        = 1,
-			elapsed    = elapsed_dag,
-			bytes_used = dag_comp_sz,
+			name         = "Compaction (Heterogeneous DAG + dedup)",
+			ops          = 1,
+			elapsed      = elapsed_dag,
+			bytes_used   = dag_comp_sz,
+			counters     = hw_dag,
+			has_counters = has_hw_dag,
 		})
 
 		// 4f. Post-compaction replica resync (`database_replication_start` divergence detection + full replacement sync)
@@ -1577,20 +1825,22 @@ bench_compaction_and_replication :: proc(moments_count: int) {
 		_ = xitdb.database_apply_replicated_bytes(&resync_rep_db, 0, orig_bytes)
 
 		// Now measure resync against the compacted DAG primary (`dag_comp_db`)
-		t_resync := time.now()
-		rep_state, _ := xitdb.database_replica_state(&resync_rep_db)
-		resync_start, _ := xitdb.database_replication_start(&dag_comp_db, rep_state)
+		sp_resync := span_begin()
+		resync_rep_state, _ := xitdb.database_replica_state(&resync_rep_db)
+		resync_start, _ := xitdb.database_replication_start(&dag_comp_db, resync_rep_state)
 		assert(resync_start == 0)
 		comp_end, _ := xitdb.database_committed_size(&dag_comp_db)
 		comp_payload, _ := xitdb.database_read_committed_buf(&dag_comp_db, resync_start, comp_end, orig_bytes)
 		_ = xitdb.database_apply_replicated_bytes(&resync_rep_db, resync_start, comp_payload)
-		elapsed_resync := time.since(t_resync)
+		elapsed_resync, hw_resync, has_hw_resync := span_end(sp_resync)
 
 		print_result(Bench_Result{
-			name       = "Replication (Post-compaction resync)",
-			ops        = 1,
-			elapsed    = elapsed_resync,
-			bytes_used = i64(len(comp_payload)),
+			name         = "Replication (Post-compaction resync)",
+			ops          = 1,
+			elapsed      = elapsed_resync,
+			bytes_used   = i64(len(comp_payload)),
+			counters     = hw_resync,
+			has_counters = has_hw_resync,
 		})
 	}
 
@@ -1631,17 +1881,19 @@ bench_hashers_and_byte_streams :: proc(n: int) {
 		rc := xitdb.database_root_cursor(&db)
 		history, _ := xitdb.write_array_list_init(rc)
 
-		t0 := time.now()
+		sp0 := span_begin()
 		_ = xitdb.array_list_append_context(&history, xitdb.Slot{}, put_cb, &hctx)
-		elapsed := time.since(t0)
+		elapsed, hw0, has_hw0 := span_end(sp0)
 		sz, _ := xitdb.database_committed_size(&db)
 
 		label := "Hasher: SHA-1 (20B) HAMT put" if algo == "sha1" else "Hasher: SHA-256 (32B) HAMT put"
 		print_result(Bench_Result{
-			name       = label,
-			ops        = n,
-			elapsed    = elapsed,
-			bytes_used = sz,
+			name         = label,
+			ops          = n,
+			elapsed      = elapsed,
+			bytes_used   = sz,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 	}
 
@@ -1661,26 +1913,32 @@ bench_hashers_and_byte_streams :: proc(n: int) {
 		reads := n * 5
 		stack_buf: [64]u8
 
-		t_in := time.now()
+		sp_in := span_begin()
 		for _ in 0 ..< reads {
 			obj, _ := xitdb.cursor_read_bytes_buf(inline_cur.?, stack_buf[:])
 			assert(len(obj.value) == 8)
 		}
+		el_in, hw_in, has_hw_in := span_end(sp_in)
 		print_result(Bench_Result{
-			name    = "Bytes: Inline Short_Bytes read_bytes_buf",
-			ops     = reads,
-			elapsed = time.since(t_in),
+			name         = "Bytes: Inline Short_Bytes read_bytes_buf",
+			ops          = reads,
+			elapsed      = el_in,
+			counters     = hw_in,
+			has_counters = has_hw_in,
 		})
 
-		t_hp := time.now()
+		sp_hp := span_begin()
 		for _ in 0 ..< reads {
 			obj, _ := xitdb.cursor_read_bytes_buf(heap_cur.?, stack_buf[:])
 			assert(len(obj.value) == 32)
 		}
+		el_hp, hw_hp, has_hw_hp := span_end(sp_hp)
 		print_result(Bench_Result{
-			name    = "Bytes: External Bytes read_bytes_buf",
-			ops     = reads,
-			elapsed = time.since(t_hp),
+			name         = "Bytes: External Bytes read_bytes_buf",
+			ops          = reads,
+			elapsed      = el_hp,
+			counters     = hw_hp,
+			has_counters = has_hw_hp,
 		})
 
 		// Format-tagged `Bytes` (`slot.full == true`, 2-byte tag) inline (6B) vs external (32B) read_bytes_buf
@@ -1690,26 +1948,32 @@ bench_hashers_and_byte_streams :: proc(n: int) {
 		t_in_cur, _ := xitdb.hash_map_get_cursor(m.read_hash_map, "tagged_inline")
 		t_hp_cur, _ := xitdb.hash_map_get_cursor(m.read_hash_map, "tagged_heap")
 
-		t_tin := time.now()
+		sp_tin := span_begin()
 		for _ in 0 ..< reads {
 			obj, _ := xitdb.cursor_read_bytes_buf(t_in_cur.?, stack_buf[:])
 			assert(len(obj.value) == 6 && len(obj.format_tag) == 2)
 		}
+		el_tin, hw_tin, has_hw_tin := span_end(sp_tin)
 		print_result(Bench_Result{
-			name    = "Bytes: Tagged Short_Bytes read_bytes_buf",
-			ops     = reads,
-			elapsed = time.since(t_tin),
+			name         = "Bytes: Tagged Short_Bytes read_bytes_buf",
+			ops          = reads,
+			elapsed      = el_tin,
+			counters     = hw_tin,
+			has_counters = has_hw_tin,
 		})
 
-		t_thp := time.now()
+		sp_thp := span_begin()
 		for _ in 0 ..< reads {
 			obj, _ := xitdb.cursor_read_bytes_buf(t_hp_cur.?, stack_buf[:])
 			assert(len(obj.value) == 32 && len(obj.format_tag) == 2)
 		}
+		el_thp, hw_thp, has_hw_thp := span_end(sp_thp)
 		print_result(Bench_Result{
-			name    = "Bytes: Tagged External Bytes read_bytes_buf",
-			ops     = reads,
-			elapsed = time.since(t_thp),
+			name         = "Bytes: Tagged External Bytes read_bytes_buf",
+			ops          = reads,
+			elapsed      = el_thp,
+			counters     = hw_thp,
+			has_counters = has_hw_thp,
 		})
 	}
 
@@ -1740,19 +2004,21 @@ bench_hashers_and_byte_streams :: proc(n: int) {
 			return nil
 		}
 
-		t_sw := time.now()
+		sp_sw := span_begin()
 		_ = xitdb.database_run_context(&db, stream_write_cb, &sctx)
-		elapsed_sw := time.since(t_sw)
+		elapsed_sw, hw_sw, has_hw_sw := span_end(sp_sw)
 		sz_sw, _ := xitdb.database_committed_size(&db)
 
 		print_result(Bench_Result{
-			name       = "Stream: Cursor_Writer (256 x 4KB = 1MB)",
-			ops        = chunks_count,
-			elapsed    = elapsed_sw,
-			bytes_used = sz_sw,
+			name         = "Stream: Cursor_Writer (256 x 4KB = 1MB)",
+			ops          = chunks_count,
+			elapsed      = elapsed_sw,
+			bytes_used   = sz_sw,
+			counters     = hw_sw,
+			has_counters = has_hw_sw,
 		})
 
-		t_sr := time.now()
+		sp_sr := span_begin()
 		reader, _ := xitdb.cursor_reader(sctx.blob_rc)
 		read_buf: [4096]u8
 		read_chunks := 0
@@ -1762,29 +2028,33 @@ bench_hashers_and_byte_streams :: proc(n: int) {
 			read_chunks += 1
 		}
 		assert(read_chunks == chunks_count)
-		elapsed_sr := time.since(t_sr)
+		elapsed_sr, hw_sr, has_hw_sr := span_end(sp_sr)
 
 		print_result(Bench_Result{
-			name    = "Stream: Cursor_Reader (256 x 4KB = 1MB)",
-			ops     = chunks_count,
-			elapsed = elapsed_sr,
+			name         = "Stream: Cursor_Reader (256 x 4KB = 1MB)",
+			ops          = chunks_count,
+			elapsed      = elapsed_sr,
+			counters     = hw_sr,
+			has_counters = has_hw_sr,
 		})
 
 		// Random-access seek + 64B read across the 1 MB blob (`cursor_reader_seek_to`)
 		seek_ops := n
 		small_buf: [64]u8
-		t_rseek := time.now()
+		sp_rseek := span_begin()
 		for i in 0 ..< seek_ops {
 			off := i64((i * 4099) % (chunks_count * 4096 - 64))
 			_ = xitdb.cursor_reader_seek_to(&reader, off)
 			_ = xitdb.cursor_reader_read_fully(&reader, small_buf[:])
 		}
-		elapsed_rseek := time.since(t_rseek)
+		elapsed_rseek, hw_rseek, has_hw_rseek := span_end(sp_rseek)
 
 		print_result(Bench_Result{
-			name    = "Stream: Cursor_Reader random seek + 64B read",
-			ops     = seek_ops,
-			elapsed = elapsed_rseek,
+			name         = "Stream: Cursor_Reader random seek + 64B read",
+			ops          = seek_ops,
+			elapsed      = elapsed_rseek,
+			counters     = hw_rseek,
+			has_counters = has_hw_rseek,
 		})
 
 		// Random-access in-place patch via `cursor_writer_seek_to`
@@ -1809,14 +2079,16 @@ bench_hashers_and_byte_streams :: proc(n: int) {
 			return xitdb.cursor_writer_finish(&w)
 		}
 
-		t_wseek := time.now()
+		sp_wseek := span_begin()
 		_ = xitdb.database_run_context(&db, stream_patch_cb, &pctx)
-		elapsed_wseek := time.since(t_wseek)
+		elapsed_wseek, hw_wseek, has_hw_wseek := span_end(sp_wseek)
 
 		print_result(Bench_Result{
-			name    = "Stream: Cursor_Writer random seek + 16B patch",
-			ops     = seek_ops,
-			elapsed = elapsed_wseek,
+			name         = "Stream: Cursor_Writer random seek + 16B patch",
+			ops          = seek_ops,
+			elapsed      = elapsed_wseek,
+			counters     = hw_wseek,
+			has_counters = has_hw_wseek,
 		})
 	}
 
@@ -1865,14 +2137,16 @@ bench_hashers_and_byte_streams :: proc(n: int) {
 			return nil
 		}
 
-		t_dw := time.now()
+		sp_dw := span_begin()
 		_ = xitdb.database_run_context(&db, deep_write_cb, &dctx)
-		elapsed_dw := time.since(t_dw)
+		elapsed_dw, hw_dw, has_hw_dw := span_end(sp_dw)
 
 		print_result(Bench_Result{
-			name    = "Path: 4-level nested cursor_write_path",
-			ops     = path_ops,
-			elapsed = elapsed_dw,
+			name         = "Path: 4-level nested cursor_write_path",
+			ops          = path_ops,
+			elapsed      = elapsed_dw,
+			counters     = hw_dw,
+			has_counters = has_hw_dw,
 		})
 
 		rc := xitdb.database_root_cursor(&db).read_cursor
@@ -1884,18 +2158,20 @@ bench_hashers_and_byte_streams :: proc(n: int) {
 			xitdb.Sorted_Map_Get{target = xitdb.Sorted_Map_Get_Value{key = skey}},
 		}
 
-		t_dr := time.now()
+		sp_dr := span_begin()
 		for _ in 0 ..< path_ops {
 			mc, _ := xitdb.cursor_read_path(rc, read_parts)
 			v, _ := xitdb.cursor_read_uint(mc.?)
 			assert(v == u64(path_ops - 1))
 		}
-		elapsed_dr := time.since(t_dr)
+		elapsed_dr, hw_dr, has_hw_dr := span_end(sp_dr)
 
 		print_result(Bench_Result{
-			name    = "Path: 4-level nested cursor_read_path",
-			ops     = path_ops,
-			elapsed = elapsed_dr,
+			name         = "Path: 4-level nested cursor_read_path",
+			ops          = path_ops,
+			elapsed      = elapsed_dr,
+			counters     = hw_dr,
+			has_counters = has_hw_dr,
 		})
 	}
 
@@ -1913,7 +2189,7 @@ bench_hashers_and_byte_streams :: proc(n: int) {
 
 		key_buf: [64]u8
 		kv_cnt := 0
-		t_kv := time.now()
+		sp_kv := span_begin()
 		it, _ := xitdb.hash_map_iterator(rm)
 		for {
 			cur_maybe, _ := xitdb.cursor_iterator_next(&it)
@@ -1926,12 +2202,14 @@ bench_hashers_and_byte_streams :: proc(n: int) {
 			kv_cnt += 1
 		}
 		assert(kv_cnt == n)
-		elapsed_kv := time.since(t_kv)
+		elapsed_kv, hw_kv, has_hw_kv := span_end(sp_kv)
 
 		print_result(Bench_Result{
-			name    = "Cursor: Full KV-pair scan (read_kv_pair)",
-			ops     = n,
-			elapsed = elapsed_kv,
+			name         = "Cursor: Full KV-pair scan (read_kv_pair)",
+			ops          = n,
+			elapsed      = elapsed_kv,
+			counters     = hw_kv,
+			has_counters = has_hw_kv,
 		})
 	}
 
@@ -1963,7 +2241,7 @@ bench_backends :: proc(commits: int) {
 		rc := xitdb.database_root_cursor(&db)
 		history, _ := xitdb.write_array_list_init(rc)
 
-		t0 := time.now()
+		sp0 := span_begin()
 		tctx: Tx_Ctx
 		for i in 0 ..< commits {
 			tctx.step = i
@@ -1974,14 +2252,16 @@ bench_backends :: proc(commits: int) {
 			}
 			_ = xitdb.array_list_append_context(&history, base, tx_cb, &tctx)
 		}
-		elapsed := time.since(t0)
+		elapsed, hw0, has_hw0 := span_end(sp0)
 		sz, _ := xitdb.database_committed_size(&db)
 
 		print_result(Bench_Result{
-			name       = "Backend: Core_Memory commits",
-			ops        = commits,
-			elapsed    = elapsed,
-			bytes_used = sz,
+			name         = "Backend: Core_Memory commits",
+			ops          = commits,
+			elapsed      = elapsed,
+			bytes_used   = sz,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 	}
 
@@ -2005,7 +2285,7 @@ bench_backends :: proc(commits: int) {
 		rc := xitdb.database_root_cursor(&db)
 		history, _ := xitdb.write_array_list_init(rc)
 
-		t0 := time.now()
+		sp0 := span_begin()
 		tctx: Tx_Ctx
 		for i in 0 ..< commits {
 			tctx.step = i
@@ -2016,14 +2296,16 @@ bench_backends :: proc(commits: int) {
 			}
 			_ = xitdb.array_list_append_context(&history, base, tx_cb, &tctx)
 		}
-		elapsed := time.since(t0)
+		elapsed, hw0, has_hw0 := span_end(sp0)
 		sz, _ := xitdb.database_committed_size(&db)
 
 		print_result(Bench_Result{
-			name       = "Backend: Core_Buffered_File commits",
-			ops        = commits,
-			elapsed    = elapsed,
-			bytes_used = sz,
+			name         = "Backend: Core_Buffered_File commits",
+			ops          = commits,
+			elapsed      = elapsed,
+			bytes_used   = sz,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 	}
 
@@ -2042,7 +2324,7 @@ bench_backends :: proc(commits: int) {
 		rc := xitdb.database_root_cursor(&db)
 		history, _ := xitdb.write_array_list_init(rc)
 
-		t0 := time.now()
+		sp0 := span_begin()
 		tctx: Tx_Ctx
 		for i in 0 ..< commits {
 			tctx.step = i
@@ -2053,14 +2335,16 @@ bench_backends :: proc(commits: int) {
 			}
 			_ = xitdb.array_list_append_context(&history, base, tx_cb, &tctx)
 		}
-		elapsed := time.since(t0)
+		elapsed, hw0, has_hw0 := span_end(sp0)
 		sz, _ := xitdb.database_committed_size(&db)
 
 		print_result(Bench_Result{
-			name       = "Backend: Core_File (unbuffered) commits",
-			ops        = commits,
-			elapsed    = elapsed,
-			bytes_used = sz,
+			name         = "Backend: Core_File (unbuffered) commits",
+			ops          = commits,
+			elapsed      = elapsed,
+			bytes_used   = sz,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 	}
 
@@ -2097,14 +2381,16 @@ bench_backends :: proc(commits: int) {
 			return nil
 		}
 
-		t_fc := time.now()
+		sp_fc := span_begin()
 		_ = xitdb.database_run_context(&db, freeze_cow_cb, &fctx)
-		elapsed_fc := time.since(t_fc)
+		elapsed_fc, hw_fc, has_hw_fc := span_end(sp_fc)
 
 		print_result(Bench_Result{
-			name    = "Tx: Mid-tx database_freeze + CoW clone",
-			ops     = commits,
-			elapsed = elapsed_fc,
+			name         = "Tx: Mid-tx database_freeze + CoW clone",
+			ops          = commits,
+			elapsed      = elapsed_fc,
+			counters     = hw_fc,
+			has_counters = has_hw_fc,
 		})
 
 		rollback_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
@@ -2115,36 +2401,40 @@ bench_backends :: proc(commits: int) {
 		}
 
 		size_before_rb, _ := xitdb.database_committed_size(&db)
-		t_rb := time.now()
+		sp_rb := span_begin()
 		for _ in 0 ..< commits {
 			err := xitdb.database_run_context(&db, rollback_cb, nil)
 			assert(err == .Key_Not_Found)
 		}
-		elapsed_rb := time.since(t_rb)
+		elapsed_rb, hw_rb, has_hw_rb := span_end(sp_rb)
 		size_after_rb, _ := xitdb.database_committed_size(&db)
 		assert(size_after_rb == size_before_rb)
 
 		print_result(Bench_Result{
-			name    = "Tx: Aborted transaction rollback truncate",
-			ops     = commits,
-			elapsed = elapsed_rb,
+			name         = "Tx: Aborted transaction rollback truncate",
+			ops          = commits,
+			elapsed      = elapsed_rb,
+			counters     = hw_rb,
+			has_counters = has_hw_rb,
 		})
 
 		// 5e. Database re-open & header/root-trailer checksum validation (`database_init` on populated `Core_Memory`)
 		reopen_ops := commits * 10
-		t_reopen := time.now()
+		sp_reopen := span_begin()
 		for _ in 0 ..< reopen_ops {
 			reopened_db, r_err := xitdb.database_init(&core, xitdb.sha1_hasher())
 			assert(r_err == nil)
 			rc := xitdb.database_root_cursor(&reopened_db)
 			assert(rc.slot_ptr.slot.tag == .Hash_Map)
 		}
-		elapsed_reopen := time.since(t_reopen)
+		elapsed_reopen, hw_reopen, has_hw_reopen := span_end(sp_reopen)
 
 		print_result(Bench_Result{
-			name    = "DB: Re-open & trailer checksum verify",
-			ops     = reopen_ops,
-			elapsed = elapsed_reopen,
+			name         = "DB: Re-open & trailer checksum verify",
+			ops          = reopen_ops,
+			elapsed      = elapsed_reopen,
+			counters     = hw_reopen,
+			has_counters = has_hw_reopen,
 		})
 	}
 	free_all(context.temp_allocator)
@@ -2175,7 +2465,7 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 
 	// 1. Layer 2: Datomic-style Tx commits with secondary index maintenance (`tx_index_on`)
 	{
-		t0 := time.now()
+		sp0 := span_begin()
 		tx := xitdb.tx_init(&db, base_moment = nil, track_changes = false, allocator = context.temp_allocator)
 		xitdb.tx_doc(&tx, "Benchmark seed 500 indexed users and cyclic dependency graph")
 		xitdb.tx_index_on(&tx, "users", "username", "username->id")
@@ -2203,27 +2493,33 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 
 		rep0, err := xitdb.tx_commit(&tx)
 		assert(err == nil)
+		el0, hw0, has_hw0 := span_end(sp0)
 		print_result(Bench_Result{
-			name       = "DSL Layer 2: Tx Commit + Secondary Index (N=500)",
-			ops        = N,
-			elapsed    = time.since(t0),
-			bytes_used = rep0.commit_size,
+			name         = "DSL Layer 2: Tx Commit + Secondary Index (N=500)",
+			ops          = N,
+			elapsed      = el0,
+			bytes_used   = rep0.commit_size,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 		free_all(context.temp_allocator)
 	}
 
 	// 2. Layer 1: String Path Selector point lookups (`@-1.users["u0250"].age`)
 	{
-		t0 := time.now()
+		sp0 := span_begin()
 		for i in 0 ..< N {
 			sel := fmt.tprintf("@-1.users[\"u%04d\"].age", i)
 			val, err := xitdb.get_uint(&db, sel)
 			assert(err == nil && val >= 22)
 		}
+		el0, hw0, has_hw0 := span_end(sp0)
 		print_result(Bench_Result{
-			name    = "DSL Layer 1: String Selector get_uint (N=500)",
-			ops     = N,
-			elapsed = time.since(t0),
+			name         = "DSL Layer 1: String Selector get_uint (N=500)",
+			ops          = N,
+			elapsed      = el0,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 		free_all(context.temp_allocator)
 	}
@@ -2239,7 +2535,7 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 			tags     = {"odin", "xitdb", "datalog"},
 		}
 		M :: 200
-		t0 := time.now()
+		sp0 := span_begin()
 		tx := xitdb.tx_init(&db, base_moment = -1, allocator = context.temp_allocator)
 		Swap_Ctx :: struct {
 			dto:   ^Bench_User_DTO,
@@ -2260,34 +2556,43 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 		}, &sctx)
 		rep, err := xitdb.tx_commit(&tx)
 		assert(err == nil)
+		el0, hw0, has_hw0 := span_end(sp0)
 		print_result(Bench_Result{
-			name    = "DSL Layer 3: Struct marshal (N=200)",
-			ops     = M,
-			elapsed = time.since(t0),
+			name         = "DSL Layer 3: Struct marshal (N=200)",
+			ops          = M,
+			elapsed      = el0,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 
-		t1 := time.now()
+		sp1 := span_begin()
 		for i in 0 ..< M {
 			pcur_maybe, _ := xitdb.select_cursor(&db, fmt.tprintf("@-1.profiles[\"p%03d\"]", i))
 			out, u_err := xitdb.unmarshal(Bench_User_DTO, pcur_maybe.?, context.temp_allocator)
 			assert(u_err == nil && out.age == 31)
 		}
+		el1, hw1, has_hw1 := span_end(sp1)
 		print_result(Bench_Result{
-			name    = "DSL Layer 3: Struct unmarshal (N=200)",
-			ops     = M,
-			elapsed = time.since(t1),
+			name         = "DSL Layer 3: Struct unmarshal (N=200)",
+			ops          = M,
+			elapsed      = el1,
+			counters     = hw1,
+			has_counters = has_hw1,
 		})
 
-		t2 := time.now()
+		sp2 := span_begin()
 		for i in 0 ..< M {
 			pcur_maybe, _ := xitdb.select_cursor(&db, fmt.tprintf("@-1.profiles[\"p%03d\"]", i))
 			pv, p_err := xitdb.pull(pcur_maybe.?, "{username, age, todos[0..2]}", context.temp_allocator)
 			assert(p_err == nil && pv != nil)
 		}
+		el2, hw2, has_hw2 := span_end(sp2)
 		print_result(Bench_Result{
-			name    = "DSL Layer 3: Datomic pull projection (N=200)",
-			ops     = M,
-			elapsed = time.since(t2),
+			name         = "DSL Layer 3: Datomic pull projection (N=200)",
+			ops          = M,
+			elapsed      = el2,
+			counters     = hw2,
+			has_counters = has_hw2,
 		})
 		_ = rep
 		free_all(context.temp_allocator)
@@ -2301,26 +2606,32 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 		_, _ = xitdb.tx_commit(&tx)
 
 		Q :: 200
-		t0 := time.now()
+		sp0 := span_begin()
 		for _ in 0 ..< Q {
 			diffs, d_err := xitdb.diff_moments(&db, 1, 2, false, context.temp_allocator)
 			assert(d_err == nil && len(diffs) == 1)
 		}
+		el0, hw0, has_hw0 := span_end(sp0)
 		print_result(Bench_Result{
-			name    = "DSL Layer 4: diff_moments (1 of 700 mutated)",
-			ops     = Q,
-			elapsed = time.since(t0),
+			name         = "DSL Layer 4: diff_moments (1 of 700 mutated)",
+			ops          = Q,
+			elapsed      = el0,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 
-		t1 := time.now()
+		sp1 := span_begin()
 		for _ in 0 ..< Q {
 			hist, h_err := xitdb.history_of(&db, ".users[\"u0042\"].age", context.temp_allocator)
 			assert(h_err == nil && len(hist) == 2)
 		}
+		el1, hw1, has_hw1 := span_end(sp1)
 		print_result(Bench_Result{
-			name    = "DSL Layer 4: history_of lineage (3 moments)",
-			ops     = Q,
-			elapsed = time.since(t1),
+			name         = "DSL Layer 4: history_of lineage (3 moments)",
+			ops          = Q,
+			elapsed      = el1,
+			counters     = hw1,
+			has_counters = has_hw1,
 		})
 		free_all(context.temp_allocator)
 	}
@@ -2328,7 +2639,7 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 	// 5. Layer 5: Datalog B+Tree Prefix Pushdown, Grouped Aggregations & Cycle-Safe `reach`
 	{
 		Q :: 100
-		t0 := time.now()
+		sp0 := span_begin()
 		for _ in 0 ..< Q {
 			// Prefix "user_025" matches 10 users ("user_0250".."user_0259") via B+Tree seek
 			res, err := xitdb.query_datalog(&db, `
@@ -2341,15 +2652,18 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 			`, -1, context.temp_allocator)
 			assert(err == nil && len(res.rows) == 9)
 		}
+		el0, hw0, has_hw0 := span_end(sp0)
 		print_result(Bench_Result{
-			name    = "DSL Layer 5: Datalog B+Tree Prefix + Join",
-			ops     = Q,
-			elapsed = time.since(t0),
+			name         = "DSL Layer 5: Datalog B+Tree Prefix + Join",
+			ops          = Q,
+			elapsed      = el0,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 		free_all(context.temp_allocator)
 
 		A :: 25
-		t1 := time.now()
+		sp1 := span_begin()
 		for _ in 0 ..< A {
 			res, err := xitdb.query_datalog(&db, `
 				find ?dept, count(?id), min(?age), max(?age), sum(?age)
@@ -2359,15 +2673,18 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 			`, -1, context.temp_allocator)
 			assert(err == nil && len(res.rows) == 2)
 		}
+		el1, hw1, has_hw1 := span_end(sp1)
 		print_result(Bench_Result{
-			name    = "DSL Layer 5: Datalog Grouped Aggs (N=500)",
-			ops     = A,
-			elapsed = time.since(t1),
+			name         = "DSL Layer 5: Datalog Grouped Aggs (N=500)",
+			ops          = A,
+			elapsed      = el1,
+			counters     = hw1,
+			has_counters = has_hw1,
 		})
 		free_all(context.temp_allocator)
 
 		R :: 100
-		t2 := time.now()
+		sp2 := span_begin()
 		for _ in 0 ..< R {
 			res, err := xitdb.query_datalog(&db, `
 				find ?target, ?hops
@@ -2377,10 +2694,13 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 			`, -1, context.temp_allocator)
 			assert(err == nil && len(res.rows) == 32)
 		}
+		el2, hw2, has_hw2 := span_end(sp2)
 		print_result(Bench_Result{
-			name    = "DSL Layer 5: Datalog Cycle-Safe reach (32-ring)",
-			ops     = R,
-			elapsed = time.since(t2),
+			name         = "DSL Layer 5: Datalog Cycle-Safe reach (32-ring)",
+			ops          = R,
+			elapsed      = el2,
+			counters     = hw2,
+			has_counters = has_hw2,
 		})
 		free_all(context.temp_allocator)
 	}
@@ -2388,7 +2708,7 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 	// 6. Layer 2 & 3/4: Secondary Index Stale-Key Eviction (`tx_index_on` update) & Cyclic Graph `pull` + `diff`
 	{
 		U :: 200
-		t0 := time.now()
+		sp0 := span_begin()
 		tx_evict := xitdb.tx_init(&db, base_moment = -1, track_changes = false, allocator = context.temp_allocator)
 		xitdb.tx_index_on(&tx_evict, "users", "username", "username->id")
 		for i in 0 ..< U {
@@ -2398,10 +2718,13 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 		}
 		_, ev_err := xitdb.tx_commit(&tx_evict)
 		assert(ev_err == nil)
+		el0, hw0, has_hw0 := span_end(sp0)
 		print_result(Bench_Result{
-			name    = "DSL Layer 2: Secondary Index Evict+Update (N=200)",
-			ops     = U,
-			elapsed = time.since(t0),
+			name         = "DSL Layer 2: Secondary Index Evict+Update (N=200)",
+			ops          = U,
+			elapsed      = el0,
+			counters     = hw0,
+			has_counters = has_hw0,
 		})
 		free_all(context.temp_allocator)
 
@@ -2436,17 +2759,20 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 
 		C :: 200
 		node_a_cur, _ := xitdb.select_cursor(&db, "@-1.node_a")
-		t1 := time.now()
+		sp1 := span_begin()
 		for _ in 0 ..< C {
 			pv, p_err := xitdb.pull(node_a_cur.?, "*", context.temp_allocator)
 			assert(p_err == nil && pv != nil)
 			diffs, d_err := xitdb.diff_moments(&db, rep_cyc.moment_index, rep_cyc2.moment_index, false, context.temp_allocator)
 			assert(d_err == nil && len(diffs) == 1)
 		}
+		el1, hw1, has_hw1 := span_end(sp1)
 		print_result(Bench_Result{
-			name    = "DSL Layer 3/4: Cyclic Graph pull + diff (N=200)",
-			ops     = C,
-			elapsed = time.since(t1),
+			name         = "DSL Layer 3/4: Cyclic Graph pull + diff (N=200)",
+			ops          = C,
+			elapsed      = el1,
+			counters     = hw1,
+			has_counters = has_hw1,
 		})
 		free_all(context.temp_allocator)
 	}
@@ -2455,6 +2781,38 @@ run_dsl_benchmarks :: proc(_: int = 0) {
 main :: proc() {
 	g_host_allocator = context.allocator
 	parse_cli_args()
+
+	if !g_quiet && !g_host_warned {
+		host_env := hugi.collect_host_env(context.temp_allocator)
+		issues := hugi.check_host_env(host_env, context.temp_allocator)
+		for w in issues {
+			fmt.eprintfln("bench_xitdb: warning: %s", w)
+		}
+		free_all(context.temp_allocator)
+	}
+
+	pinned: obench.Thread_Pin
+	if g_pin_cpu >= 0 {
+		p_ok: bool
+		p_why: string
+		pinned, p_ok, p_why = obench.pin_thread(g_pin_cpu)
+		if !p_ok && !g_quiet {
+			fmt.eprintfln("bench_xitdb: warning: not pinned to CPU %d: %s", g_pin_cpu, p_why)
+		}
+	}
+	defer obench.unpin_thread(pinned)
+
+	if g_counters {
+		c_ok: bool
+		c_why: string
+		g_counter_group, c_ok, c_why = obench.counter_group_open()
+		if c_ok {
+			g_counter_overhead = calibrate_counter_overhead(&g_counter_group)
+		} else if !g_quiet {
+			fmt.eprintfln("bench_xitdb: warning: hardware counters unavailable: %s", c_why)
+		}
+	}
+	defer obench.counter_group_close(&g_counter_group)
 
 	write_jsonl := len(g_packet_out) == 0 || g_output_set
 	write_history := g_save_history && g_history_path != g_jsonl_path && (len(g_packet_out) == 0 || g_history_set)
@@ -2497,6 +2855,7 @@ main :: proc() {
 			selective      = g_selective_run,
 			records        = make([dynamic]hugi.Record, context.allocator),
 		}
+		hugi.populate_packet_env(&g_packet, allocator = context.allocator)
 		g_has_packet = true
 	}
 	defer if g_has_packet {

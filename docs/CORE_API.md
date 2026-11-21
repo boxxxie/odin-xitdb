@@ -87,9 +87,28 @@ root_wc := xitdb.database_root_cursor(&db)
   * `cursor_read_string(c: Read_Cursor, max_size: i64 = -1, allocator := context.allocator) -> (string, Error)`
   * `cursor_read_bytes_object(c: Read_Cursor, max_size: i64 = -1, allocator := context.allocator) -> (Bytes, Error)`
   * `cursor_read_kv_pair_slots(c: Read_Cursor) -> (KV_Pair_Cursor, Error)` *(zero heap allocations)*
+  * `database_kv_key_position(db: ^Database, entry: Slot) -> (Maybe(i64), Error)` / `database_kv_value_position(db: ^Database, entry: Slot) -> (Maybe(i64), Error)` *(slot-only KV offset reads without decoding full payloads)*
 * **Scalar & Byte Writes**:
   * `cursor_write(c: ^Write_Cursor, data: Writeable_Data) -> Error`
   * `cursor_write_if_empty(c: ^Write_Cursor, data: Writeable_Data) -> Error`
+
+### In-Place `Cursor_Iterator` Initialization (`*_init`)
+
+For recursive traversals on small thread stacks (e.g., `512 KiB`) or pooled/reused `Cursor_Iterator` instances, initialize an existing `^Cursor_Iterator` in place instead of returning a `Cursor_Iterator` by value. All 10 procedures below are `@(require_results)`, reset the iterator up front, zero the target on error (preventing stale state on reuse), and pair with `cursor_iterator_next` or `cursor_iterator_prev`:
+
+* **Full Collection (Forward & Reverse)**:
+  * `cursor_iterator_init(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor) -> Error`
+  * `cursor_iterator_reverse_init(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor) -> Error`
+* **`Sorted_Map` / `Sorted_Set` Range Seeks**:
+  * `cursor_iterator_sorted_from_index_init(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> Error`
+  * `cursor_iterator_sorted_from_key_init(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_key: []u8) -> Error`
+  * `cursor_iterator_sorted_reverse_from_index_init(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> Error`
+  * `cursor_iterator_sorted_reverse_from_key_init(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, upper_key: []u8, inclusive: bool = true) -> Error`
+* **`Array_List` & `Linked_Array_List` Index Seeks**:
+  * `cursor_iterator_array_list_from_index_init(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> Error`
+  * `cursor_iterator_array_list_reverse_from_index_init(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> Error`
+  * `cursor_iterator_linked_array_list_from_index_init(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> Error`
+  * `cursor_iterator_linked_array_list_reverse_from_index_init(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> Error`
 
 ---
 
