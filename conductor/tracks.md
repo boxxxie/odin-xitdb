@@ -21,3 +21,8 @@ This file tracks all major tracks for the `xitdb-odin` project. Each track has i
 
 - [x] **Track: Combined `libFuzzer` + ASan Coverage-Guided Fuzzing & Deterministic Differential Simulation Testing (`fuzz_testing_20261118`)**
   *Link: [./tracks/fuzz_testing_20261118/](./tracks/fuzz_testing_20261118/)*
+
+---
+
+- [x] **Track: Resolve Odin `dev-2026-11a+` Stack-Escape Warnings & ARM64 `-vet` Unused-Import Errors and Unpin CI (`odin_latest_vet_compat_20261121`)**
+  *Link: [./tracks/odin_latest_vet_compat_20261121/](./tracks/odin_latest_vet_compat_20261121/)*
