@@ -33,7 +33,6 @@ jobs:
         uses: laytan/setup-odin@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          release: dev-2026-10
 
       - name: Install LuaJIT (Linux)
         if: runner.os == 'Linux'
@@ -70,7 +69,7 @@ jobs:
           odin check cmd/xit
 
       - name: Check benchmark suite syntax & types
-        run: odin check benchmarks -collection:hugi=.tmp/hugi/hugi -collection:obench=.tmp/hugi/deps/obench/obench
+        run: odin check benchmarks -collection:hugi=.tmp/hugi/hugi -collection:obench=.tmp/hugi/deps/obench/obench -vet -warnings-as-errors
 
       - name: Strict static checks (Linux)
         if: runner.os == 'Linux'
@@ -78,7 +77,6 @@ jobs:
           odin check xitdb -no-entry-point -vet -warnings-as-errors
           odin check cmd/xit -vet -warnings-as-errors
           odin check tests -no-entry-point -warnings-as-errors
-          odin check benchmarks -collection:hugi=.tmp/hugi/hugi -collection:obench=.tmp/hugi/deps/obench/obench -vet -warnings-as-errors
           odin check fuzz/dsl -collection:xitdb=./xitdb -no-entry-point -vet -warnings-as-errors
           odin check fuzz/wire -collection:xitdb=./xitdb -no-entry-point -vet -warnings-as-errors
           odin check fuzz/lua -collection:xitdb=./xitdb -no-entry-point -vet -warnings-as-errors
