@@ -2048,8 +2048,8 @@ unit_cursor_iterator_in_place_init_and_reuse_invariants :: proc(t: ^testing.T) {
 		for oob in ([?]i64{40, -41}) {
 			make_dirty(t_ptr, it, sm_rc)
 			testing.expect_value(t_ptr, xitdb.cursor_iterator_sorted_from_index_init(it, sm_rc, oob), nil)
-			testing.expect_value(t_ptr, it.size, i64(0))
-			testing.expect_value(t_ptr, it.index, i64(0))
+			testing.expect_value(t_ptr, it.size, i64(40))
+			testing.expect_value(t_ptr, it.index, i64(40))
 			testing.expect_value(t_ptr, it.stack_len, 0)
 			expect_empty_iter(t_ptr, it, "sorted_from_index oob")
 		}
@@ -2527,7 +2527,7 @@ unit_cursor_iterator_in_place_init_and_reuse_invariants :: proc(t: ^testing.T) {
 	testing.expect_value(t, al_val_err, xitdb.Xitdb_Error.Unexpected_Tag)
 	testing.expect(t, is_zeroed(&al_val_it), "Expected full zero rollback on value-returning cursor_iterator_array_list_from_index failure")
 
-	// Zero all branch child slots in c_sm_rc and c_ll_rc -> all 6 B-Tree descending initializers must reject with .Unexpected_Tag
+	// Zero all branch child slots in c_sm_rc and c_ll_rc -> all 6 B-Tree descending initializers must reject with .Invalid_BTree_Node
 	for j in 0 ..< branch_num {
 		mem.zero(&cm.buf[branch_off + xitdb.BTREE_NODE_HEADER_SIZE + j * xitdb.SLOT_LENGTH], xitdb.SLOT_LENGTH)
 	}
@@ -2540,27 +2540,27 @@ unit_cursor_iterator_in_place_init_and_reuse_invariants :: proc(t: ^testing.T) {
 	}
 
 	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
-	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_index_init(it_iso, c_sm_rc, 25), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_index_init(it_iso, c_sm_rc, 25), xitdb.Xitdb_Error.Invalid_BTree_Node)
 	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Sorted_Map branch slot (from_index)")
 
 	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
-	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_key_init(it_iso, c_sm_rc, transmute([]u8)string("k-25")), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_key_init(it_iso, c_sm_rc, transmute([]u8)string("k-25")), xitdb.Xitdb_Error.Invalid_BTree_Node)
 	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Sorted_Map branch slot (from_key)")
 
 	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
-	testing.expect_value(t, xitdb.cursor_iterator_sorted_reverse_from_index_init(it_iso, c_sm_rc, 25), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_reverse_from_index_init(it_iso, c_sm_rc, 25), xitdb.Xitdb_Error.Invalid_BTree_Node)
 	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Sorted_Map branch slot (reverse_from_index)")
 
 	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
-	testing.expect_value(t, xitdb.cursor_iterator_sorted_reverse_from_key_init(it_iso, c_sm_rc, transmute([]u8)string("k-25")), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_reverse_from_key_init(it_iso, c_sm_rc, transmute([]u8)string("k-25")), xitdb.Xitdb_Error.Invalid_BTree_Node)
 	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Sorted_Map branch slot (reverse_from_key)")
 
 	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
-	testing.expect_value(t, xitdb.cursor_iterator_linked_array_list_from_index_init(it_iso, c_ll_rc, 25), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect_value(t, xitdb.cursor_iterator_linked_array_list_from_index_init(it_iso, c_ll_rc, 25), xitdb.Xitdb_Error.Invalid_BTree_Node)
 	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Linked_Array_List branch slot (from_index)")
 
 	mem.set(it_iso, 0xAA, size_of(xitdb.Cursor_Iterator))
-	testing.expect_value(t, xitdb.cursor_iterator_linked_array_list_reverse_from_index_init(it_iso, c_ll_rc, 25), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect_value(t, xitdb.cursor_iterator_linked_array_list_reverse_from_index_init(it_iso, c_ll_rc, 25), xitdb.Xitdb_Error.Invalid_BTree_Node)
 	testing.expect(t, is_zeroed(it_iso), "Expected zero rollback on corrupt Linked_Array_List branch slot (reverse_from_index)")
 }
 

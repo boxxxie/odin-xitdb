@@ -2947,10 +2947,8 @@ driver_verify_fast_path_corruption_and_truncation_guards :: proc(ctx: ^Suite_Ctx
 		testing.expect_value(ctx.t, ll_tag_err, xitdb.Xitdb_Error.Unexpected_Tag)
 		_, ll_from_err := xitdb.linked_array_list_iterator_from(ll, 0)
 		testing.expect_value(ctx.t, ll_from_err, xitdb.Xitdb_Error.Unexpected_Tag)
-		ll_it, ll_it_init_err := xitdb.linked_array_list_iterator(ll)
-		testing.expect_value(ctx.t, ll_it_init_err, nil)
-		_, ll_iter_err := xitdb.cursor_iterator_next(&ll_it)
-		testing.expect_value(ctx.t, ll_iter_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, ll_it_init_err := xitdb.linked_array_list_iterator(ll)
+		testing.expect_value(ctx.t, ll_it_init_err, xitdb.Xitdb_Error.Unexpected_Tag)
 		_, ll_node_err := xitdb.read_btree_node(&db, ll_child0_slot.value)
 		testing.expect_value(ctx.t, ll_node_err, xitdb.Xitdb_Error.Unexpected_Tag)
 
@@ -2960,7 +2958,7 @@ driver_verify_fast_path_corruption_and_truncation_guards :: proc(ctx: ^Suite_Ctx
 
 		// 4. Corrupt a slot tag byte (`99`) in `sm` child 0 leaf slot 0:
 		// Verify `sorted_map_get_cursor(sm, "k00")`, `sorted_map_get_index_kv_pair(sm, 0)`, `sorted_map_rank(sm, "k00")`,
-		// `sorted_map_iterator_from_index(sm, 0)`, `sorted_map_iterator_from_string(sm, "k00")`, and `cursor_iterator_next`
+		// `sorted_map_iterator_from_index(sm, 0)`, `sorted_map_iterator_from_string(sm, "k00")`, and `sorted_map_iterator(sm)`
 		// all return `.Unexpected_Tag`
 		testing.expect_value(ctx.t, xitdb.core_seek_to(&core, sm_root_ptr + xitdb.BTREE_NODE_HEADER_SIZE), nil)
 		sm_child0_slot, _ := xitdb.core_read_slot(&core)
@@ -2981,10 +2979,8 @@ driver_verify_fast_path_corruption_and_truncation_guards :: proc(ctx: ^Suite_Ctx
 		testing.expect_value(ctx.t, sm_from_idx_err, xitdb.Xitdb_Error.Unexpected_Tag)
 		_, sm_from_key_err := xitdb.sorted_map_iterator_from_string(sm, "k00")
 		testing.expect_value(ctx.t, sm_from_key_err, xitdb.Xitdb_Error.Unexpected_Tag)
-		sm_it, sm_it_init_err := xitdb.sorted_map_iterator(sm)
-		testing.expect_value(ctx.t, sm_it_init_err, nil)
-		_, sm_iter_err := xitdb.cursor_iterator_next(&sm_it)
-		testing.expect_value(ctx.t, sm_iter_err, xitdb.Xitdb_Error.Unexpected_Tag)
+		_, sm_it_init_err := xitdb.sorted_map_iterator(sm)
+		testing.expect_value(ctx.t, sm_it_init_err, xitdb.Xitdb_Error.Unexpected_Tag)
 		_, sm_node_err := xitdb.read_sorted_node(&db, sm_child0_slot.value)
 		testing.expect_value(ctx.t, sm_node_err, xitdb.Xitdb_Error.Unexpected_Tag)
 
