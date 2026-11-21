@@ -399,6 +399,9 @@ read_array_list_slot :: proc(
 		slot := core_read_slot_at(db.core, slot_pos) or_return
 
 		if shift == 0 {
+			if slot.tag == .Index {
+				return {}, .Unexpected_Tag
+			}
 			return Slot_Pointer{position = slot_pos, slot = slot}, nil
 		}
 

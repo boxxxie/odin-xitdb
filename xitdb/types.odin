@@ -1389,6 +1389,15 @@ is_key_only_entry :: #force_inline proc(entry: Slot) -> bool {
 	return entry.tag == .Bytes || entry.tag == .Short_Bytes
 }
 
+is_sorted_entry_tag :: #force_inline proc(tag: Tag) -> bool {
+	#partial switch tag {
+	case .Bytes, .Short_Bytes, .KV_Pair, .Sorted_KV_Pair:
+		return true
+	case:
+		return false
+	}
+}
+
 // Bytes represents a byte array with an optional 2-byte format tag.
 Bytes :: struct {
 	value:      []u8,
@@ -1484,4 +1493,27 @@ check_long :: proc(n: i64) -> (res: i64, err: Error) {
 		return 0, .Expected_Unsigned_Long
 	}
 	return n, nil
+}
+
+@(private)
+_checked_add_i64 :: #force_inline proc(a, b: i64) -> (i64, bool) {
+	if a < 0 || b < 0 || a > max(i64) - b {
+		return 0, false
+	}
+	return a + b, true
+}
+
+@(private)
+_sum_counts_i64 :: proc(counts: []i64) -> (total: i64, err: Error) {
+	for c in counts {
+		if c < 0 {
+			return 0, .Invalid_BTree_Node
+		}
+		ok: bool
+		total, ok = _checked_add_i64(total, c)
+		if !ok {
+			return 0, .Invalid_BTree_Node
+		}
+	}
+	return total, nil
 }
