@@ -1353,3 +1353,95 @@ unit_fuzz_regression_array_list_counted_map_and_sorted_empty_fast_paths :: proc(
 		testing.expect_value(t, xitdb.array_list_append_context(&history, m1_slot.?, sm_rm_cb, t), nil)
 	}
 }
+
+@(test)
+unit_fuzz_regression_diff_collection_scratch_allocator_no_leaks :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	cm := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&cm)
+	db, derr := xitdb.database_init(&cm, xitdb.sha1_hasher())
+	testing.expect_value(t, derr, nil)
+
+	// Moment 0: populate Hash_Map (.hm) and >20-entry Sorted_Map ($sm)
+	tx0 := xitdb.tx_init(&db, nil, false, context.allocator)
+	testing.expect_value(t, xitdb.tx_put(&tx0, ".hm.keep", "same"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx0, ".hm.update", "v1"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx0, ".hm.drop", "gone"), nil)
+	for i in 0 ..< 24 {
+		path := fmt.tprintf(`$sm["long_key_%02d"]`, i)
+		testing.expect_value(t, xitdb.tx_put(&tx0, path, i64(i)), nil)
+	}
+	rep0, cerr0 := xitdb.tx_commit(&tx0)
+	xitdb.tx_destroy(&tx0)
+	testing.expect_value(t, cerr0, nil)
+	xitdb.tx_report_destroy(&rep0, context.allocator)
+
+	// Moment 1: mutate subsets of both collections to force leaf/block comparisons
+	tx1 := xitdb.tx_init(&db, -1, false, context.allocator)
+	testing.expect_value(t, xitdb.tx_put(&tx1, ".hm.update", "v2"), nil)
+	testing.expect_value(t, xitdb.tx_rm(&tx1, ".hm.drop"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx1, ".hm.added", "new"), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx1, `$sm["long_key_00"]`, i64(100)), nil)
+	testing.expect_value(t, xitdb.tx_rm(&tx1, `$sm["long_key_05"]`), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx1, `$sm["long_key_12"]`, i64(200)), nil)
+	testing.expect_value(t, xitdb.tx_rm(&tx1, `$sm["long_key_19"]`), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx1, `$sm["long_key_24_extra"]`, i64(24)), nil)
+	testing.expect_value(t, xitdb.tx_put(&tx1, `$sm["long_key_25_extra"]`, i64(25)), nil)
+	rep1, cerr1 := xitdb.tx_commit(&tx1)
+	xitdb.tx_destroy(&tx1)
+	testing.expect_value(t, cerr1, nil)
+	xitdb.tx_report_destroy(&rep1, context.allocator)
+
+	free_changes :: proc(changes: []xitdb.Collection_Change) {
+		for ch in changes {
+			delete(ch.key, context.allocator)
+		}
+		delete(changes, context.allocator)
+	}
+
+	empty_cur := xitdb.Read_Cursor{
+		slot_ptr = xitdb.Slot_Pointer{slot = xitdb.Slot{}},
+		db       = &db,
+	}
+	hm0, ok_hm0 := xitdb.select_cursor(&db, "@0.hm")
+	hm1, ok_hm1 := xitdb.select_cursor(&db, "@1.hm")
+	sm0, ok_sm0 := xitdb.select_cursor(&db, "@0$sm")
+	sm1, ok_sm1 := xitdb.select_cursor(&db, "@1$sm")
+	testing.expect(t, ok_hm0 == nil && ok_hm1 == nil && ok_sm0 == nil && ok_sm1 == nil, "Expected cursors to resolve")
+
+	// 1. Empty <-> Hash_Map (_diff_hash_maps `entries` scratch path)
+	stats: xitdb.Diff_Stats
+	ch_empty_hm, err_eh := xitdb.diff_collection_with_stats(empty_cur, hm0.?, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_eh, nil)
+	testing.expect_value(t, len(ch_empty_hm), 3)
+	free_changes(ch_empty_hm)
+
+	ch_hm_empty, err_he := xitdb.diff_collection_with_stats(hm0.?, empty_cur, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_he, nil)
+	testing.expect_value(t, len(ch_hm_empty), 3)
+	free_changes(ch_hm_empty)
+
+	// 2. Hash_Map <-> Hash_Map (_diff_index_blocks `ea`/`eb` + `_collect_slot` `hash` scratch path)
+	ch_hm, err_hm := xitdb.diff_collection_with_stats(hm0.?, hm1.?, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_hm, nil)
+	testing.expect_value(t, len(ch_hm), 3)
+	free_changes(ch_hm)
+
+	// 3. Empty <-> Sorted_Map and Sorted_Map <-> Sorted_Map (`key_b` per-iteration scratch path)
+	ch_empty_sm, err_es := xitdb.diff_collection_with_stats(empty_cur, sm0.?, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_es, nil)
+	testing.expect_value(t, len(ch_empty_sm), 24)
+	free_changes(ch_empty_sm)
+
+	ch_sm_empty, err_se := xitdb.diff_collection_with_stats(sm0.?, empty_cur, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_se, nil)
+	testing.expect_value(t, len(ch_sm_empty), 24)
+	free_changes(ch_sm_empty)
+
+	ch_sm, err_sm := xitdb.diff_collection_with_stats(sm0.?, sm1.?, &stats, context.allocator, context.allocator)
+	testing.expect_value(t, err_sm, nil)
+	testing.expect_value(t, len(ch_sm), 6)
+	testing.expect(t, stats.keys_decoded > 0, "Expected keys_decoded > 0 during sorted map diff")
+	free_changes(ch_sm)
+}

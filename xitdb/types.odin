@@ -85,6 +85,7 @@ Xitdb_Error :: enum {
 	Invalid_Database,
 	Invalid_Version,
 	Invalid_Hash_Size,
+	Invalid_Hash_Id,
 	Invalid_Format_Tag_Size,
 	Invalid_Range,
 	Invalid_BTree_Node_Kind,

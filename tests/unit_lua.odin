@@ -282,3 +282,86 @@ unit_lua_arena_context_allocator_bounds_unmarshal_iterator_growth :: proc(t: ^te
 		lua.pop(L, 1)
 	}
 }
+
+@(test)
+unit_lua_opens_and_replicates_untagged_hash_id_zero_db :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	// 1. Default Odin SHA-1 DB (`hash_id == 0`) opens and replicates cleanly in Lua
+	core0 := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&core0)
+	db0, err0 := xitdb.database_init(&core0, xitdb.sha1_hasher())
+	testing.expect_value(t, err0, nil)
+
+	tx0 := xitdb.tx_init(&db0, nil, false, context.allocator)
+	testing.expect_value(t, xitdb.tx_put(&tx0, ".k", "from-odin-zero-id"), nil)
+	rep0, cerr0 := xitdb.tx_commit(&tx0)
+	xitdb.tx_destroy(&tx0)
+	testing.expect_value(t, cerr0, nil)
+	xitdb.tx_report_destroy(&rep0, context.allocator)
+
+	L0 := xitdb.lua_new_state(&db0)
+	testing.expect(t, L0 != nil)
+	if L0 == nil {
+		return
+	}
+	defer lua.close(L0)
+
+	ok0, msg0 := xitdb.lua_exec_string(L0, `
+		local payload = db:read_committed_bytes(0, db:committed_size())
+
+		local opened = xitdb.open_memory({bytes = payload})
+		assert(opened:get_string("@0.k") == "from-odin-zero-id")
+		opened:close()
+
+		local replica = xitdb.open_memory()
+		replica:apply_replicated_bytes(0, payload)
+		assert(replica:get_string("@0.k") == "from-odin-zero-id")
+		replica:close()
+	`, "unit_lua_hash_id_zero")
+	if !ok0 {
+		testing.expectf(t, false, "unit_lua_hash_id_zero failed: %s", msg0)
+	}
+
+	// 2. Non-zero mismatched hash_id (`"alt1"` vs Lua's `"sha1"`) is rejected cleanly
+	core1 := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+	defer xitdb.core_destroy(&core1)
+	db1, err1 := xitdb.database_init(&core1, xitdb.sha1_hasher(xitdb.string_to_id("alt1")))
+	testing.expect_value(t, err1, nil)
+
+	tx1 := xitdb.tx_init(&db1, nil, false, context.allocator)
+	testing.expect_value(t, xitdb.tx_put(&tx1, ".k", "from-alt1"), nil)
+	rep1, cerr1 := xitdb.tx_commit(&tx1)
+	xitdb.tx_destroy(&tx1)
+	testing.expect_value(t, cerr1, nil)
+	xitdb.tx_report_destroy(&rep1, context.allocator)
+
+	L1 := xitdb.lua_new_state(&db1)
+	testing.expect(t, L1 != nil)
+	if L1 == nil {
+		return
+	}
+	defer lua.close(L1)
+
+	ok1, msg1 := xitdb.lua_exec_string(L1, `
+		local payload = db:read_committed_bytes(0, db:committed_size())
+
+		local ok_open, err_open = pcall(function()
+			local opened = xitdb.open_memory({bytes = payload})
+			opened:close()
+		end)
+		assert(ok_open == false)
+		assert(string.find(tostring(err_open), "Invalid_Hash_Id", 1, true) ~= nil, tostring(err_open))
+
+		local replica = xitdb.open_memory()
+		local ok_rep, err_rep = pcall(function()
+			replica:apply_replicated_bytes(0, payload)
+		end)
+		replica:close()
+		assert(ok_rep == false)
+		assert(string.find(tostring(err_rep), "Invalid_Hash_Id", 1, true) ~= nil, tostring(err_rep))
+	`, "unit_lua_hash_id_mismatch")
+	if !ok1 {
+		testing.expectf(t, false, "unit_lua_hash_id_mismatch failed: %s", msg1)
+	}
+}
