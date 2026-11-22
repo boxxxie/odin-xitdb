@@ -18,11 +18,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Checkout hugi v0.1.2 (runner only)
+      - name: Checkout hugi v0.1.4 (runner only)
         uses: actions/checkout@v4
         with:
           repository: boxxxie/hugi
-          ref: v0.1.2
+          ref: v0.1.4
           path: .tmp/hugi
           persist-credentials: false
 
