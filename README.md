@@ -370,6 +370,7 @@ for d in diffs {
 
 // 1b. Byte-key diff of one collection (Hash_Map / Sorted_Map, incl. binary keys) between two versions.
 //     HAMT blocks and B+Tree subtrees shared by both versions are skipped by pointer.
+//     Use `diff_collection_with_stats` for `Diff_Stats` telemetry and an isolated `scratch_allocator` (see `docs/CORE_API.md`).
 changes, _ := xitdb.diff_collection(users_at_moment_a, users_at_moment_b)
 for ch in changes {
 	// ch.op (.Added / .Removed / .Changed), ch.key (raw bytes), ch.old_value, ch.new_value
