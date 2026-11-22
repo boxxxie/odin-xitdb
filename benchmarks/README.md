@@ -28,7 +28,8 @@ Pure-Odin, LuaJIT 2.1, and reference Zig (`0.17`) immutable structural-sharing s
 # 1. Run the Odin suite and append results to benchmarks/history.hugidb
 hugi run benchmarks --runs 5 --warmup 1
 
-# 2. Run 1v1 Odin vs Zig comparison or LuaJIT host comparison
+# 2. Fetch Zig references on demand (instead of Git submodules) & run 1v1 comparison
+./benchmarks/sync_zig_reference.sh
 ./benchmarks/compare_1v1.py --affected
 odin run benchmarks/bench_lua.odin -file -collection:xitdb=./xitdb -o:speed -microarch:native
 
@@ -38,6 +39,8 @@ hugi compare --last --db benchmarks/history.hugidb
 # 4. Regenerate SVG charts in benchmarks/renders/ and tables below using temple AOT templates
 odin run benchmarks/render -collection:temple=../temple
 ```
+
+> **Note on Zig references (`reference/xitdb-zig` & `reference/xitdb-zig-patched`):** Both checkouts are gitignored and fetched on demand via `./benchmarks/sync_zig_reference.sh` (pass `--latest` for `origin` HEADs instead of pinned SHAs) rather than tracked as Git submodules.
 
 ---
 
