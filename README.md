@@ -1,7 +1,7 @@
 # xitdb for Odin
 
 [![CI](https://github.com/boxxxie/odin-xitdb/actions/workflows/ci.yml/badge.svg)](https://github.com/boxxxie/odin-xitdb/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v2.1.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.2.0-blue.svg)](CHANGELOG.md)
 [![Odin](https://img.shields.io/badge/Odin-dev--2026--09%2B-3882D2.svg)](https://odin-lang.org)
 [![Format](https://img.shields.io/badge/xitdb-v2%20wire%20format-5C6BC0.svg)](https://github.com/xit-vcs/xitdb)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
