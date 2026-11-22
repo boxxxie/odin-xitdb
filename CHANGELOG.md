@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-22
+
+### Added
+
+- **Collection Diff Telemetry & Scratch Allocator (`xitdb/collection_diff.odin`):**
+  - Added `Diff_Stats` (`slots_skipped`, `blocks_compared`, `keys_decoded`) and `diff_collection_with_stats(cur_a, cur_b, stats, allocator, scratch_allocator)` with explicit `scratch_allocator` cleanup on normal and error paths, zero-allocation equal-slot short-circuiting, B+Tree `blocks_compared` telemetry, and single-decode leaf traversal.
+- **Database `hash_id` Validation (`xitdb/types.odin`, `xitdb/database.odin`, `xitdb/compact_replicate.odin`):**
+  - Added `Xitdb_Error.Invalid_Hash_Id` and `header_validate_hasher` across database open and full replication (`start == 0`), rejecting mismatched non-zero `Hasher.id` values while preserving untagged `header.hash_id == 0` and wildcard `hasher.id == 0` compatibility.
+
+### Changed
+
+- **Same-`Database` Diff Guard & Documentation (`xitdb/collection_diff.odin`, `docs/CORE_API.md`, `usage-rules.md`, `README.md`):**
+  - Enforced the same-`Database` cursor invariant up front in `diff_collection` / `diff_collection_with_stats` (returning `.Invalid_Database` for cross-database cursors or non-empty cursors with `db == nil`, while allowing empty `Read_Cursor{}` sentinels).
+  - Updated `docs/CORE_API.md`, `usage-rules.md`, and `README.md` with current `Hasher` signatures, `header_validate_hasher` / `.Invalid_Hash_Id` compatibility rules, and `diff_collection_with_stats` / `Core_Overlay` guidance.
+- **CI & Release Workflows (`.github/workflows/ci.yml`, `.github/workflows/release.yml`):**
+  - Bumped ephemeral `boxxxie/hugi` runner checkout from `v0.1.0` to `v0.1.2`.
+
 ## [2.1.0] - 2026-11-21
 
 ### Added

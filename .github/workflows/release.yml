@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Git tag to package and publish (e.g. v2.1.0)'
+        description: 'Git tag to package and publish (e.g. v2.2.0)'
         required: true
-        default: 'v2.1.0'
+        default: 'v2.2.0'
         type: string
       draft:
         description: 'Create GitHub Release as a draft'
