@@ -23,23 +23,25 @@ This guide documents the low-level Odin core storage backends, wire format primi
 * **`core_destroy(c: ^Core, close_file := false) -> Error`**
   Releases virtual or heap memory buffers (`vmem.release` / `delete`) and optionally closes the underlying file handle.
 
-### Hashers
+### Hashers & `hash_id` Validation
 
 HAMT collections (`Hash_Map`, `Counted_Hash_Map`, `Hash_Set`, `Counted_Hash_Set`) hash keys using the `Database`'s configured `Hasher`:
 
-* **`sha1_hasher(id: u32 = HASH_ID_SHA1, file_id: [4]u8 = DEFAULT_FILE_ID) -> Hasher`**
+* **`sha1_hasher(id: u32 = 0, file_id: u64 = 0) -> Hasher`**
   20-byte SHA-1 digest (automatically hardware-accelerated via x86 SHA-NI when supported by the CPU).
-* **`sha256_hasher(id: u32 = HASH_ID_SHA256, file_id: [4]u8 = DEFAULT_FILE_ID) -> Hasher`**
+* **`sha256_hasher(id: u32 = 0, file_id: u64 = 0) -> Hasher`**
   32-byte SHA-256 digest (hardware-accelerated via x86 SHA-NI when supported).
-* **Custom `Hasher`**:
+* **Custom `Hasher`** (using `string_to_id` / `bytes_to_id` / `id_to_bytes` for 4-byte ASCII identifiers):
   ```odin
   custom := xitdb.Hasher{
       hash_proc = my_blake3_proc,
       hash_size = 32,
-      id        = xitdb.bytes_to_hash_id("blk3"),
-      file_id   = xitdb.DEFAULT_FILE_ID,
+      id        = xitdb.string_to_id("blk3"),
+      file_id   = 0, // random u64 assigned when a new database is initialized
   }
   ```
+* **Header `hash_id` Validation (`header_validate_hasher`)**:
+  On `database_init` (when reopening an existing store) and full replication (`start == 0`), `header_validate_hasher(header, hasher)` enforces `header.hash_size == hasher.hash_size` (unless `hasher.hash_size == 0`) and rejects mismatched non-zero algorithm IDs (`hasher.id != 0 && header.hash_id != 0 && header.hash_id != hasher.id`) with `.Invalid_Hash_Id`. Untagged headers (`header.hash_id == 0`, the default for `sha1_hasher()`, `cmd/xit`, and upstream Zig `xitdb`) and wildcard hashers (`hasher.id == 0`) remain mutually compatible when `hash_size` matches.
 
 ---
 
@@ -205,4 +207,38 @@ start_offset, _ := xitdb.database_replication_start(&primary_db, rep_state)
 end_offset, _   := xitdb.database_committed_size(&primary_db)
 delta, _        := xitdb.database_read_committed_bytes(&primary_db, start_offset, end_offset, context.temp_allocator)
 _                = xitdb.database_apply_replicated_bytes(&replica_db, start_offset, delta)
+```
+Full replication (`start == 0` in `database_apply_replicated` and `database_apply_replicated_bytes`) validates `header_validate_hasher` (`.Invalid_Hash_Size` / `.Invalid_Hash_Id`) before truncating or mutating replica state.
+
+---
+
+## 7. Structural Collection Diff (`xitdb/collection_diff.odin`)
+
+Compare two versions of a `Hash_Map`, `Hash_Set`, `Counted_Hash_Map`, `Counted_Hash_Set`, `Sorted_Map`, or `Sorted_Set` by raw byte keys without decoding unchanged entries:
+
+* **`diff_collection(cur_a, cur_b: Read_Cursor, allocator := context.temp_allocator) -> ([]Collection_Change, Error)`**
+* **`diff_collection_with_stats(cur_a, cur_b: Read_Cursor, stats: ^Diff_Stats = nil, allocator := context.temp_allocator, scratch_allocator := context.temp_allocator) -> ([]Collection_Change, Error)`**
+  * `Diff_Stats` records `slots_skipped`, `blocks_compared`, and `keys_decoded` across both HAMT (`O(changes x depth)`) and B+Tree (`O(changes x log N)`) traversals.
+  * `Collection_Change` emits `op` (`Collection_Change_Op`: `.Added`, `.Removed`, `.Changed`), `key: []u8`, `old_value: Read_Cursor`, and `new_value: Read_Cursor`.
+* **Same-`Database` Contract & `Core_Overlay`**:
+  Both cursors must belong to the same `Database` instance (`Slot` pointer equality is only valid within one file); mismatched `db` handles or non-empty/root cursors with `db == nil` return `.Invalid_Database`. An empty sentinel `Read_Cursor{}` is permitted on one side to enumerate all additions or removals. When diffing across a `Core_Overlay` fork, resolve both moments from the overlay's own `Database` handle.
+* **Zero-Alloc Equal-Slot Fast-Path & Allocator Isolation**:
+  Identical slots (`a.slot_ptr.slot == b.slot_ptr.slot`) short-circuit immediately returning `nil, nil` (`slots_skipped = 1`) with zero allocations. All temporary HAMT entry buffers and B+Tree key comparison slices are freed on `scratch_allocator` on both normal and error paths; callers own the returned `[]Collection_Change` slice and each `ch.key` buffer on `allocator`.
+
+```odin
+stats: xitdb.Diff_Stats
+changes, err := xitdb.diff_collection_with_stats(
+    cur_a,
+    cur_b,
+    &stats,
+    allocator = context.allocator,
+    scratch_allocator = context.temp_allocator,
+)
+assert(err == nil)
+defer {
+    for ch in changes {
+        delete(ch.key, context.allocator)
+    }
+    delete(changes, context.allocator)
+}
 ```

@@ -962,7 +962,9 @@ database_apply_replicated :: proc(db: ^Database, start: i64, source_core: ^Core,
 		if length < ROOT_HEADER_START {
 			return .Invalid_Range
 		}
-		header := header_read_and_validate(source_core, db.hasher.hash_size) or_return
+		header := header_read(source_core) or_return
+		header_validate(header) or_return
+		header_validate_hasher(header, db.hasher) or_return
 		position = database_file_size_start(header.version) + 8
 		if length < position {
 			return .Invalid_Range
@@ -1033,9 +1035,7 @@ database_apply_replicated_bytes :: proc(db: ^Database, start: i64, data: []u8) -
 		copy(hdr_buf[:], data[:HEADER_LENGTH])
 		header := header_from_bytes(hdr_buf)
 		header_validate(header) or_return
-		if db.hasher.hash_size != 0 && header.hash_size != db.hasher.hash_size {
-			return .Invalid_Hash_Size
-		}
+		header_validate_hasher(header, db.hasher) or_return
 		position = database_file_size_start(header.version) + 8
 		if length < position {
 			return .Invalid_Range

@@ -293,12 +293,20 @@ header_read_and_validate :: proc(r: ^Core, expected_hash_size: u16) -> (res: Hea
 	return header, nil
 }
 
+header_validate_hasher :: proc(header: Header, hasher: Hasher) -> Error {
+	if hasher.hash_size != 0 && header.hash_size != hasher.hash_size {
+		return .Invalid_Hash_Size
+	}
+	if hasher.id != 0 && header.hash_id != 0 && header.hash_id != hasher.id {
+		return .Invalid_Hash_Id
+	}
+	return nil
+}
+
 database_read_and_validate_header :: proc(db: ^Database) -> (res: Header, err: Error) {
 	header := header_read_at(db.core, 0) or_return
 	header_validate(header) or_return
-	if db.hasher.hash_size != 0 && header.hash_size != db.hasher.hash_size {
-		return {}, .Invalid_Hash_Size
-	}
+	header_validate_hasher(header, db.hasher) or_return
 	return header, nil
 }
 
