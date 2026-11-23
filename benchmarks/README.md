@@ -2,7 +2,7 @@
 
 # xitdb Benchmarks & Visual Renders
 
-Pure-Odin, LuaJIT 2.1, and reference Zig (`0.17`) immutable structural-sharing storage, persistent collection, compaction, replication, 5-layer DSL, and Datalog engine benchmark suite for **xitdb** (`75` Odin benchmarks across `7` groups, `525` Odin samples, paired with `75` LuaJIT and `63` Zig baselines at commit `69fb30701a3c` in [`history.hugidb`](history.hugidb)), with visual SVG charts rendered via [`temple`](https://github.com/boxxxie/temple) under [`renders/`](renders/).
+Pure-Odin, LuaJIT 2.1, and reference Zig (`0.17`) immutable structural-sharing storage, persistent collection, compaction, replication, 5-layer DSL, and Datalog engine benchmark suite for **xitdb** (`75` Odin benchmarks across `7` groups, `525` Odin samples, paired with `75` LuaJIT and `63` Zig baselines at commit `69fb30701a3c` in [`history.hugidb`](history.hugidb)), with visual SVG charts rendered via [`runa`](https://github.com/boxxxie/runa) under [`renders/`](renders/).
 
 ---
 
@@ -35,8 +35,8 @@ odin run benchmarks/bench_lua.odin -file -collection:xitdb=./xitdb -o:speed -mic
 # 3. Statistically compare the last two commits (Mann-Whitney U / Welch t-test)
 hugi compare --last --db benchmarks/history.hugidb
 
-# 4. Regenerate SVG charts in benchmarks/renders/ and tables below using temple AOT templates
-odin run benchmarks/render -collection:temple=../temple
+# 4. Regenerate SVG charts in benchmarks/renders/ and tables below using runa AOT templates
+odin run benchmarks/render -collection:runa=../runa
 ```
 
 ---

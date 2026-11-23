@@ -4,7 +4,7 @@
 		{ "name": "xitdb", "path": "./xitdb" },
 		{ "name": "hugi", "path": "../hugi/hugi" },
 		{ "name": "obench", "path": "../hugi/deps/obench/obench" },
-		{ "name": "temple", "path": "../temple" }
+		{ "name": "runa", "path": "../runa" }
 	],
 	"enable_document_symbols": true,
 	"enable_hover": true,
