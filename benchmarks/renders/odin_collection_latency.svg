@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 632" width="960" height="632" role="img" aria-label="Odin Sub-Microsecond Collection, Cursor &amp; Stream Fast Paths">
+<style>
+  .bg { fill: #0d1117; }
+  .panel { fill: #161b22; stroke: #30363d; stroke-width: 1; }
+  .grid { stroke: #21262d; stroke-width: 1; }
+  .title { fill: #f0f6fc; font: 700 16px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .sub { fill: #8b949e; font: 400 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .lbl { fill: #c9d1d9; font: 500 11.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .tick { fill: #8b949e; font: 500 10.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .val { fill: #e6edf3; font: 600 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+</style>
+<rect class="bg" width="960" height="632" rx="10"/>
+<rect class="panel" x="290" y="68" width="460" height="522" rx="4"/>
+<text class="title" x="24" y="30">Odin Sub-Microsecond Collection, Cursor &amp; Stream Fast Paths</text>
+<text class="sub" x="24" y="49">Commit 69fb30701a3c · Core_Memory · -o:speed -microarch:native</text>
+<line class="grid" x1="290.0" y1="68" x2="290.0" y2="590"/>
+<text class="tick" x="290.0" y="608" text-anchor="middle">1 ns</text>
+<line class="grid" x1="443.3" y1="68" x2="443.3" y2="590"/>
+<text class="tick" x="443.3" y="608" text-anchor="middle">10 ns</text>
+<line class="grid" x1="596.7" y1="68" x2="596.7" y2="590"/>
+<text class="tick" x="596.7" y="608" text-anchor="middle">100 ns</text>
+<line class="grid" x1="750.0" y1="68" x2="750.0" y2="590"/>
+<text class="tick" x="750.0" y="608" text-anchor="middle">1 us</text>
+<text class="lbl" x="280" y="94.0" text-anchor="end">Cursor_Reader seek + 64B read</text>
+<rect x="290" y="81.0" width="101.2" height="20" rx="4" fill="#3fb950"/>
+<text class="val" x="399.2" y="95.0">4.57 ns (218.65M/s)</text>
+<text class="lbl" x="280" y="128.0" text-anchor="end">Inline Short_Bytes read</text>
+<rect x="290" y="115.0" width="125.8" height="20" rx="4" fill="#3fb950"/>
+<text class="val" x="423.8" y="129.0">6.61 ns (151.21M/s)</text>
+<text class="lbl" x="280" y="162.0" text-anchor="end">External Bytes read</text>
+<rect x="290" y="149.0" width="161.7" height="20" rx="4" fill="#3fb950"/>
+<text class="val" x="459.7" y="163.0">11.34 ns (88.16M/s)</text>
+<text class="lbl" x="280" y="196.0" text-anchor="end">Array_List iterator scan</text>
+<rect x="290" y="183.0" width="169.9" height="20" rx="4" fill="#79c0ff"/>
+<text class="val" x="467.9" y="197.0">12.83 ns (77.92M/s)</text>
+<text class="lbl" x="280" y="230.0" text-anchor="end">Linked_Array_List scan</text>
+<rect x="290" y="217.0" width="199.1" height="20" rx="4" fill="#79c0ff"/>
+<text class="val" x="497.1" y="231.0">19.88 ns (50.31M/s)</text>
+<text class="lbl" x="280" y="264.0" text-anchor="end">Sorted_Map ordered scan</text>
+<rect x="290" y="251.0" width="207.9" height="20" rx="4" fill="#79c0ff"/>
+<text class="val" x="505.9" y="265.0">22.68 ns (44.09M/s)</text>
+<text class="lbl" x="280" y="298.0" text-anchor="end">Cursor_Writer seek + 16B patch</text>
+<rect x="290" y="285.0" width="214.7" height="20" rx="4" fill="#58a6ff"/>
+<text class="val" x="512.7" y="299.0">25.15 ns (39.77M/s)</text>
+<text class="lbl" x="280" y="332.0" text-anchor="end">HAMT unordered scan</text>
+<rect x="290" y="319.0" width="255.8" height="20" rx="4" fill="#58a6ff"/>
+<text class="val" x="553.8" y="333.0">46.57 ns (21.47M/s)</text>
+<text class="lbl" x="280" y="366.0" text-anchor="end">Array_List random get</text>
+<rect x="290" y="353.0" width="259.6" height="20" rx="4" fill="#58a6ff"/>
+<text class="val" x="557.6" y="367.0">49.34 ns (20.27M/s)</text>
+<text class="lbl" x="280" y="400.0" text-anchor="end">HAMT lookup (pre-hashed)</text>
+<rect x="290" y="387.0" width="273.8" height="20" rx="4" fill="#58a6ff"/>
+<text class="val" x="571.8" y="401.0">61.05 ns (16.38M/s)</text>
+<text class="lbl" x="280" y="434.0" text-anchor="end">HAMT lookup (SHA-1)</text>
+<rect x="290" y="421.0" width="309.2" height="20" rx="4" fill="#d2a8ff"/>
+<text class="val" x="607.2" y="435.0">103.93 ns (9.62M/s)</text>
+<text class="lbl" x="280" y="468.0" text-anchor="end">Cursor KV-pair scan</text>
+<rect x="290" y="455.0" width="313.9" height="20" rx="4" fill="#d2a8ff"/>
+<text class="val" x="611.9" y="469.0">111.49 ns (8.97M/s)</text>
+<text class="lbl" x="280" y="502.0" text-anchor="end">4-level cursor_write_path</text>
+<rect x="290" y="489.0" width="362.7" height="20" rx="4" fill="#ffa657"/>
+<text class="val" x="660.7" y="503.0">231.93 ns (4.31M/s)</text>
+<text class="lbl" x="280" y="536.0" text-anchor="end">Sorted_Map rank query</text>
+<rect x="290" y="523.0" width="402.6" height="20" rx="4" fill="#ffa657"/>
+<text class="val" x="700.6" y="537.0">422.43 ns (2.37M/s)</text>
+<text class="lbl" x="280" y="570.0" text-anchor="end">Sorted_Map lower-bound page</text>
+<rect x="290" y="557.0" width="439.5" height="20" rx="4" fill="#f78166"/>
+<text class="val" x="737.5" y="571.0">735.50 ns (1.36M/s)</text>
+</svg>

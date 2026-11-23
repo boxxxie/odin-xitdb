@@ -1,0 +1,70 @@
+[Root README](../README.md) · **Suite Renders** · [Code Slices](slices/README.md) · [Zig Optimization Guide](zig-guide/README.md)
+
+# xitdb Benchmarks & Visual Renders
+
+Pure-Odin, LuaJIT 2.1, and reference Zig (`0.17`) immutable structural-sharing storage, persistent collection, compaction, replication, 5-layer DSL, and Datalog engine benchmark suite for **xitdb** (`{{ this.total_benchmarks | int }}` Odin benchmarks across `{{ this.group_count | int }}` groups, `{{ this.total_samples_str | raw }}` Odin samples, paired with `{{ this.lua_count | int }}` LuaJIT and `{{ this.zig_count | int }}` Zig baselines at commit `{{ this.commit | raw }}` in [`history.hugidb`](history.hugidb)), with visual SVG charts rendered via [`temple`](https://github.com/boxxxie/temple) under [`renders/`](renders/).
+
+---
+
+## Visual Renders (`-o:speed`)
+
+### 1. Core Collections & Backends: Odin vs LuaJIT 2.1 vs Reference Zig
+
+![Odin vs LuaJIT vs Zig Core Collections and Backends](renders/odin_vs_zig_vs_lua_core.svg)
+
+### 2. Odin Sub-Microsecond Collection, Cursor & Stream Fast Paths
+
+![Odin Collection, Cursor and Stream Fast Paths](renders/odin_collection_latency.svg)
+
+### 3. Compaction, Replication, Persistence Backends & 5-Layer DSL / Datalog
+
+![Compaction, Replication, Backends and 5-Layer DSL](renders/compaction_backends_and_dsl.svg)
+
+---
+
+## Reproducing & Regenerating Renders
+
+```bash
+# 1. Run the Odin suite and append results to benchmarks/history.hugidb
+hugi run benchmarks --runs 5 --warmup 1
+
+# 2. Run 1v1 Odin vs Zig comparison or LuaJIT host comparison
+./benchmarks/compare_1v1.py --affected
+odin run benchmarks/bench_lua.odin -file -collection:xitdb=./xitdb -o:speed -microarch:native
+
+# 3. Statistically compare the last two commits (Mann-Whitney U / Welch t-test)
+hugi compare --last --db benchmarks/history.hugidb
+
+# 4. Regenerate SVG charts in benchmarks/renders/ and tables below using temple AOT templates
+odin run benchmarks/render -collection:temple=../temple
+```
+
+---
+
+## Full Benchmark Results (`{{ this.total_benchmarks | int }}` Benchmarks at `{{ this.commit | raw }}`)
+
+<!-- BEGIN_BENCHMARK_TABLE -->
+{%- for group in this.groups %}
+### {{ group.title | raw }} (`{{ group.count | int }}` benchmarks)
+
+{%- if group.has_desc %}
+
+{{ group.desc | raw }}
+{%- end %}
+
+| Benchmark | Odin (`p50`) | `P95` | Ops/s | `CV%` | vs Zig (`p50`) | vs LuaJIT (`p50`) | Allocs / op |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+{%- for row in group.rows %}
+| `{{ row.name | raw }}` | **{{ row.median | raw }}** | {{ row.p95 | raw }} | {{ row.ops | raw }} | {{ row.cv | raw }} | {{ row.vs_zig | raw }} | {{ row.vs_lua | raw }} | {{ row.allocs | raw }} |
+{%- end %}
+
+{%- end %}
+<!-- END_BENCHMARK_TABLE -->
+
+---
+
+## Deep-Dive Guides & Storage Backends
+
+* [**Per-Benchmark Code Slices (`slices/README.md`)**](slices/README.md) — Exact `xitdb/*.odin` and reference `lib.zig` implementation diffs for every benchmark.
+* [**Idiomatic Zig Optimization Guide (`zig-guide/README.md`)**](zig-guide/README.md) — Six standalone engineering deep dives (`CoreMemory`, `LinkedArrayList`, `SortedMap`, `HAMT`, `Cursor & Paths`, `CoreBufferedFile & Compactor`).
+* **Storage Backends (`Core_Memory` / `Core_Buffered_File` / `Core_File`):** `Core_Memory` isolates CPU & trie overhead without OS syscall variance; `Core_Buffered_File` models production tail-window buffering; `Core_File` provides the unbuffered syscall baseline.

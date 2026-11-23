@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 632" width="960" height="632" role="img" aria-label="Compaction, Replication, Backends &amp; 5-Layer DSL / Datalog">
+<style>
+  .bg { fill: #0d1117; }
+  .panel { fill: #161b22; stroke: #30363d; stroke-width: 1; }
+  .grid { stroke: #21262d; stroke-width: 1; }
+  .title { fill: #f0f6fc; font: 700 16px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .sub { fill: #8b949e; font: 400 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .lbl { fill: #c9d1d9; font: 500 11.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .tick { fill: #8b949e; font: 500 10.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .val { fill: #e6edf3; font: 600 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+</style>
+<rect class="bg" width="960" height="632" rx="10"/>
+<rect class="panel" x="290" y="68" width="460" height="522" rx="4"/>
+<text class="title" x="24" y="30">Compaction, Replication, Backends &amp; 5-Layer DSL / Datalog</text>
+<text class="sub" x="24" y="49">Commit 69fb30701a3c · Core_Memory · -o:speed -microarch:native</text>
+<line class="grid" x1="290.0" y1="68" x2="290.0" y2="590"/>
+<text class="tick" x="290.0" y="608" text-anchor="middle">10 ns</text>
+<line class="grid" x1="382.0" y1="68" x2="382.0" y2="590"/>
+<text class="tick" x="382.0" y="608" text-anchor="middle">100 ns</text>
+<line class="grid" x1="474.0" y1="68" x2="474.0" y2="590"/>
+<text class="tick" x="474.0" y="608" text-anchor="middle">1 us</text>
+<line class="grid" x1="566.0" y1="68" x2="566.0" y2="590"/>
+<text class="tick" x="566.0" y="608" text-anchor="middle">10 us</text>
+<line class="grid" x1="658.0" y1="68" x2="658.0" y2="590"/>
+<text class="tick" x="658.0" y="608" text-anchor="middle">100 us</text>
+<line class="grid" x1="750.0" y1="68" x2="750.0" y2="590"/>
+<text class="tick" x="750.0" y="608" text-anchor="middle">1 ms</text>
+<text class="lbl" x="280" y="94.0" text-anchor="end">DB re-open &amp; checksum verify</text>
+<rect x="290" y="81.0" width="73.3" height="20" rx="4" fill="#3fb950"/>
+<text class="val" x="371.3" y="95.0">62.56 ns (15.98M/s)</text>
+<text class="lbl" x="280" y="128.0" text-anchor="end">Replication (0 -&gt; 200 moments)</text>
+<rect x="290" y="115.0" width="153.3" height="20" rx="4" fill="#3fb950"/>
+<text class="val" x="451.3" y="129.0">463.46 ns (2.16M/s)</text>
+<text class="lbl" x="280" y="162.0" text-anchor="end">Tx abort rollback truncate</text>
+<rect x="290" y="149.0" width="168.4" height="20" rx="4" fill="#79c0ff"/>
+<text class="val" x="466.4" y="163.0">676.87 ns (1.48M/s)</text>
+<text class="lbl" x="280" y="196.0" text-anchor="end">DSL Layer 1 get_uint (N=500)</text>
+<rect x="290" y="183.0" width="169.0" height="20" rx="4" fill="#79c0ff"/>
+<text class="val" x="467.0" y="197.0">686.77 ns (1.46M/s)</text>
+<text class="lbl" x="280" y="230.0" text-anchor="end">Replication (1-moment delta)</text>
+<rect x="290" y="217.0" width="188.6" height="20" rx="4" fill="#58a6ff"/>
+<text class="val" x="486.6" y="231.0">1.12 us (892.3K/s)</text>
+<text class="lbl" x="280" y="264.0" text-anchor="end">Core_Memory commits</text>
+<rect x="290" y="251.0" width="190.4" height="20" rx="4" fill="#58a6ff"/>
+<text class="val" x="488.4" y="265.0">1.17 us (852.0K/s)</text>
+<text class="lbl" x="280" y="298.0" text-anchor="end">DSL history_of (3 moments)</text>
+<rect x="290" y="285.0" width="203.5" height="20" rx="4" fill="#58a6ff"/>
+<text class="val" x="501.5" y="299.0">1.63 us (613.5K/s)</text>
+<text class="lbl" x="280" y="332.0" text-anchor="end">DSL Datomic pull (N=200)</text>
+<rect x="290" y="319.0" width="206.0" height="20" rx="4" fill="#58a6ff"/>
+<text class="val" x="504.0" y="333.0">1.73 us (577.0K/s)</text>
+<text class="lbl" x="280" y="366.0" text-anchor="end">Compaction (Memory_Map, 200-&gt;1)</text>
+<rect x="290" y="353.0" width="256.1" height="20" rx="4" fill="#d2a8ff"/>
+<text class="val" x="554.1" y="367.0">6.07 us (164.7K/s)</text>
+<text class="lbl" x="280" y="400.0" text-anchor="end">Datalog B+Tree Prefix + Join</text>
+<rect x="290" y="387.0" width="293.5" height="20" rx="4" fill="#d2a8ff"/>
+<text class="val" x="591.5" y="401.0">15.49 us (64.5K/s)</text>
+<text class="lbl" x="280" y="434.0" text-anchor="end">Core_Buffered_File commits</text>
+<rect x="290" y="421.0" width="293.2" height="20" rx="4" fill="#ffa657"/>
+<text class="val" x="591.2" y="435.0">15.38 us (65.0K/s)</text>
+<text class="lbl" x="280" y="468.0" text-anchor="end">Datalog reach (32-ring)</text>
+<rect x="290" y="455.0" width="315.3" height="20" rx="4" fill="#ffa657"/>
+<text class="val" x="613.3" y="469.0">26.72 us (37.4K/s)</text>
+<text class="lbl" x="280" y="502.0" text-anchor="end">Core_File (unbuffered) commits</text>
+<rect x="290" y="489.0" width="335.3" height="20" rx="4" fill="#f78166"/>
+<text class="val" x="633.3" y="503.0">44.16 us (22.6K/s)</text>
+<text class="lbl" x="280" y="536.0" text-anchor="end">DSL diff_moments (1/700)</text>
+<rect x="290" y="523.0" width="404.0" height="20" rx="4" fill="#f78166"/>
+<text class="val" x="702.0" y="537.0">246.23 us (4.1K/s)</text>
+<text class="lbl" x="280" y="570.0" text-anchor="end">Datalog Grouped Aggs (N=500)</text>
+<rect x="290" y="557.0" width="441.5" height="20" rx="4" fill="#ff7b72"/>
+<text class="val" x="739.5" y="571.0">628.63 us (1.6K/s)</text>
+</svg>
