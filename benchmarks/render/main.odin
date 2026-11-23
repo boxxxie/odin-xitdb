@@ -169,9 +169,9 @@ Three_Spec :: struct {
 	label: string,
 }
 
-three_bar_chart_tmpl := compiled("templates/three_bar_chart.temple.twig", Three_Bar_Chart_View)
-bar_chart_tmpl := compiled("templates/bar_chart.temple.twig", Bar_Chart_View)
-suite_report_tmpl := compiled("templates/suite_report.temple.twig", Suite_Report_View)
+three_bar_chart_tmpl := compiled("templates/three_bar_chart.runa.twig", Three_Bar_Chart_View)
+bar_chart_tmpl := compiled("templates/bar_chart.runa.twig", Bar_Chart_View)
+suite_report_tmpl := compiled("templates/suite_report.runa.twig", Suite_Report_View)
 
 @(require_results)
 fmt_commas_u64 :: proc(val: u64, allocator := context.allocator) -> string {
