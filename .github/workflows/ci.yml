@@ -26,12 +26,12 @@ jobs:
           path: .tmp/hugi
           persist-credentials: false
 
-      - name: Checkout temple v1.0.0
+      - name: Checkout temple
         if: runner.os == 'Linux'
         uses: actions/checkout@v4
         with:
           repository: boxxxie/temple
-          ref: v1.0.0
+          ref: main
           path: .tmp/temple
           persist-credentials: false
 
