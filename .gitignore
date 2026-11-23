@@ -20,6 +20,10 @@ bin/
 zig-out/
 __pycache__/
 
+# Zig reference checkouts (fetched on demand via benchmarks/sync_zig_reference.sh)
+reference/xitdb-zig/
+reference/xitdb-zig-patched/
+
 # Fuzzing artifacts
 crash-*
 oom-*

@@ -586,7 +586,7 @@ branch none {
 ├── fuzz/                       # Coverage-guided libFuzzer + ASan/LSan harnesses (dsl, wire, lua)
 ├── tests/                      # 3-layer ATDD executable specification & unit test suite
 ├── benchmarks/                 # Throughput, latency & memory allocation benchmark suite (Odin, Zig, LuaJIT)
-├── reference/xitdb-zig/        # Upstream Zig reference submodule for feature parity & 1v1 benchmarks
+├── reference/xitdb-zig/        # On-demand Zig reference checkout (benchmarks/sync_zig_reference.sh) for 1v1 benchmarks
 ├── CHANGELOG.md                # Release history (Keep a Changelog / SemVer)
 └── hugi.json                   # Default benchmark runner configuration for hugi
 ```
