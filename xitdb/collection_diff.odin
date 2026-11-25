@@ -177,7 +177,7 @@ _diff_hash_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 
 @(private = "file")
 _diff_index_blocks :: proc(ctx: ^Diff_Ctx, pos_a, pos_b: i64, depth: int = 0) -> Error {
-	if depth > 64 {
+	if depth >= ITERATOR_STACK_SIZE {
 		return .Key_Offset_Exceeded
 	}
 	if pos_a == pos_b {
@@ -225,7 +225,7 @@ _diff_index_blocks :: proc(ctx: ^Diff_Ctx, pos_a, pos_b: i64, depth: int = 0) ->
 
 @(private = "file")
 _collect_index_block :: proc(ctx: ^Diff_Ctx, db: ^Database, pos: i64, out: ^[dynamic]Map_Entry, depth: int = 0) -> Error {
-	if depth > 64 {
+	if depth >= ITERATOR_STACK_SIZE {
 		return .Key_Offset_Exceeded
 	}
 	block: [INDEX_BLOCK_SIZE]u8 = ---
@@ -239,7 +239,7 @@ _collect_index_block :: proc(ctx: ^Diff_Ctx, db: ^Database, pos: i64, out: ^[dyn
 
 @(private = "file")
 _collect_slot :: proc(ctx: ^Diff_Ctx, db: ^Database, s: Slot, slot_pos: i64, out: ^[dynamic]Map_Entry, depth: int = 0) -> Error {
-	if depth > 64 {
+	if depth > ITERATOR_STACK_SIZE {
 		return .Key_Offset_Exceeded
 	}
 	#partial switch s.tag {
@@ -330,20 +330,21 @@ _emit_map :: proc(ctx: ^Diff_Ctx, op: Collection_Change_Op, key_db: ^Database, a
 // -----------------------------------------------------------------------------
 
 @(private = "file")
-MAX_DIFF_TREE_DEPTH :: 32
+MAX_DIFF_TREE_DEPTH :: MAX_BTREE_DEPTH
 
 @(private = "file")
 Tree_Frame :: struct {
-	node:   Sorted_Node,
+	slots:  [BTREE_SLOT_COUNT]Slot,
+	num:    int,
 	index:  int,
-	height: int, // height of `node` (0 == leaf)
+	height: int, // height of node (0 == leaf)
+	kind:   BTree_Node_Kind,
 }
 
 @(private = "file")
 Tree_Walker :: struct {
 	db:     ^Database,
-	frames: [MAX_DIFF_TREE_DEPTH]Tree_Frame,
-	depth:  int,
+	frames: [dynamic]Tree_Frame,
 }
 
 @(private = "file")
@@ -361,9 +362,8 @@ Tree_Front :: struct {
 }
 
 @(private = "file")
-_walker_init :: proc(w: ^Tree_Walker, c: Read_Cursor) -> Error {
+_walker_init :: proc(w: ^Tree_Walker, c: Read_Cursor, alloc: runtime.Allocator) -> Error {
 	w.db = c.db
-	w.depth = 0
 	if c.slot_ptr.slot.tag == .None {
 		return nil
 	}
@@ -372,43 +372,60 @@ _walker_init :: proc(w: ^Tree_Walker, c: Read_Cursor) -> Error {
 		return nil
 	}
 	h := btree_height(c.db, header.root_ptr) or_return
+	frames, alloc_err := make([dynamic]Tree_Frame, 0, min(h + 1, MAX_DIFF_TREE_DEPTH), alloc)
+	if alloc_err != nil {
+		return .Write_Failed
+	}
+	w.frames = frames
 	return _walker_push(w, header.root_ptr, h)
 }
 
 @(private = "file")
 _walker_push :: proc(w: ^Tree_Walker, ptr: i64, height: int) -> Error {
-	if w.depth >= MAX_DIFF_TREE_DEPTH {
+	if len(w.frames) >= MAX_DIFF_TREE_DEPTH {
 		return .Invalid_BTree_Node
 	}
 	node := read_sorted_node(w.db, ptr) or_return
-	w.frames[w.depth] = Tree_Frame{node = node, index = 0, height = height}
-	w.depth += 1
+	frame := Tree_Frame{
+		num    = node.num,
+		index  = 0,
+		height = height,
+		kind   = node.kind,
+	}
+	if node.kind == .Leaf {
+		copy(frame.slots[:node.num], node.entries[:node.num])
+	} else {
+		copy(frame.slots[:node.num], node.children[:node.num])
+	}
+	if _, alloc_err := append(&w.frames, frame); alloc_err != nil {
+		return .Write_Failed
+	}
 	return nil
 }
 
 @(private = "file")
 _walker_front :: proc(w: ^Tree_Walker) -> Tree_Front {
-	for w.depth > 0 {
-		f := &w.frames[w.depth - 1]
-		if f.index >= f.node.num {
-			w.depth -= 1
-			if w.depth > 0 {
-				w.frames[w.depth - 1].index += 1
+	for len(w.frames) > 0 {
+		f := &w.frames[len(w.frames) - 1]
+		if f.index >= f.num {
+			pop(&w.frames)
+			if len(w.frames) > 0 {
+				w.frames[len(w.frames) - 1].index += 1
 			}
 			continue
 		}
-		if f.node.kind == .Leaf {
-			return Tree_Front{kind = .Entry, slot = f.node.entries[f.index], height = 0}
+		if f.kind == .Leaf {
+			return Tree_Front{kind = .Entry, slot = f.slots[f.index], height = 0}
 		}
-		return Tree_Front{kind = .Child, slot = f.node.children[f.index], height = f.height - 1}
+		return Tree_Front{kind = .Child, slot = f.slots[f.index], height = f.height - 1}
 	}
 	return Tree_Front{kind = .Done}
 }
 
 @(private = "file")
 _walker_advance :: proc(w: ^Tree_Walker) {
-	if w.depth > 0 {
-		w.frames[w.depth - 1].index += 1
+	if len(w.frames) > 0 {
+		w.frames[len(w.frames) - 1].index += 1
 	}
 }
 
@@ -440,9 +457,11 @@ _sorted_entry_info :: proc(db: ^Database, entry: Slot) -> (info: Sorted_Entry_In
 @(private = "file")
 _diff_sorted_maps :: proc(ctx: ^Diff_Ctx, a, b: Read_Cursor) -> Error {
 	wa, wb: Tree_Walker
-	_walker_init(&wa, a) or_return
-	_walker_init(&wb, b) or_return
-	if wa.depth > 0 && wb.depth > 0 && ctx.stats != nil {
+	defer delete(wa.frames)
+	defer delete(wb.frames)
+	_walker_init(&wa, a, ctx.scratch_allocator) or_return
+	_walker_init(&wb, b, ctx.scratch_allocator) or_return
+	if len(wa.frames) > 0 && len(wb.frames) > 0 && ctx.stats != nil {
 		ctx.stats.blocks_compared += 1
 	}
 

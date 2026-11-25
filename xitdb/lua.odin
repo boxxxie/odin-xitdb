@@ -3114,12 +3114,12 @@ _l_cursor_read_only :: proc "c" (L: ^lua.State) -> c.int {
 _l_cursor_iterator :: proc "c" (L: ^lua.State) -> c.int {
 	context = _lua_context(L)
 	cud := _check_cursor(L, 1)
-	it, err := cursor_iterator(cud.rc)
-	if err != nil do return _raise_err(L, err, "cursor:iterator")
 	ud := (^Lua_Iterator_UD)(lua.newuserdatauv(L, size_of(Lua_Iterator_UD), 1))
-	ud^ = Lua_Iterator_UD{
-		hdr = {magic = LUA_UD_MAGIC, ud_kind = .Iterator},
-		it  = it,
+	ud.hdr = {magic = LUA_UD_MAGIC, ud_kind = .Iterator}
+	ud.cur_ud = nil
+	ud.cur_ref = 0
+	if err := cursor_iterator_init(&ud.it, cud.rc); err != nil {
+		return _raise_err(L, err, "cursor:iterator")
 	}
 	_set_ud_mt(L, .Iterator, LUA_MT_ITERATOR)
 	return 1
@@ -4100,31 +4100,31 @@ _l_col_concat :: proc "c" (L: ^lua.State) -> c.int {
 }
 
 @(private = "file")
-_col_push_iterator :: proc(L: ^lua.State, col_idx: c.int, col: ^Lua_Collection_UD, it: Cursor_Iterator) {
+_col_acquire_iterator :: proc(L: ^lua.State, col: ^Lua_Collection_UD) -> ^Lua_Iterator_UD {
 	ud := col.iter_ud
 	if ud != nil {
-		ud.it = it
 		lua.rawgeti(L, lua.REGISTRYINDEX, lua.Integer(col.iter_ref))
 	} else {
 		ud = (^Lua_Iterator_UD)(lua.newuserdata(L, size_of(Lua_Iterator_UD)))
-		ud^ = Lua_Iterator_UD{
-			hdr = {magic = LUA_UD_MAGIC, ud_kind = .Iterator},
-			it  = it,
-		}
+		ud.hdr = {magic = LUA_UD_MAGIC, ud_kind = .Iterator}
+		ud.cur_ud = nil
+		ud.cur_ref = 0
 		_set_ud_mt(L, .Iterator, LUA_MT_ITERATOR)
 		lua.pushvalue(L, -1)
 		col.iter_ref = lua.L_ref(L, lua.REGISTRYINDEX)
 		col.iter_ud = ud
 	}
+	return ud
 }
 
 @(private = "file")
 _l_col_iterator :: proc "c" (L: ^lua.State) -> c.int {
 	context = _lua_context(L)
 	col := _check_collection(L, 1)
-	it, err := cursor_iterator(col.rc)
-	if err != nil do return _raise_err(L, err, "collection:iterator")
-	_col_push_iterator(L, 1, col, it)
+	ud := _col_acquire_iterator(L, col)
+	if err := cursor_iterator_init(&ud.it, col.rc); err != nil {
+		return _raise_err(L, err, "collection:iterator")
+	}
 	return 1
 }
 
@@ -4132,27 +4132,25 @@ _l_col_iterator :: proc "c" (L: ^lua.State) -> c.int {
 _l_col_iterator_from :: proc "c" (L: ^lua.State) -> c.int {
 	context = _lua_context(L)
 	col := _check_collection(L, 1)
-	it: Cursor_Iterator
 	err: Error
 
 	#partial switch col.kind {
 	case .Array_List:
 		idx := i64(lua.tointeger(L, 2))
-		it, err = array_list_iterator_from(Read_Array_List{cursor = col.rc}, idx)
+		ud := _col_acquire_iterator(L, col)
+		err = cursor_iterator_array_list_from_index_init(&ud.it, col.rc, idx)
 	case .Linked_Array_List:
 		idx := i64(lua.tointeger(L, 2))
-		it, err = linked_array_list_iterator_from(Read_Linked_Array_List{cursor = col.rc}, idx)
-	case .Sorted_Map:
+		ud := _col_acquire_iterator(L, col)
+		err = cursor_iterator_linked_array_list_from_index_init(&ud.it, col.rc, idx)
+	case .Sorted_Map, .Sorted_Set:
 		k := _lua_tobytes_odin(L, 2)
-		it, err = sorted_map_iterator_from(Read_Sorted_Map{cursor = col.rc}, k)
-	case .Sorted_Set:
-		k := _lua_tobytes_odin(L, 2)
-		it, err = sorted_set_iterator_from(Read_Sorted_Set{cursor = col.rc}, k)
+		ud := _col_acquire_iterator(L, col)
+		err = cursor_iterator_sorted_from_key_init(&ud.it, col.rc, k)
 	case:
 		return _raise_err(L, .Unexpected_Tag, "collection:iterator_from")
 	}
 	if err != nil do return _raise_err(L, err, "collection:iterator_from")
-	_col_push_iterator(L, 1, col, it)
 	return 1
 }
 
@@ -4161,23 +4159,22 @@ _l_col_iterator_from_index :: proc "c" (L: ^lua.State) -> c.int {
 	context = _lua_context(L)
 	col := _check_collection(L, 1)
 	idx := i64(lua.tointeger(L, 2))
-	it: Cursor_Iterator
 	err: Error
 
 	#partial switch col.kind {
-	case .Sorted_Map:
-		it, err = sorted_map_iterator_from_index(Read_Sorted_Map{cursor = col.rc}, idx)
-	case .Sorted_Set:
-		it, err = sorted_set_iterator_from_index(Read_Sorted_Set{cursor = col.rc}, idx)
+	case .Sorted_Map, .Sorted_Set:
+		ud := _col_acquire_iterator(L, col)
+		err = cursor_iterator_sorted_from_index_init(&ud.it, col.rc, idx)
 	case .Array_List:
-		it, err = array_list_iterator_from(Read_Array_List{cursor = col.rc}, idx)
+		ud := _col_acquire_iterator(L, col)
+		err = cursor_iterator_array_list_from_index_init(&ud.it, col.rc, idx)
 	case .Linked_Array_List:
-		it, err = linked_array_list_iterator_from(Read_Linked_Array_List{cursor = col.rc}, idx)
+		ud := _col_acquire_iterator(L, col)
+		err = cursor_iterator_linked_array_list_from_index_init(&ud.it, col.rc, idx)
 	case:
 		return _raise_err(L, .Unexpected_Tag, "collection:iterator_from_index")
 	}
 	if err != nil do return _raise_err(L, err, "collection:iterator_from_index")
-	_col_push_iterator(L, 1, col, it)
 	return 1
 }
 
