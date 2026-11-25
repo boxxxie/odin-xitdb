@@ -1275,3 +1275,129 @@ unit_user_dsl_arena_context_allocator_bounds_iterator_growth :: proc(t: ^testing
 	testing.expect_value(t, len(qres.rows), GROUP_COUNT * 2)
 	testing.expect(t, arena.offset < 4 * size_of(xitdb.Cursor_Iterator), "Expected bounded arena growth during query_datalog")
 }
+
+@(test)
+unit_user_dsl_deep_recursive_struct_unmarshal_small_stack :: proc(t: ^testing.T) {
+	DEPTH :: 45
+
+	Deep_Node :: struct {
+		label: string      `xitdb:"label"`,
+		kids:  []Deep_Node `xitdb:"kids"`,
+	}
+
+	destroy_deep_node :: proc(n: ^Deep_Node, allocator: mem.Allocator) {
+		for i in 0 ..< len(n.kids) {
+			destroy_deep_node(&n.kids[i], allocator)
+		}
+		if raw_data(n.kids) != nil {
+			delete(n.kids, allocator)
+		}
+		if len(n.label) > 0 {
+			delete(n.label, allocator)
+		}
+	}
+
+	core := xitdb.core_memory_init()
+	defer xitdb.core_destroy(&core)
+	defer free_all(context.temp_allocator)
+
+	db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
+	testing.expect_value(t, init_err, nil)
+
+	tx0 := xitdb.tx_init(&db, base_moment = nil, allocator = context.allocator)
+	defer xitdb.tx_destroy(&tx0)
+	xitdb.tx_with_cursor(&tx0, proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		moment := xitdb.write_hash_map_init(cursor^) or_return
+		cur := xitdb.hash_map_put_cursor(&moment, "tree") or_return
+		for level in 0 ..< DEPTH {
+			node_hm := xitdb.write_hash_map_init(cur) or_return
+			xitdb.hash_map_put(&node_hm, "label", fmt.tprintf("node-%02d", level)) or_return
+			kids_cur := xitdb.hash_map_put_cursor(&node_hm, "kids") or_return
+			if level % 2 == 0 {
+				al := xitdb.write_array_list_init(kids_cur) or_return
+				cur = xitdb.array_list_append_cursor(&al) or_return
+			} else {
+				ll := xitdb.write_linked_array_list_init(kids_cur) or_return
+				cur = xitdb.linked_array_list_append_cursor(&ll) or_return
+			}
+		}
+
+		leaf_hm := xitdb.write_hash_map_init(cur) or_return
+		xitdb.hash_map_put(&leaf_hm, "label", "node-bottom") or_return
+		leaf_kids := xitdb.hash_map_put_cursor(&leaf_hm, "kids") or_return
+		_ = xitdb.write_array_list_init(leaf_kids) or_return
+		return nil
+	})
+	rep0, err0 := xitdb.tx_commit(&tx0)
+	testing.expect_value(t, err0, nil)
+	defer xitdb.tx_report_destroy(&rep0, context.allocator)
+
+	tree_maybe, tm_err := xitdb.select_cursor(&db, "@0.tree")
+	testing.expect_value(t, tm_err, nil)
+	tree_cur, has_tree := tree_maybe.?
+	testing.expect(t, has_tree, "Expected @0.tree cursor")
+	if !has_tree {
+		return
+	}
+
+	Worker_Args :: struct {
+		t:        ^testing.T,
+		tree_cur: xitdb.Read_Cursor,
+	}
+
+	args := Worker_Args{
+		t        = t,
+		tree_cur = tree_cur,
+	}
+
+	worker :: proc(raw: rawptr) {
+		defer free_all(context.temp_allocator)
+		a := (^Worker_Args)(raw)
+
+		// 1. Recursive unmarshal across 45 levels on a 512 KiB stack with persistent allocator leak check
+		root, u_err := xitdb.unmarshal(Deep_Node, a.tree_cur, context.allocator)
+		defer destroy_deep_node(&root, context.allocator)
+		testing.expect_value(a.t, u_err, nil)
+		if u_err == nil {
+			cur := &root
+			for level in 0 ..< DEPTH {
+				testing.expect_value(a.t, cur.label, fmt.tprintf("node-%02d", level))
+				testing.expect_value(a.t, len(cur.kids), 1)
+				if len(cur.kids) != 1 {
+					return
+				}
+				cur = &cur.kids[0]
+			}
+			testing.expect_value(a.t, cur.label, "node-bottom")
+			testing.expect_value(a.t, len(cur.kids), 0)
+		}
+
+		// 2. O(1) iterator pool bound check: unmarshal releases each slice iterator before recursing
+		prev_alloc := context.allocator
+		arena_buf := make([]u8, 4 * size_of(xitdb.Cursor_Iterator), prev_alloc)
+		defer delete(arena_buf, prev_alloc)
+		arena: mem.Arena
+		mem.arena_init(&arena, arena_buf[:])
+
+		context.allocator = mem.arena_allocator(&arena)
+		defer context.allocator = prev_alloc
+
+		root_tmp, u_err2 := xitdb.unmarshal(Deep_Node, a.tree_cur, context.temp_allocator)
+		testing.expect_value(a.t, u_err2, nil)
+		if u_err2 == nil {
+			cur_tmp := &root_tmp
+			for _ in 0 ..< DEPTH {
+				if len(cur_tmp.kids) != 1 {
+					testing.expectf(a.t, false, "Expected 1 child in pooled unmarshal")
+					return
+				}
+				cur_tmp = &cur_tmp.kids[0]
+			}
+			testing.expect_value(a.t, cur_tmp.label, "node-bottom")
+			testing.expect_value(a.t, len(cur_tmp.kids), 0)
+		}
+		testing.expect(a.t, arena.offset < 2 * size_of(xitdb.Cursor_Iterator), "Expected O(1) iterator pooling across 45 recursive struct levels")
+	}
+
+	_run_on_small_stack(t, 512 * 1024, worker, &args)
+}

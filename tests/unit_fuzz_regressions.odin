@@ -2036,3 +2036,309 @@ unit_unified_depth_hamt_and_btree_64_levels :: proc(t: ^testing.T) {
 		})
 	}
 }
+
+@(test)
+unit_compaction_deep_trees_hamt_and_nested_small_stack :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	// 1. 64-nibble HAMT compaction across 2 moments on a 512 KiB small stack
+	{
+		collide64_hasher := xitdb.Hasher{
+			hash_proc = proc(data: []u8, out_hash: []u8, _: rawptr) {
+				for b_i in 0 ..< len(out_hash) {
+					out_hash[b_i] = 0
+				}
+				if len(out_hash) == 32 && len(data) > 0 {
+					// hamt_nibble reads from the end; nibble 63 is the high nibble of byte 0.
+					out_hash[0] = (data[0] & 0x0F) << 4
+				}
+			},
+			hash_size = 32,
+			id        = xitdb.string_to_id("ch64"),
+		}
+
+		cm := xitdb.core_memory_init(context.allocator, reserve_size = 0)
+		defer _ = xitdb.core_destroy(&cm)
+		db, derr := xitdb.database_init(&cm, collide64_hasher)
+		testing.expect_value(t, derr, nil)
+
+		tx0 := xitdb.tx_init(&db, nil, false, context.allocator)
+		testing.expect_value(t, xitdb.tx_put(&tx0, ".m.a", "v_a"), nil)
+		testing.expect_value(t, xitdb.tx_put(&tx0, ".m.b", "v_b"), nil)
+		rep0, cerr0 := xitdb.tx_commit(&tx0)
+		xitdb.tx_destroy(&tx0)
+		testing.expect_value(t, cerr0, nil)
+		xitdb.tx_report_destroy(&rep0, context.allocator)
+
+		tx1 := xitdb.tx_init(&db, -1, false, context.allocator)
+		testing.expect_value(t, xitdb.tx_put(&tx1, ".m.a", "v_a2"), nil)
+		rep1, cerr1 := xitdb.tx_commit(&tx1)
+		xitdb.tx_destroy(&tx1)
+		testing.expect_value(t, cerr1, nil)
+		xitdb.tx_report_destroy(&rep1, context.allocator)
+
+		Ham_Compact_Args :: struct {
+			t:      ^testing.T,
+			src_db: ^xitdb.Database,
+		}
+		ham_worker :: proc(raw: rawptr) {
+			defer free_all(context.temp_allocator)
+			a := (^Ham_Compact_Args)(raw)
+			dst_core := xitdb.core_memory_init()
+			defer _ = xitdb.core_destroy(&dst_core)
+
+			comp_db, comp_err := xitdb.database_compact(a.src_db, &dst_core)
+			testing.expect_value(a.t, comp_err, nil)
+			if comp_err != nil {
+				return
+			}
+
+			va, va_err := xitdb.get_string(&comp_db, "@0.m.a", context.temp_allocator)
+			vb, vb_err := xitdb.get_string(&comp_db, "@0.m.b", context.temp_allocator)
+			testing.expect_value(a.t, va_err, nil)
+			testing.expect_value(a.t, vb_err, nil)
+			testing.expect_value(a.t, va, "v_a2")
+			testing.expect_value(a.t, vb, "v_b")
+
+			m_rc, m_err := xitdb.select_cursor(&comp_db, "@0.m")
+			testing.expect_value(a.t, m_err, nil)
+
+			blk_pos := m_rc.?.slot_ptr.slot.value
+			index_hops := 0
+			for index_hops < 80 {
+				slot0, s0_err := xitdb.core_read_slot_at(comp_db.core, blk_pos)
+				testing.expect_value(a.t, s0_err, nil)
+				if slot0.tag != .Index {
+					break
+				}
+				blk_pos = slot0.value
+				index_hops += 1
+			}
+			testing.expect_value(a.t, index_hops, 63)
+
+			it := new(xitdb.Cursor_Iterator)
+			defer free(it)
+			testing.expect_value(a.t, xitdb.cursor_iterator_init(it, m_rc.?), nil)
+			cnt := 0
+			for {
+				elem, nerr := xitdb.cursor_iterator_next(it)
+				testing.expect_value(a.t, nerr, nil)
+				if elem == nil {
+					break
+				}
+				cnt += 1
+			}
+			testing.expect_value(a.t, cnt, 2)
+		}
+
+		hargs := Ham_Compact_Args{t = t, src_db = &db}
+		_run_on_small_stack(t, 512 * 1024, ham_worker, &hargs)
+	}
+
+	// 2. 64-level Linked_Array_List, 64-level Sorted_Map, and 50-level nested mixed collections on 512 KiB stack
+	{
+		Build_Deep_Compact_Cfg :: struct {
+			branches:     int,
+			nested_depth: int,
+		}
+
+		build_deep_compact_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+			cfg := (^Build_Deep_Compact_Cfg)(user_data)
+			db_ptr := cursor.read_cursor.db
+			moment := xitdb.write_hash_map_init(cursor^) or_return
+
+			ll_cur := xitdb.hash_map_put_cursor(&moment, "ll") or_return
+			ll := xitdb.write_linked_array_list_init(ll_cur) or_return
+			xitdb.linked_array_list_append(&ll, "v0") or_return
+			xitdb.linked_array_list_append(&ll, "v1") or_return
+
+			ll_hdr_pos := ll.write_cursor.slot_ptr.slot.value
+			ll_hb: [xitdb.BTREE_HEADER_LENGTH]u8
+			xitdb.core_read_exact_at(db_ptr.core, ll_hdr_pos, ll_hb[:]) or_return
+			ll_hdr := xitdb.btree_header_from_bytes(ll_hb) or_return
+			ll_root := ll_hdr.root_ptr
+			for _ in 0 ..< cfg.branches {
+				node := xitdb.BTree_Node{kind = .Branch, num = 1}
+				node.children[0] = xitdb.Slot{value = ll_root, tag = .Index}
+				node.counts[0] = ll_hdr.size
+				ll_root = xitdb.write_btree_node(db_ptr, node) or_return
+			}
+			xitdb.core_seek_to(db_ptr.core, ll_hdr_pos) or_return
+			new_ll_hb := xitdb.btree_header_to_bytes(xitdb.BTree_Header{root_ptr = ll_root, size = ll_hdr.size})
+			xitdb.core_write_all(db_ptr.core, new_ll_hb[:]) or_return
+
+			sm_cur := xitdb.hash_map_put_cursor(&moment, "sm") or_return
+			sm := xitdb.write_sorted_map_init(sm_cur) or_return
+			xitdb.sorted_map_put(&sm, "k0", "s0") or_return
+			xitdb.sorted_map_put(&sm, "k1", "s1") or_return
+
+			sm_hdr_pos := sm.write_cursor.slot_ptr.slot.value
+			sm_hb: [xitdb.BTREE_HEADER_LENGTH]u8
+			xitdb.core_read_exact_at(db_ptr.core, sm_hdr_pos, sm_hb[:]) or_return
+			sm_hdr := xitdb.btree_header_from_bytes(sm_hb) or_return
+			sm_root := sm_hdr.root_ptr
+			for _ in 0 ..< cfg.branches {
+				node := xitdb.Sorted_Node{kind = .Branch, num = 1}
+				node.children[0] = xitdb.Slot{value = sm_root, tag = .Index}
+				node.counts[0] = sm_hdr.size
+				sm_root = xitdb.write_sorted_node(db_ptr, node) or_return
+			}
+			xitdb.core_seek_to(db_ptr.core, sm_hdr_pos) or_return
+			new_sm_hb := xitdb.btree_header_to_bytes(xitdb.BTree_Header{root_ptr = sm_root, size = sm_hdr.size})
+			xitdb.core_write_all(db_ptr.core, new_sm_hb[:]) or_return
+
+			ncur := xitdb.hash_map_put_cursor(&moment, "nested") or_return
+			for level in 0 ..< cfg.nested_depth {
+				switch level % 5 {
+				case 0:
+					hm := xitdb.write_hash_map_init(ncur) or_return
+					ncur = xitdb.hash_map_put_cursor(&hm, "next") or_return
+				case 1:
+					chm := xitdb.write_counted_hash_map_init(ncur) or_return
+					ncur = xitdb.hash_map_put_cursor(&chm.write_hash_map, "next") or_return
+				case 2:
+					n_sm := xitdb.write_sorted_map_init(ncur) or_return
+					ncur = xitdb.sorted_map_put_cursor(&n_sm, "m_next") or_return
+				case 3:
+					n_al := xitdb.write_array_list_init(ncur) or_return
+					xitdb.array_list_append(&n_al, "pad") or_return
+					ncur = xitdb.array_list_append_cursor(&n_al) or_return
+				case 4:
+					n_ll := xitdb.write_linked_array_list_init(ncur) or_return
+					xitdb.linked_array_list_append(&n_ll, "pad") or_return
+					ncur = xitdb.linked_array_list_append_cursor(&n_ll) or_return
+				}
+			}
+			leaf_hm := xitdb.write_hash_map_init(ncur) or_return
+			xitdb.hash_map_put(&leaf_hm, "leaf", "compact-leaf") or_return
+			return nil
+		}
+
+		cm := xitdb.core_memory_init()
+		defer _ = xitdb.core_destroy(&cm)
+		db, derr := xitdb.database_init(&cm, xitdb.sha1_hasher())
+		testing.expect_value(t, derr, nil)
+
+		// Moment 0 garbage precedes Moment 1 live deep collections
+		tx0 := xitdb.tx_init(&db, nil, false, context.allocator)
+		testing.expect_value(t, xitdb.tx_put(&tx0, ".garbage", "reclaim-me"), nil)
+		rep0, c0_err := xitdb.tx_commit(&tx0)
+		xitdb.tx_destroy(&tx0)
+		testing.expect_value(t, c0_err, nil)
+		xitdb.tx_report_destroy(&rep0, context.allocator)
+
+		cfg := Build_Deep_Compact_Cfg{branches = 63, nested_depth = 50}
+		tx1 := xitdb.tx_init(&db, -1, false, context.allocator)
+		xitdb.tx_with_cursor(&tx1, build_deep_compact_cb, &cfg)
+		rep1, c1_err := xitdb.tx_commit(&tx1)
+		xitdb.tx_destroy(&tx1)
+		testing.expect_value(t, c1_err, nil)
+		xitdb.tx_report_destroy(&rep1, context.allocator)
+
+		Tree_Compact_Args :: struct {
+			t:            ^testing.T,
+			src_db:       ^xitdb.Database,
+			nested_depth: int,
+		}
+		tree_worker :: proc(raw: rawptr) {
+			defer free_all(context.temp_allocator)
+			a := (^Tree_Compact_Args)(raw)
+			dst_core := xitdb.core_memory_init()
+			defer _ = xitdb.core_destroy(&dst_core)
+
+			comp_db, comp_err := xitdb.database_compact(a.src_db, &dst_core)
+			testing.expect_value(a.t, comp_err, nil)
+			if comp_err != nil {
+				return
+			}
+
+			read_hdr :: proc(t_ptr: ^testing.T, db_ptr: ^xitdb.Database, rc: xitdb.Read_Cursor) -> xitdb.BTree_Header {
+				hb: [xitdb.BTREE_HEADER_LENGTH]u8
+				testing.expect_value(t_ptr, xitdb.core_read_exact_at(db_ptr.core, rc.slot_ptr.slot.value, hb[:]), nil)
+				hdr, herr := xitdb.btree_header_from_bytes(hb)
+				testing.expect_value(t_ptr, herr, nil)
+				return hdr
+			}
+
+			ll_rc, ll_err := xitdb.select_cursor(&comp_db, "@0.ll")
+			sm_rc, sm_err := xitdb.select_cursor(&comp_db, "@0$sm")
+			testing.expect(a.t, ll_err == nil && sm_err == nil, "Expected compacted ll and sm cursors")
+			if ll_err != nil || sm_err != nil {
+				return
+			}
+
+			ll_hdr := read_hdr(a.t, &comp_db, ll_rc.?)
+			sm_hdr := read_hdr(a.t, &comp_db, sm_rc.?)
+			ll_h, ll_herr := xitdb.btree_height(&comp_db, ll_hdr.root_ptr)
+			sm_h, sm_herr := xitdb.btree_height(&comp_db, sm_hdr.root_ptr)
+			testing.expect_value(a.t, ll_herr, nil)
+			testing.expect_value(a.t, ll_h, 63)
+			testing.expect_value(a.t, sm_herr, nil)
+			testing.expect_value(a.t, sm_h, 63)
+
+			ll_v0, ll_v0_err := xitdb.get_string(&comp_db, "@0.ll[[0]]", context.temp_allocator)
+			ll_v1, ll_v1_err := xitdb.get_string(&comp_db, "@0.ll[[1]]", context.temp_allocator)
+			testing.expect_value(a.t, ll_v0_err, nil)
+			testing.expect_value(a.t, ll_v1_err, nil)
+			testing.expect_value(a.t, ll_v0, "v0")
+			testing.expect_value(a.t, ll_v1, "v1")
+
+			sm_s0, sm_s0_err := xitdb.get_string(&comp_db, `@0$sm["k0"]`, context.temp_allocator)
+			sm_s1, sm_s1_err := xitdb.get_string(&comp_db, `@0$sm["k1"]`, context.temp_allocator)
+			testing.expect_value(a.t, sm_s0_err, nil)
+			testing.expect_value(a.t, sm_s1_err, nil)
+			testing.expect_value(a.t, sm_s0, "s0")
+			testing.expect_value(a.t, sm_s1, "s1")
+
+			cur_maybe, nc_err := xitdb.select_cursor(&comp_db, "@0.nested")
+			testing.expect_value(a.t, nc_err, nil)
+			if nc_err != nil {
+				return
+			}
+			cur := cur_maybe.?
+			for level in 0 ..< a.nested_depth {
+				child_maybe: Maybe(xitdb.Read_Cursor)
+				child_err: xitdb.Error
+				switch level % 5 {
+				case 0:
+					r_hm, h_err := xitdb.read_hash_map_init(cur)
+					testing.expect_value(a.t, h_err, nil)
+					child_maybe, child_err = xitdb.hash_map_get_cursor(r_hm, "next")
+				case 1:
+					r_chm, ch_err := xitdb.read_counted_hash_map_init(cur)
+					testing.expect_value(a.t, ch_err, nil)
+					child_maybe, child_err = xitdb.hash_map_get_cursor(r_chm.read_hash_map, "next")
+				case 2:
+					r_sm, s_err := xitdb.read_sorted_map_init(cur)
+					testing.expect_value(a.t, s_err, nil)
+					child_maybe, child_err = xitdb.sorted_map_get_cursor(r_sm, "m_next")
+				case 3:
+					r_al, al_err := xitdb.read_array_list_init(cur)
+					testing.expect_value(a.t, al_err, nil)
+					child_maybe, child_err = xitdb.array_list_get_cursor(r_al, 1)
+				case 4:
+					r_ll, ll2_err := xitdb.read_linked_array_list_init(cur)
+					testing.expect_value(a.t, ll2_err, nil)
+					child_maybe, child_err = xitdb.linked_array_list_get_cursor(r_ll, 1)
+				}
+				testing.expect_value(a.t, child_err, nil)
+				c, ok := child_maybe.?
+				testing.expect(a.t, ok, "Expected child cursor in compacted nested chain")
+				if !ok {
+					return
+				}
+				cur = c
+			}
+			leaf_hm, leaf_err := xitdb.read_hash_map_init(cur)
+			testing.expect_value(a.t, leaf_err, nil)
+			leaf_cur, lc_err := xitdb.hash_map_get_cursor(leaf_hm, "leaf")
+			testing.expect_value(a.t, lc_err, nil)
+			leaf_str, ls_err := xitdb.cursor_read_string(leaf_cur.?, 0, context.temp_allocator)
+			testing.expect_value(a.t, ls_err, nil)
+			testing.expect_value(a.t, leaf_str, "compact-leaf")
+		}
+
+		targs := Tree_Compact_Args{t = t, src_db = &db, nested_depth = cfg.nested_depth}
+		_run_on_small_stack(t, 512 * 1024, tree_worker, &targs)
+	}
+}

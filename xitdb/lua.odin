@@ -1090,8 +1090,9 @@ _lua_marshal_map_entry :: proc(L: ^lua.State, hm_col: ^Write_Hash_Map, raw_key: 
 
 @(private = "file")
 _Lua_Visited_Stack :: struct {
-	ptrs:  [64]i64,
-	count: int,
+	inline_ptrs: [64]i64,
+	count:       int,
+	extra:       [dynamic]i64,
 }
 
 // Unmarshal a `Read_Cursor` directly onto the Lua stack as a Lua table or primitive.
@@ -1103,6 +1104,7 @@ lua_unmarshal_cursor :: proc(L: ^lua.State, cursor: Read_Cursor) -> (err: Error)
 		lua.settop(L, top)
 	}
 	visited: _Lua_Visited_Stack
+	defer delete(visited.extra)
 	pool := _iter_pool_init(context.allocator)
 	defer _iter_pool_destroy(&pool)
 	return _lua_unmarshal_with_visited(L, cursor, &visited, &pool)
@@ -1117,19 +1119,38 @@ _lua_unmarshal_with_visited :: proc(L: ^lua.State, cursor: Read_Cursor, visited:
 	is_col := _is_collection_tag(slot.tag)
 	pushed_visited := false
 	if is_col {
-		for i in 0 ..< visited.count {
-			if visited.ptrs[i] == slot.value {
+		inline_n := min(visited.count, len(visited.inline_ptrs))
+		for i in 0 ..< inline_n {
+			if visited.inline_ptrs[i] == slot.value {
 				lua.pushnil(L)
 				return nil
 			}
 		}
-		if visited.count < len(visited.ptrs) {
-			visited.ptrs[visited.count] = slot.value
+		for ptr in visited.extra {
+			if ptr == slot.value {
+				lua.pushnil(L)
+				return nil
+			}
+		}
+		if visited.count < len(visited.inline_ptrs) {
+			visited.inline_ptrs[visited.count] = slot.value
+			visited.count += 1
+			pushed_visited = true
+		} else {
+			if visited.extra.allocator.procedure == nil {
+				visited.extra.allocator = context.allocator
+			}
+			if _, a_err := append(&visited.extra, slot.value); a_err != nil {
+				return .Write_Failed
+			}
 			visited.count += 1
 			pushed_visited = true
 		}
 	}
 	defer if pushed_visited {
+		if visited.count > len(visited.inline_ptrs) {
+			pop(&visited.extra)
+		}
 		visited.count -= 1
 	}
 
