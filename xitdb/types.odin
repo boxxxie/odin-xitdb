@@ -7,7 +7,7 @@ import "core:io"
 import "core:os"
 
 // Package & protocol constants (wire-compatible with xitdb v1 and v2).
-PACKAGE_VERSION            :: "2.2.0"
+PACKAGE_VERSION            :: "2.2.1"
 VERSION                    :: u16(2)
 MAGIC_NUMBER               :: [3]u8{'x', 'i', 't'}
 BIT_COUNT                  :: 4
