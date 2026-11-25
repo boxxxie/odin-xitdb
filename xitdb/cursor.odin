@@ -1039,11 +1039,12 @@ _reset_cursor_iterator :: proc(res: ^Cursor_Iterator) {
 
 @(require_results)
 cursor_iterator_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor) -> (err: Error) {
-	_reset_cursor_iterator(res)
+	assert(res != nil)
 	defer if err != nil {
 		mem.zero_item(res)
 	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
+	_reset_cursor_iterator(res)
 
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
@@ -1088,11 +1089,12 @@ cursor_iterator :: proc(unresolved_cursor: Read_Cursor) -> (res: Cursor_Iterator
 
 @(require_results)
 cursor_iterator_reverse_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor) -> (err: Error) {
-	_reset_cursor_iterator(res)
+	assert(res != nil)
 	defer if err != nil {
 		mem.zero_item(res)
 	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
+	_reset_cursor_iterator(res)
 
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
@@ -1294,11 +1296,12 @@ _init_btree_stack_from_index :: proc(
 
 @(require_results)
 cursor_iterator_sorted_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
-	_reset_cursor_iterator(res)
+	assert(res != nil)
 	defer if err != nil {
 		mem.zero_item(res)
 	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
+	_reset_cursor_iterator(res)
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
 		res.cursor = cursor
@@ -1329,11 +1332,12 @@ cursor_iterator_sorted_from_index :: proc(unresolved_cursor: Read_Cursor, start_
 
 @(require_results)
 cursor_iterator_sorted_from_key_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_key: []u8) -> (err: Error) {
-	_reset_cursor_iterator(res)
+	assert(res != nil)
 	defer if err != nil {
 		mem.zero_item(res)
 	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
+	_reset_cursor_iterator(res)
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
 		res.cursor = cursor
@@ -1417,11 +1421,12 @@ cursor_iterator_sorted_from_key :: proc(unresolved_cursor: Read_Cursor, start_ke
 
 @(require_results)
 cursor_iterator_array_list_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
-	_reset_cursor_iterator(res)
+	assert(res != nil)
 	defer if err != nil {
 		mem.zero_item(res)
 	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
+	_reset_cursor_iterator(res)
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
 		res.cursor = cursor
@@ -1453,11 +1458,12 @@ cursor_iterator_array_list_from_index :: proc(unresolved_cursor: Read_Cursor, st
 
 @(require_results)
 cursor_iterator_linked_array_list_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
-	_reset_cursor_iterator(res)
+	assert(res != nil)
 	defer if err != nil {
 		mem.zero_item(res)
 	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
+	_reset_cursor_iterator(res)
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
 		res.cursor = cursor
@@ -1489,11 +1495,12 @@ cursor_iterator_linked_array_list_from_index :: proc(unresolved_cursor: Read_Cur
 
 @(require_results)
 cursor_iterator_sorted_reverse_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
-	_reset_cursor_iterator(res)
+	assert(res != nil)
 	defer if err != nil {
 		mem.zero_item(res)
 	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
+	_reset_cursor_iterator(res)
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
 		res.cursor = cursor
@@ -1524,11 +1531,12 @@ cursor_iterator_sorted_reverse_from_index :: proc(unresolved_cursor: Read_Cursor
 
 @(require_results)
 cursor_iterator_sorted_reverse_from_key_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, upper_key: []u8, inclusive: bool = true) -> (err: Error) {
-	_reset_cursor_iterator(res)
+	assert(res != nil)
 	defer if err != nil {
 		mem.zero_item(res)
 	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
+	_reset_cursor_iterator(res)
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
 		res.cursor = cursor
@@ -1632,11 +1640,12 @@ cursor_iterator_sorted_reverse_from_key :: proc(unresolved_cursor: Read_Cursor, 
 
 @(require_results)
 cursor_iterator_array_list_reverse_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
-	_reset_cursor_iterator(res)
+	assert(res != nil)
 	defer if err != nil {
 		mem.zero_item(res)
 	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
+	_reset_cursor_iterator(res)
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
 		res.cursor = cursor
@@ -1668,11 +1677,12 @@ cursor_iterator_array_list_reverse_from_index :: proc(unresolved_cursor: Read_Cu
 
 @(require_results)
 cursor_iterator_linked_array_list_reverse_from_index_init :: proc(res: ^Cursor_Iterator, unresolved_cursor: Read_Cursor, start_index: i64) -> (err: Error) {
-	_reset_cursor_iterator(res)
+	assert(res != nil)
 	defer if err != nil {
 		mem.zero_item(res)
 	}
 	cursor := cursor_resolved_cursor(unresolved_cursor) or_return
+	_reset_cursor_iterator(res)
 	#partial switch cursor.slot_ptr.slot.tag {
 	case .None:
 		res.cursor = cursor

@@ -47,19 +47,23 @@ array_list_get_slot :: proc(a: Read_Array_List, index: i64) -> (Maybe(Slot), Err
 }
 
 array_list_iterator :: proc(a: Read_Array_List) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator(a.cursor)
+	err = cursor_iterator_init(&res, a.cursor)
+	return
 }
 
 array_list_iterator_from :: proc(a: Read_Array_List, index: i64) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_array_list_from_index(a.cursor, index)
+	err = cursor_iterator_array_list_from_index_init(&res, a.cursor, index)
+	return
 }
 
 array_list_iterator_reverse :: proc(a: Read_Array_List) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_reverse(a.cursor)
+	err = cursor_iterator_reverse_init(&res, a.cursor)
+	return
 }
 
 array_list_iterator_reverse_from :: proc(a: Read_Array_List, index: i64) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_array_list_reverse_from_index(a.cursor, index)
+	err = cursor_iterator_array_list_reverse_from_index_init(&res, a.cursor, index)
+	return
 }
 
 array_list_put :: proc(a: ^Write_Array_List, index: i64, data: Writeable_Data) -> Error {
@@ -147,19 +151,23 @@ linked_array_list_get_slot :: proc(a: Read_Linked_Array_List, index: i64) -> (Ma
 }
 
 linked_array_list_iterator :: proc(a: Read_Linked_Array_List) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator(a.cursor)
+	err = cursor_iterator_init(&res, a.cursor)
+	return
 }
 
 linked_array_list_iterator_from :: proc(a: Read_Linked_Array_List, index: i64) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_linked_array_list_from_index(a.cursor, index)
+	err = cursor_iterator_linked_array_list_from_index_init(&res, a.cursor, index)
+	return
 }
 
 linked_array_list_iterator_reverse :: proc(a: Read_Linked_Array_List) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_reverse(a.cursor)
+	err = cursor_iterator_reverse_init(&res, a.cursor)
+	return
 }
 
 linked_array_list_iterator_reverse_from :: proc(a: Read_Linked_Array_List, index: i64) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_linked_array_list_reverse_from_index(a.cursor, index)
+	err = cursor_iterator_linked_array_list_reverse_from_index_init(&res, a.cursor, index)
+	return
 }
 
 linked_array_list_put :: proc(a: ^Write_Linked_Array_List, index: i64, data: Writeable_Data) -> Error {
@@ -290,11 +298,13 @@ hash_map_slot :: proc(m: Read_Hash_Map) -> (res: Slot, err: Error) {
 }
 
 hash_map_iterator :: proc(m: Read_Hash_Map) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator(m.cursor)
+	err = cursor_iterator_init(&res, m.cursor)
+	return
 }
 
 hash_map_iterator_reverse :: proc(m: Read_Hash_Map) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_reverse(m.cursor)
+	err = cursor_iterator_reverse_init(&res, m.cursor)
+	return
 }
 
 counted_hash_map_count :: proc(m: Read_Counted_Hash_Map) -> (res: i64, err: Error) {
@@ -564,11 +574,13 @@ hash_set_slot :: proc(s: Read_Hash_Set) -> (res: Slot, err: Error) {
 }
 
 hash_set_iterator :: proc(s: Read_Hash_Set) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator(s.cursor)
+	err = cursor_iterator_init(&res, s.cursor)
+	return
 }
 
 hash_set_iterator_reverse :: proc(s: Read_Hash_Set) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_reverse(s.cursor)
+	err = cursor_iterator_reverse_init(&res, s.cursor)
+	return
 }
 
 counted_hash_set_count :: proc(s: Read_Counted_Hash_Set) -> (res: i64, err: Error) {
@@ -716,35 +728,43 @@ sorted_map_count :: proc(m: Read_Sorted_Map) -> (res: i64, err: Error) {
 }
 
 sorted_map_iterator :: proc(m: Read_Sorted_Map) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator(m.cursor)
+	err = cursor_iterator_init(&res, m.cursor)
+	return
 }
 
 sorted_map_iterator_from :: proc(m: Read_Sorted_Map, start_key: []u8) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_from_key(m.cursor, start_key)
+	err = cursor_iterator_sorted_from_key_init(&res, m.cursor, start_key)
+	return
 }
 
 sorted_map_iterator_from_string :: proc(m: Read_Sorted_Map, start_key: string) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_from_key(m.cursor, transmute([]u8)start_key)
+	err = cursor_iterator_sorted_from_key_init(&res, m.cursor, transmute([]u8)start_key)
+	return
 }
 
 sorted_map_iterator_from_index :: proc(m: Read_Sorted_Map, start_index: i64) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_from_index(m.cursor, start_index)
+	err = cursor_iterator_sorted_from_index_init(&res, m.cursor, start_index)
+	return
 }
 
 sorted_map_iterator_reverse :: proc(m: Read_Sorted_Map) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_reverse(m.cursor)
+	err = cursor_iterator_reverse_init(&res, m.cursor)
+	return
 }
 
 sorted_map_iterator_reverse_from :: proc(m: Read_Sorted_Map, upper_key: []u8, inclusive: bool = true) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_reverse_from_key(m.cursor, upper_key, inclusive)
+	err = cursor_iterator_sorted_reverse_from_key_init(&res, m.cursor, upper_key, inclusive)
+	return
 }
 
 sorted_map_iterator_reverse_from_string :: proc(m: Read_Sorted_Map, upper_key: string, inclusive: bool = true) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_reverse_from_key(m.cursor, transmute([]u8)upper_key, inclusive)
+	err = cursor_iterator_sorted_reverse_from_key_init(&res, m.cursor, transmute([]u8)upper_key, inclusive)
+	return
 }
 
 sorted_map_iterator_reverse_from_index :: proc(m: Read_Sorted_Map, start_index: i64) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_reverse_from_index(m.cursor, start_index)
+	err = cursor_iterator_sorted_reverse_from_index_init(&res, m.cursor, start_index)
+	return
 }
 
 sorted_map_get_cursor_by_bytes :: proc(m: Read_Sorted_Map, key: []u8) -> (Maybe(Read_Cursor), Error) {
@@ -865,35 +885,43 @@ sorted_set_count :: proc(s: Read_Sorted_Set) -> (res: i64, err: Error) {
 }
 
 sorted_set_iterator :: proc(s: Read_Sorted_Set) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator(s.cursor)
+	err = cursor_iterator_init(&res, s.cursor)
+	return
 }
 
 sorted_set_iterator_from :: proc(s: Read_Sorted_Set, start_key: []u8) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_from_key(s.cursor, start_key)
+	err = cursor_iterator_sorted_from_key_init(&res, s.cursor, start_key)
+	return
 }
 
 sorted_set_iterator_from_string :: proc(s: Read_Sorted_Set, start_key: string) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_from_key(s.cursor, transmute([]u8)start_key)
+	err = cursor_iterator_sorted_from_key_init(&res, s.cursor, transmute([]u8)start_key)
+	return
 }
 
 sorted_set_iterator_from_index :: proc(s: Read_Sorted_Set, start_index: i64) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_from_index(s.cursor, start_index)
+	err = cursor_iterator_sorted_from_index_init(&res, s.cursor, start_index)
+	return
 }
 
 sorted_set_iterator_reverse :: proc(s: Read_Sorted_Set) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_reverse(s.cursor)
+	err = cursor_iterator_reverse_init(&res, s.cursor)
+	return
 }
 
 sorted_set_iterator_reverse_from :: proc(s: Read_Sorted_Set, upper_key: []u8, inclusive: bool = true) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_reverse_from_key(s.cursor, upper_key, inclusive)
+	err = cursor_iterator_sorted_reverse_from_key_init(&res, s.cursor, upper_key, inclusive)
+	return
 }
 
 sorted_set_iterator_reverse_from_string :: proc(s: Read_Sorted_Set, upper_key: string, inclusive: bool = true) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_reverse_from_key(s.cursor, transmute([]u8)upper_key, inclusive)
+	err = cursor_iterator_sorted_reverse_from_key_init(&res, s.cursor, transmute([]u8)upper_key, inclusive)
+	return
 }
 
 sorted_set_iterator_reverse_from_index :: proc(s: Read_Sorted_Set, start_index: i64) -> (res: Cursor_Iterator, err: Error) {
-	return cursor_iterator_sorted_reverse_from_index(s.cursor, start_index)
+	err = cursor_iterator_sorted_reverse_from_index_init(&res, s.cursor, start_index)
+	return
 }
 
 sorted_set_get_index_kv_pair :: proc(s: Read_Sorted_Set, index: i64, allocator := context.temp_allocator) -> (res: Maybe(Read_KV_Pair_Cursor), err: Error) {

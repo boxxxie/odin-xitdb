@@ -2799,7 +2799,8 @@ history_of :: proc(db: ^Database, path_selector: string, allocator := context.te
 		return nil, nil
 	}
 	history := read_array_list_init(rc) or_return
-	it := cursor_iterator(history.cursor) or_return
+	it: Cursor_Iterator
+	cursor_iterator_init(&it, history.cursor) or_return
 
 	tx_hash_buf: [64]u8 = ---
 	doc_hash_buf: [64]u8 = ---
@@ -2927,7 +2928,8 @@ query_prefix :: proc(moment: Read_Hash_Map, index_key: string, prefix: string, a
 		return nil, nil
 	}
 	sm_col := read_sorted_map_init(sm_cur) or_return
-	it := sorted_map_iterator_from_string(sm_col, prefix) or_return
+	it: Cursor_Iterator
+	cursor_iterator_sorted_from_key_init(&it, sm_col.cursor, transmute([]u8)prefix) or_return
 
 	hits := make([dynamic]Index_Hit, 0, 8, allocator)
 	defer if err != nil {
@@ -2963,7 +2965,8 @@ query_page :: proc(moment: Read_Hash_Map, index_key: string, offset, limit: i64,
 		return nil, nil
 	}
 	sm_col := read_sorted_map_init(sm_cur) or_return
-	it := sorted_map_iterator_from_index(sm_col, offset) or_return
+	it: Cursor_Iterator
+	cursor_iterator_sorted_from_index_init(&it, sm_col.cursor, offset) or_return
 
 	hits := make([dynamic]Index_Hit, 0, int(limit), allocator)
 	defer if err != nil {

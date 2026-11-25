@@ -181,15 +181,51 @@ offset_map_destroy :: proc(om: ^Offset_Map) {
 // ============================================================================
 
 @(private)
+_Compact_Task_Kind :: enum u8 {
+	Index,
+	Array_List,
+	Array_List_Index,
+	BTree,
+	BTree_Leaf,
+	BTree_Branch,
+	Sorted_Map,
+	Sorted_Map_Leaf,
+	Sorted_Map_Branch,
+	Hash_Map,
+	Counted_Hash_Map,
+	KV_Pair,
+	Sorted_KV_Pair,
+}
+
+@(private)
+_Compact_Task :: struct {
+	source_offset: i64,
+	target_offset: i64,
+	extra_i64:     i64,
+	kind:          _Compact_Task_Kind,
+	u8_a:          u8,
+	u8_b:          u8,
+}
+
+@(private)
 _Compactor :: struct {
 	source_core: ^Core,
 	target_core: ^Core,
 	hash_size:   u16,
 	offset_map:  ^Offset_Map,
+	work:        [dynamic]_Compact_Task,
 }
 
 @(private)
-_compactor_reserve_block :: #force_inline proc(c: ^_Compactor, size: int) -> (res: i64, err: Error) {
+_compactor_push_task :: proc(c: ^_Compactor, task: _Compact_Task) -> Error {
+	if _, a_err := append(&c.work, task); a_err != nil {
+		return Xitdb_Error.Write_Failed
+	}
+	return nil
+}
+
+@(private)
+_compactor_reserve_block :: proc(c: ^_Compactor, size: int) -> (res: i64, err: Error) {
 	#partial switch &dst in c.target_core {
 	case Core_Memory:
 		offset := i64(len(dst.buf))
@@ -239,7 +275,7 @@ _compactor_remap_slot :: proc(c: ^_Compactor, slot: Slot) -> (res: Slot, err: Er
 		} else {
 			new_offset = _compactor_reserve_block(c, INDEX_BLOCK_SIZE) or_return
 			offset_map_put(c.offset_map, slot.value, new_offset) or_return
-			_compactor_populate_index(c, slot.value, new_offset) or_return
+			_compactor_push_task(c, _Compact_Task{source_offset = slot.value, target_offset = new_offset, kind = .Index}) or_return
 		}
 
 	case .Array_List:
@@ -249,7 +285,7 @@ _compactor_remap_slot :: proc(c: ^_Compactor, slot: Slot) -> (res: Slot, err: Er
 		} else {
 			new_offset = _compactor_reserve_block(c, ARRAY_LIST_HEADER_LENGTH) or_return
 			offset_map_put(c.offset_map, slot.value, new_offset) or_return
-			_compactor_populate_array_list(c, slot.value, new_offset) or_return
+			_compactor_push_task(c, _Compact_Task{source_offset = slot.value, target_offset = new_offset, kind = .Array_List}) or_return
 		}
 
 	case .Linked_Array_List:
@@ -259,7 +295,7 @@ _compactor_remap_slot :: proc(c: ^_Compactor, slot: Slot) -> (res: Slot, err: Er
 		} else {
 			new_offset = _compactor_reserve_block(c, BTREE_HEADER_LENGTH) or_return
 			offset_map_put(c.offset_map, slot.value, new_offset) or_return
-			_compactor_populate_btree(c, slot.value, new_offset) or_return
+			_compactor_push_task(c, _Compact_Task{source_offset = slot.value, target_offset = new_offset, kind = .BTree}) or_return
 		}
 
 	case .Hash_Map, .Hash_Set:
@@ -269,7 +305,7 @@ _compactor_remap_slot :: proc(c: ^_Compactor, slot: Slot) -> (res: Slot, err: Er
 		} else {
 			new_offset = _compactor_reserve_block(c, INDEX_BLOCK_SIZE) or_return
 			offset_map_put(c.offset_map, slot.value, new_offset) or_return
-			_compactor_populate_hash_map(c, slot.value, new_offset, false) or_return
+			_compactor_push_task(c, _Compact_Task{source_offset = slot.value, target_offset = new_offset, kind = .Hash_Map}) or_return
 		}
 
 	case .Counted_Hash_Map, .Counted_Hash_Set:
@@ -279,7 +315,7 @@ _compactor_remap_slot :: proc(c: ^_Compactor, slot: Slot) -> (res: Slot, err: Er
 		} else {
 			new_offset = _compactor_reserve_block(c, INDEX_BLOCK_SIZE + 8) or_return
 			offset_map_put(c.offset_map, slot.value, new_offset) or_return
-			_compactor_populate_hash_map(c, slot.value, new_offset, true) or_return
+			_compactor_push_task(c, _Compact_Task{source_offset = slot.value, target_offset = new_offset, kind = .Counted_Hash_Map}) or_return
 		}
 
 	case .KV_Pair:
@@ -289,7 +325,7 @@ _compactor_remap_slot :: proc(c: ^_Compactor, slot: Slot) -> (res: Slot, err: Er
 		} else {
 			new_offset = _compactor_reserve_block(c, kv_pair_length(int(c.hash_size))) or_return
 			offset_map_put(c.offset_map, slot.value, new_offset) or_return
-			_compactor_populate_kv_pair(c, slot.value, new_offset, .KV_Pair) or_return
+			_compactor_push_task(c, _Compact_Task{source_offset = slot.value, target_offset = new_offset, kind = .KV_Pair}) or_return
 		}
 
 	case .Sorted_KV_Pair:
@@ -299,7 +335,7 @@ _compactor_remap_slot :: proc(c: ^_Compactor, slot: Slot) -> (res: Slot, err: Er
 		} else {
 			new_offset = _compactor_reserve_block(c, SORTED_KV_PAIR_LENGTH) or_return
 			offset_map_put(c.offset_map, slot.value, new_offset) or_return
-			_compactor_populate_kv_pair(c, slot.value, new_offset, .Sorted_KV_Pair) or_return
+			_compactor_push_task(c, _Compact_Task{source_offset = slot.value, target_offset = new_offset, kind = .Sorted_KV_Pair}) or_return
 		}
 
 	case .Sorted_Map, .Sorted_Set:
@@ -309,7 +345,7 @@ _compactor_remap_slot :: proc(c: ^_Compactor, slot: Slot) -> (res: Slot, err: Er
 		} else {
 			new_offset = _compactor_reserve_block(c, BTREE_HEADER_LENGTH) or_return
 			offset_map_put(c.offset_map, slot.value, new_offset) or_return
-			_compactor_populate_sorted_map(c, slot.value, new_offset) or_return
+			_compactor_push_task(c, _Compact_Task{source_offset = slot.value, target_offset = new_offset, kind = .Sorted_Map}) or_return
 		}
 
 	case:
@@ -401,6 +437,19 @@ _compactor_remap_array_list_index :: proc(c: ^_Compactor, source_offset, size: i
 	}
 
 	target_offset := _compactor_reserve_block(c, INDEX_BLOCK_SIZE) or_return
+	_compactor_push_task(c, _Compact_Task{
+		source_offset = source_offset,
+		target_offset = target_offset,
+		extra_i64     = size,
+		kind          = .Array_List_Index,
+		u8_a          = shift,
+	}) or_return
+	return target_offset, nil
+}
+
+@(private)
+_compactor_populate_array_list_index :: proc(c: ^_Compactor, source_offset, target_offset, size: i64, shift: u8) -> Error {
+	child_size := i64(1) << (u64(shift) * BIT_COUNT)
 	block_bytes: [INDEX_BLOCK_SIZE]u8 = ---
 	core_read_exact_at(c.source_core, source_offset, block_bytes[:]) or_return
 	remapped_block: [INDEX_BLOCK_SIZE]u8
@@ -415,7 +464,7 @@ _compactor_remap_array_list_index :: proc(c: ^_Compactor, source_offset, size: i
 			remapped_slot = _compactor_remap_slot(c, child_slot) or_return
 		} else {
 			if child_slot.tag != .Index {
-				return 0, .Unexpected_Tag
+				return .Unexpected_Tag
 			}
 			remapped_slot.value = _compactor_remap_array_list_index(c, child_slot.value, count, shift - 1) or_return
 		}
@@ -424,8 +473,7 @@ _compactor_remap_array_list_index :: proc(c: ^_Compactor, source_offset, size: i
 		remaining -= count
 	}
 	core_seek_to(c.target_core, target_offset) or_return
-	core_write_all(c.target_core, remapped_block[:]) or_return
-	return target_offset, nil
+	return core_write_all(c.target_core, remapped_block[:])
 }
 
 @(private)
@@ -477,12 +525,24 @@ _compactor_remap_btree_node :: proc(c: ^_Compactor, node_offset: i64) -> (res: i
 	case .Leaf:
 		target_offset := _compactor_reserve_block(c, BTREE_LEAF_BLOCK_SIZE) or_return
 		offset_map_put(c.offset_map, node_offset, target_offset) or_return
-		_compactor_populate_btree_leaf(c, node_offset, target_offset, kind_int, num) or_return
+		_compactor_push_task(c, _Compact_Task{
+			source_offset = node_offset,
+			target_offset = target_offset,
+			kind          = .BTree_Leaf,
+			u8_a          = kind_int,
+			u8_b          = num,
+		}) or_return
 		return target_offset, nil
 	case .Branch:
 		target_offset := _compactor_reserve_block(c, BTREE_BRANCH_BLOCK_SIZE) or_return
 		offset_map_put(c.offset_map, node_offset, target_offset) or_return
-		_compactor_populate_btree_branch(c, node_offset, target_offset, kind_int, num) or_return
+		_compactor_push_task(c, _Compact_Task{
+			source_offset = node_offset,
+			target_offset = target_offset,
+			kind          = .BTree_Branch,
+			u8_a          = kind_int,
+			u8_b          = num,
+		}) or_return
 		return target_offset, nil
 	}
 	return 0, .Unreachable
@@ -582,12 +642,24 @@ _compactor_remap_sorted_map_node :: proc(c: ^_Compactor, node_offset: i64) -> (r
 	case .Leaf:
 		target_offset := _compactor_reserve_block(c, SORTED_LEAF_BLOCK_SIZE) or_return
 		offset_map_put(c.offset_map, node_offset, target_offset) or_return
-		_compactor_populate_sorted_map_leaf(c, node_offset, target_offset, kind_int, num) or_return
+		_compactor_push_task(c, _Compact_Task{
+			source_offset = node_offset,
+			target_offset = target_offset,
+			kind          = .Sorted_Map_Leaf,
+			u8_a          = kind_int,
+			u8_b          = num,
+		}) or_return
 		return target_offset, nil
 	case .Branch:
 		target_offset := _compactor_reserve_block(c, SORTED_BRANCH_BLOCK_SIZE) or_return
 		offset_map_put(c.offset_map, node_offset, target_offset) or_return
-		_compactor_populate_sorted_map_branch(c, node_offset, target_offset, kind_int, num) or_return
+		_compactor_push_task(c, _Compact_Task{
+			source_offset = node_offset,
+			target_offset = target_offset,
+			kind          = .Sorted_Map_Branch,
+			u8_a          = kind_int,
+			u8_b          = num,
+		}) or_return
 		return target_offset, nil
 	}
 	return 0, .Unreachable
@@ -724,6 +796,42 @@ _compactor_populate_kv_pair :: proc(c: ^_Compactor, source_offset, target_offset
 }
 
 @(private)
+_compactor_drain :: proc(c: ^_Compactor) -> Error {
+	for len(c.work) > 0 {
+		task := pop(&c.work)
+		switch task.kind {
+		case .Index:
+			_compactor_populate_index(c, task.source_offset, task.target_offset) or_return
+		case .Array_List:
+			_compactor_populate_array_list(c, task.source_offset, task.target_offset) or_return
+		case .Array_List_Index:
+			_compactor_populate_array_list_index(c, task.source_offset, task.target_offset, task.extra_i64, task.u8_a) or_return
+		case .BTree:
+			_compactor_populate_btree(c, task.source_offset, task.target_offset) or_return
+		case .BTree_Leaf:
+			_compactor_populate_btree_leaf(c, task.source_offset, task.target_offset, task.u8_a, task.u8_b) or_return
+		case .BTree_Branch:
+			_compactor_populate_btree_branch(c, task.source_offset, task.target_offset, task.u8_a, task.u8_b) or_return
+		case .Sorted_Map:
+			_compactor_populate_sorted_map(c, task.source_offset, task.target_offset) or_return
+		case .Sorted_Map_Leaf:
+			_compactor_populate_sorted_map_leaf(c, task.source_offset, task.target_offset, task.u8_a, task.u8_b) or_return
+		case .Sorted_Map_Branch:
+			_compactor_populate_sorted_map_branch(c, task.source_offset, task.target_offset, task.u8_a, task.u8_b) or_return
+		case .Hash_Map:
+			_compactor_populate_hash_map(c, task.source_offset, task.target_offset, false) or_return
+		case .Counted_Hash_Map:
+			_compactor_populate_hash_map(c, task.source_offset, task.target_offset, true) or_return
+		case .KV_Pair:
+			_compactor_populate_kv_pair(c, task.source_offset, task.target_offset, .KV_Pair) or_return
+		case .Sorted_KV_Pair:
+			_compactor_populate_kv_pair(c, task.source_offset, task.target_offset, .Sorted_KV_Pair) or_return
+		}
+	}
+	return nil
+}
+
+@(private)
 _Remap_Ctx :: struct {
 	compactor: ^_Compactor,
 	slot:      Slot,
@@ -733,6 +841,7 @@ _Remap_Ctx :: struct {
 _remap_slot_cb :: proc(cursor: ^Write_Cursor, user_data: rawptr) -> Error {
 	ctx := (^_Remap_Ctx)(user_data)
 	remapped := _compactor_remap_slot(ctx.compactor, ctx.slot) or_return
+	_compactor_drain(ctx.compactor) or_return
 	return cursor_write(cursor, remapped)
 }
 
@@ -789,6 +898,7 @@ database_compact :: proc(db: ^Database, target_core: ^Core, offset_map: ^Offset_
 		hash_size   = db.header.hash_size,
 		offset_map  = om,
 	}
+	defer delete(compactor.work)
 
 	#partial switch source_root.tag {
 	case .Array_List:

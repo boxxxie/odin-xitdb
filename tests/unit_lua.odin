@@ -266,7 +266,7 @@ unit_lua_arena_context_allocator_bounds_unmarshal_iterator_growth :: proc(t: ^te
 	}
 	defer lua.close(L)
 
-	arena_buf := make([]u8, 64 * 1024, context.allocator)
+	arena_buf := make([]u8, 8 * size_of(xitdb.Cursor_Iterator), context.allocator)
 	defer delete(arena_buf, context.allocator)
 	arena: mem.Arena
 	mem.arena_init(&arena, arena_buf[:])
@@ -277,7 +277,7 @@ unit_lua_arena_context_allocator_bounds_unmarshal_iterator_growth :: proc(t: ^te
 
 	u_err := xitdb.lua_unmarshal_cursor(L, groups_cur)
 	testing.expect_value(t, u_err, nil)
-	testing.expect(t, arena.offset < 32 * 1024, "Expected bounded arena growth during lua_unmarshal_cursor")
+	testing.expect(t, arena.offset < 3 * size_of(xitdb.Cursor_Iterator), "Expected bounded arena growth during lua_unmarshal_cursor")
 	if u_err == nil {
 		lua.pop(L, 1)
 	}
@@ -364,4 +364,230 @@ unit_lua_opens_and_replicates_untagged_hash_id_zero_db :: proc(t: ^testing.T) {
 	if !ok1 {
 		testing.expectf(t, false, "unit_lua_hash_id_mismatch failed: %s", msg1)
 	}
+}
+
+@(test)
+unit_lua_deep_cycle_past_64_and_recursive_iterators_small_stack :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	core := xitdb.core_memory_init()
+	defer xitdb.core_destroy(&core)
+
+	db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
+	testing.expect_value(t, init_err, nil)
+
+	tx0 := xitdb.tx_init(&db, base_moment = nil, allocator = context.allocator)
+	defer xitdb.tx_destroy(&tx0)
+	xitdb.tx_with_cursor(&tx0, proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		moment := xitdb.write_hash_map_init(cursor^) or_return
+
+		// 1. Acyclic 75-level nested Hash_Map chain (crosses 64-entry inline visited buffer)
+		acyc_cur := xitdb.hash_map_put_cursor(&moment, "deep_acyclic") or_return
+		for _ in 0 ..< 75 {
+			hm := xitdb.write_hash_map_init(acyc_cur) or_return
+			acyc_cur = xitdb.hash_map_put_cursor(&hm, "next") or_return
+		}
+		acyc_leaf := xitdb.write_hash_map_init(acyc_cur) or_return
+		xitdb.hash_map_put(&acyc_leaf, "leaf", "depth-75") or_return
+
+		// 2. Cyclic Hash_Map back-edge at depth 69 -> depth 68 (past 64-entry inline visited cap)
+		cyc_cur := xitdb.hash_map_put_cursor(&moment, "deep_cycle") or_return
+		target_slot: xitdb.Slot
+		for level in 0 ..< 69 {
+			hm := xitdb.write_hash_map_init(cyc_cur) or_return
+			if level == 68 {
+				target_slot = xitdb.hash_map_slot(hm.read_hash_map) or_return
+			}
+			cyc_cur = xitdb.hash_map_put_cursor(&hm, "next") or_return
+		}
+		cyc_leaf := xitdb.write_hash_map_init(cyc_cur) or_return
+		xitdb.hash_map_put(&cyc_leaf, "tag", "cycle-leaf") or_return
+		xitdb.hash_map_put(&cyc_leaf, "back", target_slot) or_return
+
+		// 3. 40-level mixed collection chain for script-level recursive :iterator() tests
+		iter_cur := xitdb.hash_map_put_cursor(&moment, "iter_chain") or_return
+		for level in 0 ..< 40 {
+			switch level % 5 {
+			case 0:
+				hm := xitdb.write_hash_map_init(iter_cur) or_return
+				iter_cur = xitdb.hash_map_put_cursor(&hm, "next") or_return
+			case 1:
+				chm := xitdb.write_counted_hash_map_init(iter_cur) or_return
+				iter_cur = xitdb.hash_map_put_cursor(&chm.write_hash_map, "next") or_return
+			case 2:
+				sm := xitdb.write_sorted_map_init(iter_cur) or_return
+				iter_cur = xitdb.sorted_map_put_cursor(&sm, "m_next") or_return
+			case 3:
+				al := xitdb.write_array_list_init(iter_cur) or_return
+				xitdb.array_list_append(&al, "pad") or_return
+				iter_cur = xitdb.array_list_append_cursor(&al) or_return
+			case 4:
+				ll := xitdb.write_linked_array_list_init(iter_cur) or_return
+				xitdb.linked_array_list_append(&ll, "pad") or_return
+				iter_cur = xitdb.linked_array_list_append_cursor(&ll) or_return
+			}
+		}
+		iter_leaf := xitdb.write_hash_map_init(iter_cur) or_return
+		xitdb.hash_map_put(&iter_leaf, "leaf", "iter-leaf") or_return
+		return nil
+	})
+	rep0, err0 := xitdb.tx_commit(&tx0)
+	testing.expect_value(t, err0, nil)
+	defer xitdb.tx_report_destroy(&rep0, context.allocator)
+
+	Worker_Args :: struct {
+		t:  ^testing.T,
+		db: ^xitdb.Database,
+	}
+
+	args := Worker_Args{t = t, db = &db}
+
+	worker :: proc(raw: rawptr) {
+		defer free_all(context.temp_allocator)
+		a := (^Worker_Args)(raw)
+
+		L := xitdb.lua_new_state(a.db)
+		testing.expect(a.t, L != nil)
+		if L == nil {
+			return
+		}
+		defer lua.close(L)
+
+		ok, err_msg := xitdb.lua_exec_string(L, `
+			-- 1. Acyclic 75-level unmarshal spills cleanly past the 64-entry inline visited buffer
+			local cur = db:unmarshal("@0.deep_acyclic")
+			for level = 1, 75 do
+				assert(type(cur) == "table" and cur.next ~= nil, "missing acyclic next at " .. tostring(level))
+				cur = cur.next
+			end
+			assert(type(cur) == "table" and cur.leaf == "depth-75", "unexpected acyclic leaf")
+
+			-- 2. Cycle at depth 69 -> depth 68 is detected in visited.extra without stack overflow
+			local cyc = db:unmarshal("@0.deep_cycle")
+			for level = 1, 69 do
+				assert(type(cyc) == "table" and cyc.next ~= nil, "missing cycle next at " .. tostring(level))
+				cyc = cyc.next
+			end
+			assert(type(cyc) == "table" and cyc.tag == "cycle-leaf" and cyc.back == nil,
+				"expected deep cycle back-edge past depth 64 to unmarshal as nil")
+
+			-- 3. Recursive cursor:iterator() across 40 nested mixed collection levels
+			local function walk_cursor(c, level)
+				if level == 40 then
+					for entry in c:iterator() do
+						local kc, vc = entry:read_kv_pair()
+						if kc:read_string() == "leaf" then
+							return vc:read_string()
+						end
+					end
+					error("missing leaf at cursor depth 40")
+				end
+				local rem = level % 5
+				if rem == 0 or rem == 1 then
+					for entry in c:iterator() do
+						local kc, vc = entry:read_kv_pair()
+						if kc:read_string() == "next" then
+							return walk_cursor(vc, level + 1)
+						end
+					end
+				elseif rem == 2 then
+					for entry in c:iterator() do
+						local kc, vc = entry:read_kv_pair()
+						if kc:read_string() == "m_next" then
+							return walk_cursor(vc, level + 1)
+						end
+					end
+				else
+					local idx = 0
+					for entry in c:iterator() do
+						idx = idx + 1
+						if idx == 2 then
+							return walk_cursor(entry, level + 1)
+						end
+					end
+				end
+				error("missing child in walk_cursor at level " .. tostring(level))
+			end
+			assert(walk_cursor(db:select_cursor("@0.iter_chain"), 0) == "iter-leaf")
+
+			-- 4. Recursive collection :iterator() / :iterator_from() / :iterator_from_index() across 40 levels
+			local function walk_col(c, level)
+				if level == 40 then
+					for entry in xitdb.read_hash_map(c):iterator() do
+						local kc, vc = entry:read_kv_pair()
+						if kc:read_string() == "leaf" then
+							return vc:read_string()
+						end
+					end
+					error("missing leaf at col depth 40")
+				end
+				local rem = level % 5
+				if rem == 0 then
+					local col = xitdb.read_hash_map(c)
+					if level == 0 then
+						local count = 0
+						for _ in col:iterator() do
+							count = count + 1
+						end
+						assert(count == 1)
+					end
+					for entry in col:iterator() do
+						local kc, vc = entry:read_kv_pair()
+						if kc:read_string() == "next" then
+							return walk_col(vc, level + 1)
+						end
+					end
+				elseif rem == 1 then
+					for entry in xitdb.read_counted_hash_map(c):iterator() do
+						local kc, vc = entry:read_kv_pair()
+						if kc:read_string() == "next" then
+							return walk_col(vc, level + 1)
+						end
+					end
+				elseif rem == 2 then
+					local col = xitdb.read_sorted_map(c)
+					local it
+					if math.floor(level / 5) % 2 == 0 then
+						it = col:iterator_from("m_next")
+					else
+						it = col:iterator_from_index(0)
+					end
+					local entry = it:next()
+					assert(entry ~= nil, "missing sorted_map entry at level " .. tostring(level))
+					local kc, vc = entry:read_kv_pair()
+					assert(kc:read_string() == "m_next")
+					return walk_col(vc, level + 1)
+				elseif rem == 3 then
+					local col = xitdb.read_array_list(c)
+					local it
+					if math.floor(level / 5) % 2 == 0 then
+						it = col:iterator_from(1)
+					else
+						it = col:iterator_from_index(1)
+					end
+					local child = it:next()
+					assert(child ~= nil, "missing array_list child at level " .. tostring(level))
+					return walk_col(child, level + 1)
+				else
+					local col = xitdb.read_linked_array_list(c)
+					local it
+					if math.floor(level / 5) % 2 == 0 then
+						it = col:iterator_from(1)
+					else
+						it = col:iterator_from_index(1)
+					end
+					local child = it:next()
+					assert(child ~= nil, "missing linked_array_list child at level " .. tostring(level))
+					return walk_col(child, level + 1)
+				end
+				error("missing child in walk_col at level " .. tostring(level))
+			end
+			assert(walk_col(db:select_cursor("@0.iter_chain"), 0) == "iter-leaf")
+		`, "unit_lua_deep_cycle_and_iterators")
+		if !ok {
+			testing.expectf(a.t, false, "unit_lua_deep_cycle_and_iterators failed: %s", err_msg)
+		}
+	}
+
+	_run_on_small_stack(t, 512 * 1024, worker, &args)
 }

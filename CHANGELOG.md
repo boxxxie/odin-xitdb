@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-11-25
+
+### Fixed
+
+- **Unified 64-Level Depth Ceiling & Iterator Init Safety (`xitdb/types.odin`, `xitdb/btree.odin`, `xitdb/database.odin`, `xitdb/cursor.odin`, `xitdb/collections.odin`):**
+  - Synced `MAX_BTREE_DEPTH` and `ITERATOR_STACK_SIZE` at `64` levels across `Cursor_Iterator`, B-tree descents/writes, and root-collapse loops (upstream `xitdb-zig` `c126134`).
+  - Resolved `unresolved_cursor` before `_reset_cursor_iterator` across all 10 `cursor_iterator_*_init` procedures so self-aliased restarts on 48-byte `Read_Cursor` lvalues do not zero the input cursor, and initialized named `res` in place across all 28 collection iterator wrappers.
+- **Iterative Compaction Worklist (`xitdb/compact_replicate.odin`):**
+  - Replaced recursive compaction traversal with an explicit heap worklist (`_Compact_Task` / `_compactor_drain`) and uninlined `_compactor_reserve_block` so `database_compact` runs in `O(1)` C stack space on `512 KiB` thread stacks across 64-level B-trees, 64-nibble HAMTs, and deeply nested mixed collections while preserving cyclic graph identity and OOM handling.
+- **Lua Unmarshal Cycle Detection Past Depth 64 (`xitdb/lua.odin`):**
+  - Extended `_Lua_Visited_Stack` in `lua_unmarshal_cursor` to spill past its 64-entry inline buffer into a lazily allocated dynamic slice so cycles at depth `>= 64` are detected cleanly without stack overflow while preserving zero heap overhead for depth `<= 64`.
+
+### Changed
+
+- **Compact 64-Level Diff Walkers & Zero-Copy Iterator Paths (`xitdb/collection_diff.odin`, `xitdb/dsl.odin`, `xitdb/lua.odin`):**
+  - Unified HAMT and B+Tree diff depth bounds to `64`, shrank `Tree_Frame`, and backed `Tree_Walker` with height-sized `scratch_allocator` slices instead of fixed `[64]Sorted_Node` arrays.
+  - Switched DSL (`history_of`, `query_prefix`, `query_page`) and Lua cursor/collection iterator userdata constructors (`_l_cursor_iterator`, `_col_acquire_iterator`) to in-place `Cursor_Iterator` initialization.
+- **Benchmarks, CI & Deep-Stack Test Coverage (`benchmarks/render/`, `.github/workflows/ci.yml`, `tests/`):**
+  - Replaced `benchmarks/update_readme.sh` with the `temple` AOT SVG renderer and wired CI `hugi` collection paths.
+  - Added `512 KiB` small-stack and 64-level boundary tests covering `Cursor_Iterator` self-aliasing, 64-nibble HAMTs, 64-level B-trees, `database_compact`, 45-level recursive Odin struct `unmarshal`, Lua deep cycles (`>= 64`), and recursive Lua `:iterator()` traversals.
+
 ## [2.2.0] - 2026-11-22
 
 ### Added

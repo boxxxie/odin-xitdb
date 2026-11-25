@@ -7,7 +7,7 @@ import "core:io"
 import "core:os"
 
 // Package & protocol constants (wire-compatible with xitdb v1 and v2).
-PACKAGE_VERSION            :: "2.2.0"
+PACKAGE_VERSION            :: "2.2.1"
 VERSION                    :: u16(2)
 MAGIC_NUMBER               :: [3]u8{'x', 'i', 't'}
 BIT_COUNT                  :: 4
@@ -40,7 +40,10 @@ BTREE_HEADER_LENGTH      :: 16
 KEY_VALUE_PAIR_BASE_LEN  :: 18
 SORTED_KEY_VALUE_LEN     :: 18
 SORTED_KV_PAIR_LENGTH    :: 18
-ITERATOR_STACK_SIZE      :: 16
+// Maximum tree depth shared across B-trees (log2(u64) = 64 at min fan-out 2),
+// SHA-256 HAMTs (256 / 4 = 64 nibbles), structural diffs, and Cursor_Iterator stacks.
+MAX_BTREE_DEPTH          :: 64
+ITERATOR_STACK_SIZE      :: MAX_BTREE_DEPTH
 
 // Tag identifies the data structure or primitive stored in a Slot.
 Tag :: enum u8 {

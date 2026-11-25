@@ -1035,7 +1035,7 @@ _exec_path_part :: proc(
 				}
 				collapse_steps := 0
 				for root.kind == .Branch && root.num == 1 {
-					if collapse_steps >= ITERATOR_STACK_SIZE * 2 {
+					if collapse_steps >= MAX_BTREE_DEPTH {
 						return {}, .Invalid_BTree_Node
 					}
 					collapse_steps += 1
