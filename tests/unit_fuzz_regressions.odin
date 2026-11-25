@@ -1912,28 +1912,62 @@ unit_unified_depth_hamt_and_btree_64_levels :: proc(t: ^testing.T) {
 		diff_args := Diff_Worker_Args{t = t, a = sm0_rc.?, b = sm1_rc.?}
 		_run_on_small_stack(t, 512 * 1024, diff_worker, &diff_args)
 
-		// Moment 2: remove from 64-level Linked_Array_List, collapsing all 63 single-child branches
-		tx2 := xitdb.tx_init(&db64, -1, false, context.allocator)
-		tx2_cb :: proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
-			moment := xitdb.write_hash_map_init(cursor^) or_return
-			ll_w := xitdb.write_linked_array_list_init(xitdb.hash_map_put_cursor(&moment, "ll") or_return) or_return
-			xitdb.linked_array_list_remove(&ll_w, 0) or_return
-			return nil
+		// Moment 2: 64-level Sorted_Map put/remove, Linked_Array_List insert, and 64-level remove collapse on a 512 KiB stack
+		BTree_Write_Args :: struct {
+			t:  ^testing.T,
+			db: ^xitdb.Database,
 		}
-		xitdb.tx_with_cursor(&tx2, tx2_cb)
-		rep2, c2_err := xitdb.tx_commit(&tx2)
-		xitdb.tx_destroy(&tx2)
-		testing.expect_value(t, c2_err, nil)
-		xitdb.tx_report_destroy(&rep2, context.allocator)
+		btree_write_worker :: proc(raw: rawptr) {
+			defer free_all(context.temp_allocator)
+			w := (^BTree_Write_Args)(raw)
 
-		ll2_rc, ll2_err := xitdb.select_cursor(&db64, "@2.ll")
+			// 64-level Sorted_Map put + remove and Linked_Array_List insert
+			tx_ins := xitdb.tx_init(w.db, -1, false, context.allocator)
+			tx_ins_cb :: proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+				moment := xitdb.write_hash_map_init(cursor^) or_return
+				sm_w := xitdb.write_sorted_map_init(xitdb.hash_map_put_cursor(&moment, "sm") or_return) or_return
+				xitdb.sorted_map_put(&sm_w, "k2", "s2") or_return
+				rm_found, rm_err := xitdb.sorted_map_remove(&sm_w, "k2")
+				if rm_err != nil {
+					return rm_err
+				}
+				_ = rm_found
+				ll_w := xitdb.write_linked_array_list_init(xitdb.hash_map_put_cursor(&moment, "ll") or_return) or_return
+				xitdb.linked_array_list_insert(&ll_w, 1, "v_mid") or_return
+				xitdb.linked_array_list_remove(&ll_w, 1) or_return
+				return nil
+			}
+			xitdb.tx_with_cursor(&tx_ins, tx_ins_cb)
+			rep_ins, ci_err := xitdb.tx_commit(&tx_ins)
+			xitdb.tx_destroy(&tx_ins)
+			testing.expect_value(w.t, ci_err, nil)
+			xitdb.tx_report_destroy(&rep_ins, context.allocator)
+
+			// Collapse all 63 single-child branches via linked_array_list_remove on 512 KiB stack
+			tx2 := xitdb.tx_init(w.db, -1, false, context.allocator)
+			tx2_cb :: proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+				moment := xitdb.write_hash_map_init(cursor^) or_return
+				ll_w := xitdb.write_linked_array_list_init(xitdb.hash_map_put_cursor(&moment, "ll") or_return) or_return
+				xitdb.linked_array_list_remove(&ll_w, 0) or_return
+				return nil
+			}
+			xitdb.tx_with_cursor(&tx2, tx2_cb)
+			rep2, c2_err := xitdb.tx_commit(&tx2)
+			xitdb.tx_destroy(&tx2)
+			testing.expect_value(w.t, c2_err, nil)
+			xitdb.tx_report_destroy(&rep2, context.allocator)
+		}
+		bw_args := BTree_Write_Args{t = t, db = &db64}
+		_run_on_small_stack(t, 512 * 1024, btree_write_worker, &bw_args)
+
+		ll2_rc, ll2_err := xitdb.select_cursor(&db64, "@3.ll")
 		testing.expect_value(t, ll2_err, nil)
 		ll2_hdr := read_btree_header_at(t, &db64, ll2_rc.?)
 		testing.expect_value(t, ll2_hdr.size, i64(1))
 		ll2_h, ll2_herr := xitdb.btree_height(&db64, ll2_hdr.root_ptr)
 		testing.expect_value(t, ll2_herr, nil)
 		testing.expect_value(t, ll2_h, 0)
-		ll2_val, ll2_verr := xitdb.get_string(&db64, "@2.ll[[0]]", context.temp_allocator)
+		ll2_val, ll2_verr := xitdb.get_string(&db64, "@3.ll[[0]]", context.temp_allocator)
 		testing.expect_value(t, ll2_verr, nil)
 		testing.expect_value(t, ll2_val, "v1_v2")
 	}
