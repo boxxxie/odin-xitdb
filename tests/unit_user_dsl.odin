@@ -1229,9 +1229,9 @@ unit_user_dsl_arena_context_allocator_bounds_iterator_growth :: proc(t: ^testing
 		return
 	}
 
-	// Bump arena capped at 64 KiB (< 15x sizeof(Cursor_Iterator)): without iterator pooling,
-	// traversing 50+ sibling collections would exhaust the arena and fail with .Write_Failed.
-	arena_buf := make([]u8, 64 * 1024, context.allocator)
+	// Bump arena capped at 12x sizeof(Cursor_Iterator) (< 25% of 50+ unpooled sibling allocations):
+	// without iterator pooling, traversing 50+ sibling collections would exhaust the arena and fail with .Write_Failed.
+	arena_buf := make([]u8, 12 * size_of(xitdb.Cursor_Iterator), context.allocator)
 	defer delete(arena_buf, context.allocator)
 	arena: mem.Arena
 	mem.arena_init(&arena, arena_buf[:])
@@ -1245,7 +1245,7 @@ unit_user_dsl_arena_context_allocator_bounds_iterator_growth :: proc(t: ^testing
 	free_all(context.temp_allocator)
 	pv, p_err := xitdb.pull(m1_cur, "*", context.temp_allocator)
 	testing.expect_value(t, p_err, nil)
-	testing.expect(t, arena.offset < 32 * 1024, "Expected bounded arena growth during pull")
+	testing.expect(t, arena.offset < 5 * size_of(xitdb.Cursor_Iterator), "Expected bounded arena growth during pull")
 	_ = pv
 
 	// 2. diff_moments(0, 1, temp_allocator)
@@ -1254,7 +1254,7 @@ unit_user_dsl_arena_context_allocator_bounds_iterator_growth :: proc(t: ^testing
 	diffs, d_err := xitdb.diff_moments(&db, 0, 1, false, context.temp_allocator)
 	testing.expect_value(t, d_err, nil)
 	testing.expect_value(t, len(diffs), GROUP_COUNT)
-	testing.expect(t, arena.offset < 32 * 1024, "Expected bounded arena growth during diff_moments")
+	testing.expect(t, arena.offset < 6 * size_of(xitdb.Cursor_Iterator), "Expected bounded arena growth during diff_moments")
 
 	// 3. unmarshal([]Arena_Row, temp_allocator)
 	mem.arena_free_all(&arena)
@@ -1265,7 +1265,7 @@ unit_user_dsl_arena_context_allocator_bounds_iterator_growth :: proc(t: ^testing
 	if len(rows) == GROUP_COUNT {
 		testing.expect_value(t, len(rows[GROUP_COUNT - 1].tags), 2)
 	}
-	testing.expect(t, arena.offset < 16 * 1024, "Expected bounded arena growth during unmarshal")
+	testing.expect(t, arena.offset < 3 * size_of(xitdb.Cursor_Iterator), "Expected bounded arena growth during unmarshal")
 
 	// 4. query_datalog(..., temp_allocator)
 	mem.arena_free_all(&arena)
@@ -1273,5 +1273,5 @@ unit_user_dsl_arena_context_allocator_bounds_iterator_growth :: proc(t: ^testing
 	qres, q_err := xitdb.query_datalog(&db, "find ?g, ?t where .groups[?g].tags[?i] = ?t", 1, context.temp_allocator)
 	testing.expect_value(t, q_err, nil)
 	testing.expect_value(t, len(qres.rows), GROUP_COUNT * 2)
-	testing.expect(t, arena.offset < 32 * 1024, "Expected bounded arena growth during query_datalog")
+	testing.expect(t, arena.offset < 4 * size_of(xitdb.Cursor_Iterator), "Expected bounded arena growth during query_datalog")
 }

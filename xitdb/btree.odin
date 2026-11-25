@@ -138,7 +138,7 @@ descend_by_rank :: proc(db: ^Database, header: BTree_Header, rank: i64, $BRANCH_
 	expected := header.size
 	rem := rank
 	for depth := 0; ; depth += 1 {
-		if depth >= ITERATOR_STACK_SIZE * 2 {
+		if depth >= MAX_BTREE_DEPTH {
 			return {}, .Invalid_BTree_Node
 		}
 		when is_sorted {
@@ -210,7 +210,7 @@ descend_by_rank :: proc(db: ^Database, header: BTree_Header, rank: i64, $BRANCH_
 }
 
 btree_insert :: proc(db: ^Database, node_ptr, rank, expected, frozen_at: i64, depth: int = 0) -> (res: BTree_Insert_Result, err: Error) {
-	if depth >= ITERATOR_STACK_SIZE * 2 {
+	if depth >= MAX_BTREE_DEPTH {
 		return {}, .Invalid_BTree_Node
 	}
 	if btree_reusable(db, node_ptr, frozen_at) {
@@ -490,7 +490,7 @@ btree_grow_root :: proc(db: ^Database, result: BTree_Insert_Result) -> (res: i64
 }
 
 btree_get_for_write :: proc(db: ^Database, node_ptr, rank, expected, frozen_at: i64, depth: int = 0) -> (res: BTree_Write_Slot, err: Error) {
-	if depth >= ITERATOR_STACK_SIZE * 2 {
+	if depth >= MAX_BTREE_DEPTH {
 		return {}, .Invalid_BTree_Node
 	}
 	header_bytes: [BTREE_NODE_HEADER_SIZE]u8
@@ -605,7 +605,7 @@ BTree_Remove_Result :: struct {
 }
 
 btree_remove :: proc(db: ^Database, node_ptr, rank, expected, frozen_at: i64, is_root: bool = false, depth: int = 0) -> (res: BTree_Remove_Result, err: Error) {
-	if depth >= ITERATOR_STACK_SIZE * 2 {
+	if depth >= MAX_BTREE_DEPTH {
 		return {}, .Invalid_BTree_Node
 	}
 	reusable := btree_reusable(db, node_ptr, frozen_at)
@@ -878,7 +878,7 @@ btree_height :: proc(db: ^Database, root_ptr: i64) -> (res: int, err: Error) {
 	ptr := root_ptr
 	height := 0
 	for {
-		if height >= ITERATOR_STACK_SIZE * 2 {
+		if height >= MAX_BTREE_DEPTH {
 			return 0, .Invalid_BTree_Node
 		}
 		buf: [BTREE_NODE_HEADER_SIZE + SLOT_LENGTH]u8
@@ -906,7 +906,7 @@ btree_checked_height :: proc(db: ^Database, root_ptr, expected_size: i64) -> (re
 	ptr := root_ptr
 	expected := expected_size
 	for height := 0; ; height += 1 {
-		if height >= ITERATOR_STACK_SIZE * 2 {
+		if height >= MAX_BTREE_DEPTH {
 			return 0, .Invalid_BTree_Node
 		}
 		node := read_btree_node(db, ptr) or_return
@@ -1016,7 +1016,7 @@ btree_merge_nodes :: proc(db: ^Database, a: BTree_Node, expected_a: i64, b: BTre
 }
 
 btree_join_right :: proc(db: ^Database, a_ptr: i64, ha: int, expected_a: i64, b_ptr: i64, hb: int, expected_b: i64, depth: int = 0) -> (res: BTree_Join_Result, err: Error) {
-	if depth >= ITERATOR_STACK_SIZE * 2 || ha <= hb {
+	if depth >= MAX_BTREE_DEPTH || ha <= hb {
 		return {}, .Invalid_BTree_Node
 	}
 	a := read_btree_node(db, a_ptr) or_return
@@ -1049,7 +1049,7 @@ btree_join_right :: proc(db: ^Database, a_ptr: i64, ha: int, expected_a: i64, b_
 }
 
 btree_join_left :: proc(db: ^Database, a_ptr: i64, ha: int, expected_a: i64, b_ptr: i64, hb: int, expected_b: i64, depth: int = 0) -> (res: BTree_Join_Result, err: Error) {
-	if depth >= ITERATOR_STACK_SIZE * 2 || hb <= ha {
+	if depth >= MAX_BTREE_DEPTH || hb <= ha {
 		return {}, .Invalid_BTree_Node
 	}
 	b := read_btree_node(db, b_ptr) or_return
@@ -1116,7 +1116,7 @@ btree_subtree :: proc(db: ^Database, children: []Slot, counts: []i64, start, len
 }
 
 btree_split_right :: proc(db: ^Database, root_ptr, rank, expected: i64, depth: int = 0) -> (res: i64, err: Error) {
-	if depth >= ITERATOR_STACK_SIZE * 2 {
+	if depth >= MAX_BTREE_DEPTH {
 		return 0, .Invalid_BTree_Node
 	}
 	node := read_btree_node(db, root_ptr) or_return
@@ -1161,7 +1161,7 @@ btree_split_right :: proc(db: ^Database, root_ptr, rank, expected: i64, depth: i
 }
 
 btree_split_left :: proc(db: ^Database, root_ptr, rank, expected: i64, depth: int = 0) -> (res: i64, err: Error) {
-	if depth >= ITERATOR_STACK_SIZE * 2 {
+	if depth >= MAX_BTREE_DEPTH {
 		return 0, .Invalid_BTree_Node
 	}
 	node := read_btree_node(db, root_ptr) or_return
@@ -1212,7 +1212,7 @@ btree_split_left :: proc(db: ^Database, root_ptr, rank, expected: i64, depth: in
 }
 
 btree_split :: proc(db: ^Database, root_ptr, rank, expected: i64, depth: int = 0) -> (res: BTree_Split_Result, err: Error) {
-	if depth >= ITERATOR_STACK_SIZE * 2 {
+	if depth >= MAX_BTREE_DEPTH {
 		return {}, .Invalid_BTree_Node
 	}
 	node := read_btree_node(db, root_ptr) or_return
@@ -1546,7 +1546,7 @@ sorted_get :: proc(db: ^Database, header: BTree_Header, key: []u8) -> (res: Mayb
 	node_ptr := header.root_ptr
 	expected := header.size
 	for depth := 0; ; depth += 1 {
-		if depth >= ITERATOR_STACK_SIZE * 2 {
+		if depth >= MAX_BTREE_DEPTH {
 			return nil, .Invalid_BTree_Node
 		}
 		node := read_sorted_node(db, node_ptr) or_return
@@ -1579,7 +1579,7 @@ sorted_rank :: proc(db: ^Database, header: BTree_Header, key: []u8) -> (res: i64
 	expected := header.size
 	rank: i64 = 0
 	for depth := 0; ; depth += 1 {
-		if depth >= ITERATOR_STACK_SIZE * 2 {
+		if depth >= MAX_BTREE_DEPTH {
 			return 0, .Invalid_BTree_Node
 		}
 		node := read_sorted_node(db, node_ptr) or_return
@@ -1705,7 +1705,7 @@ write_sorted_key_and_entry :: proc(db: ^Database, key: []u8, key_only: bool) -> 
 }
 
 sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, expected: i64, key_only, can_add: bool, frozen_at: i64, depth: int = 0) -> (res: Sorted_Insert_Result, err: Error) {
-	if depth >= ITERATOR_STACK_SIZE * 2 {
+	if depth >= MAX_BTREE_DEPTH {
 		return {}, .Invalid_BTree_Node
 	}
 	reusable := btree_reusable(db, node_ptr, frozen_at)
@@ -2144,7 +2144,7 @@ sorted_put :: proc(db: ^Database, node_ptr: i64, key: []u8, expected: i64, key_o
 }
 
 sorted_remove :: proc(db: ^Database, node_ptr: i64, key: []u8, expected, frozen_at: i64, depth: int = 0) -> (res: Sorted_Remove_Result, err: Error) {
-	if depth >= ITERATOR_STACK_SIZE * 2 {
+	if depth >= MAX_BTREE_DEPTH {
 		return {}, .Invalid_BTree_Node
 	}
 	if btree_reusable(db, node_ptr, frozen_at) {

@@ -40,7 +40,10 @@ BTREE_HEADER_LENGTH      :: 16
 KEY_VALUE_PAIR_BASE_LEN  :: 18
 SORTED_KEY_VALUE_LEN     :: 18
 SORTED_KV_PAIR_LENGTH    :: 18
-ITERATOR_STACK_SIZE      :: 16
+// Maximum tree depth shared across B-trees (log2(u64) = 64 at min fan-out 2),
+// SHA-256 HAMTs (256 / 4 = 64 nibbles), structural diffs, and Cursor_Iterator stacks.
+MAX_BTREE_DEPTH          :: 64
+ITERATOR_STACK_SIZE      :: MAX_BTREE_DEPTH
 
 // Tag identifies the data structure or primitive stored in a Slot.
 Tag :: enum u8 {

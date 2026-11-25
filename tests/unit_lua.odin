@@ -266,7 +266,7 @@ unit_lua_arena_context_allocator_bounds_unmarshal_iterator_growth :: proc(t: ^te
 	}
 	defer lua.close(L)
 
-	arena_buf := make([]u8, 64 * 1024, context.allocator)
+	arena_buf := make([]u8, 8 * size_of(xitdb.Cursor_Iterator), context.allocator)
 	defer delete(arena_buf, context.allocator)
 	arena: mem.Arena
 	mem.arena_init(&arena, arena_buf[:])
@@ -277,7 +277,7 @@ unit_lua_arena_context_allocator_bounds_unmarshal_iterator_growth :: proc(t: ^te
 
 	u_err := xitdb.lua_unmarshal_cursor(L, groups_cur)
 	testing.expect_value(t, u_err, nil)
-	testing.expect(t, arena.offset < 32 * 1024, "Expected bounded arena growth during lua_unmarshal_cursor")
+	testing.expect(t, arena.offset < 3 * size_of(xitdb.Cursor_Iterator), "Expected bounded arena growth during lua_unmarshal_cursor")
 	if u_err == nil {
 		lua.pop(L, 1)
 	}

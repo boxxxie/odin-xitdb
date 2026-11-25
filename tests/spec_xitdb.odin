@@ -2993,3 +2993,291 @@ unit_diff_collection_with_stats_and_cross_db_rejection :: proc(t: ^testing.T) {
 	testing.expect_value(t, ov_sm_stats.keys_decoded, u64(3))
 	free_changes(ov_sm_ch)
 }
+
+@(test)
+unit_cursor_iterator_small_stack_recursion_and_self_aliasing :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	testing.expect_value(t, xitdb.MAX_BTREE_DEPTH, 64)
+	testing.expect_value(t, xitdb.ITERATOR_STACK_SIZE, 64)
+
+	DEPTH :: 40
+	SMALL_STACK :: 512 * 1024
+	testing.expect(t, size_of(xitdb.Cursor_Iterator) * DEPTH > SMALL_STACK, "Expected 40 stacked Cursor_Iterator frames to exceed 512 KiB stack")
+
+	core := xitdb.core_memory_init()
+	defer _ = xitdb.core_destroy(&core)
+
+	db, init_err := xitdb.database_init(&core, xitdb.sha1_hasher())
+	testing.expect_value(t, init_err, nil)
+
+	setup_cb :: proc(cursor: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+		root := xitdb.write_hash_map_init(cursor^) or_return
+
+		scalar_cur := xitdb.hash_map_put_cursor(&root, "scalar") or_return
+		xitdb.cursor_write(&scalar_cur, u64(42)) or_return
+
+		al_cur := xitdb.hash_map_put_cursor(&root, "al") or_return
+		al_top := xitdb.write_array_list_init(al_cur) or_return
+		xitdb.array_list_append(&al_top, u64(10)) or_return
+		xitdb.array_list_append(&al_top, u64(20)) or_return
+		xitdb.array_list_append(&al_top, u64(30)) or_return
+
+		sm_cur := xitdb.hash_map_put_cursor(&root, "sm") or_return
+		sm_top := xitdb.write_sorted_map_init(sm_cur) or_return
+		xitdb.sorted_map_put(&sm_top, "a", u64(100)) or_return
+		xitdb.sorted_map_put(&sm_top, "b", u64(200)) or_return
+		xitdb.sorted_map_put(&sm_top, "c", u64(300)) or_return
+
+		ll_cur := xitdb.hash_map_put_cursor(&root, "ll") or_return
+		ll_top := xitdb.write_linked_array_list_init(ll_cur) or_return
+		xitdb.linked_array_list_append(&ll_top, u64(1000)) or_return
+		xitdb.linked_array_list_append(&ll_top, u64(2000)) or_return
+		xitdb.linked_array_list_append(&ll_top, u64(3000)) or_return
+
+		cur := xitdb.hash_map_put_cursor(&root, "chain") or_return
+		for level in 0 ..< DEPTH {
+			switch level % 4 {
+			case 0:
+				hm := xitdb.write_hash_map_init(cur) or_return
+				xitdb.hash_map_put(&hm, "pad", u64(level)) or_return
+				cur = xitdb.hash_map_put_cursor(&hm, "next") or_return
+			case 1:
+				al := xitdb.write_array_list_init(cur) or_return
+				xitdb.array_list_append(&al, u64(level)) or_return
+				cur = xitdb.array_list_append_cursor(&al) or_return
+			case 2:
+				sm := xitdb.write_sorted_map_init(cur) or_return
+				xitdb.sorted_map_put(&sm, "a_pad", u64(level)) or_return
+				cur = xitdb.sorted_map_put_cursor(&sm, "m_next") or_return
+			case 3:
+				ll := xitdb.write_linked_array_list_init(cur) or_return
+				xitdb.linked_array_list_append(&ll, u64(level)) or_return
+				cur = xitdb.linked_array_list_append_cursor(&ll) or_return
+			}
+		}
+
+		leaf := xitdb.write_hash_map_init(cur) or_return
+		xitdb.hash_map_put(&leaf, "leaf", "bottom") or_return
+		return nil
+	}
+
+	testing.expect_value(t, xitdb.database_run_context(&db, setup_cb), nil)
+
+	root_ro, root_err := xitdb.read_hash_map_init(xitdb.database_root_cursor(&db).read_cursor)
+	testing.expect_value(t, root_err, nil)
+
+	chain_rc, chain_err := xitdb.hash_map_get_cursor(root_ro, "chain")
+	testing.expect_value(t, chain_err, nil)
+	testing.expect(t, chain_rc != nil, "Expected chain cursor")
+
+	Iter_Pool :: struct {
+		free_list: [dynamic]^xitdb.Cursor_Iterator,
+	}
+	pool_acquire :: proc(pool: ^Iter_Pool) -> ^xitdb.Cursor_Iterator {
+		if len(pool.free_list) > 0 {
+			return pop(&pool.free_list)
+		}
+		return new(xitdb.Cursor_Iterator)
+	}
+	pool_release :: proc(pool: ^Iter_Pool, it: ^xitdb.Cursor_Iterator) {
+		append(&pool.free_list, it)
+	}
+	pool_destroy :: proc(pool: ^Iter_Pool) {
+		for it in pool.free_list {
+			free(it)
+		}
+		delete(pool.free_list)
+	}
+
+	traverse_chain :: proc(
+		t: ^testing.T,
+		cursor: xitdb.Read_Cursor,
+		pool: ^Iter_Pool,
+		depth: int,
+		reverse: bool,
+		leaf_out: []u8,
+		leaf_len: ^int,
+	) -> xitdb.Error {
+		slot := xitdb.cursor_slot(cursor) or_return
+		#partial switch slot.tag {
+		case .Bytes, .Short_Bytes:
+			b := xitdb.cursor_read_bytes_buf(cursor, leaf_out) or_return
+			leaf_len^ = len(b.value)
+			testing.expect_value(t, depth, DEPTH + 1)
+		case .Hash_Map, .Sorted_Map, .Array_List, .Linked_Array_List:
+			is_map := slot.tag == .Hash_Map || slot.tag == .Sorted_Map
+			it := pool_acquire(pool)
+			defer pool_release(pool, it)
+			if reverse {
+				xitdb.cursor_iterator_reverse_init(it, cursor) or_return
+			} else {
+				xitdb.cursor_iterator_init(it, cursor) or_return
+			}
+			for {
+				elem_maybe: Maybe(xitdb.Read_Cursor)
+				if reverse {
+					elem_maybe = xitdb.cursor_iterator_prev(it) or_return
+				} else {
+					elem_maybe = xitdb.cursor_iterator_next(it) or_return
+				}
+				elem, has_elem := elem_maybe.?
+				if !has_elem {
+					break
+				}
+				next_cur := elem
+				if is_map {
+					_, val_cur := xitdb.cursor_read_kv_pair_slots(elem) or_return
+					next_cur = val_cur
+				}
+				traverse_chain(t, next_cur, pool, depth + 1, reverse, leaf_out, leaf_len) or_return
+			}
+		}
+		return nil
+	}
+
+	Worker_Args :: struct {
+		t:        ^testing.T,
+		chain_rc: xitdb.Read_Cursor,
+		pool_dst: proc(^Iter_Pool),
+		walk:     proc(^testing.T, xitdb.Read_Cursor, ^Iter_Pool, int, bool, []u8, ^int) -> xitdb.Error,
+	}
+
+	worker :: proc(raw: rawptr) {
+		a := (^Worker_Args)(raw)
+		pool := Iter_Pool{free_list = make([dynamic]^xitdb.Cursor_Iterator)}
+		defer a.pool_dst(&pool)
+
+		fwd_buf: [16]u8
+		fwd_len := 0
+		testing.expect_value(a.t, a.walk(a.t, a.chain_rc, &pool, 0, false, fwd_buf[:], &fwd_len), nil)
+		testing.expect_value(a.t, string(fwd_buf[:fwd_len]), "bottom")
+
+		rev_buf: [16]u8
+		rev_len := 0
+		testing.expect_value(a.t, a.walk(a.t, a.chain_rc, &pool, 0, true, rev_buf[:], &rev_len), nil)
+		testing.expect_value(a.t, string(rev_buf[:rev_len]), "bottom")
+	}
+
+	args := Worker_Args{
+		t        = t,
+		chain_rc = chain_rc.?,
+		pool_dst = pool_destroy,
+		walk     = traverse_chain,
+	}
+	_run_on_small_stack(t, SMALL_STACK, worker, &args)
+
+	// Mid-walk self-aliasing restarts (`it.cursor` passed into `cursor_iterator_*_init(it, it.cursor)`)
+	al_rc, al_err := xitdb.hash_map_get_cursor(root_ro, "al")
+	sm_rc, sm_err := xitdb.hash_map_get_cursor(root_ro, "sm")
+	ll_rc, ll_err := xitdb.hash_map_get_cursor(root_ro, "ll")
+	scalar_rc, scalar_err := xitdb.hash_map_get_cursor(root_ro, "scalar")
+	testing.expect(t, al_err == nil && sm_err == nil && ll_err == nil && scalar_err == nil, "Expected top-level cursors")
+
+	it := new(xitdb.Cursor_Iterator)
+	defer free(it)
+
+	expect_next_uint :: proc(t: ^testing.T, it: ^xitdb.Cursor_Iterator, expected: u64) {
+		c_maybe, nerr := xitdb.cursor_iterator_next(it)
+		testing.expect_value(t, nerr, nil)
+		testing.expect(t, c_maybe != nil, "Expected iterator element")
+		if c, ok := c_maybe.?; ok {
+			v, verr := xitdb.cursor_read_uint(c)
+			testing.expect_value(t, verr, nil)
+			testing.expect_value(t, v, expected)
+		}
+	}
+	expect_prev_uint :: proc(t: ^testing.T, it: ^xitdb.Cursor_Iterator, expected: u64) {
+		c_maybe, perr := xitdb.cursor_iterator_prev(it)
+		testing.expect_value(t, perr, nil)
+		testing.expect(t, c_maybe != nil, "Expected reverse iterator element")
+		if c, ok := c_maybe.?; ok {
+			v, verr := xitdb.cursor_read_uint(c)
+			testing.expect_value(t, verr, nil)
+			testing.expect_value(t, v, expected)
+		}
+	}
+	expect_next_kv_uint :: proc(t: ^testing.T, it: ^xitdb.Cursor_Iterator, expected: u64) {
+		c_maybe, nerr := xitdb.cursor_iterator_next(it)
+		testing.expect_value(t, nerr, nil)
+		testing.expect(t, c_maybe != nil, "Expected sorted iterator element")
+		if c, ok := c_maybe.?; ok {
+			_, val_cur, kerr := xitdb.cursor_read_kv_pair_slots(c)
+			testing.expect_value(t, kerr, nil)
+			v, verr := xitdb.cursor_read_uint(val_cur)
+			testing.expect_value(t, verr, nil)
+			testing.expect_value(t, v, expected)
+		}
+	}
+	expect_prev_kv_uint :: proc(t: ^testing.T, it: ^xitdb.Cursor_Iterator, expected: u64) {
+		c_maybe, perr := xitdb.cursor_iterator_prev(it)
+		testing.expect_value(t, perr, nil)
+		testing.expect(t, c_maybe != nil, "Expected reverse sorted iterator element")
+		if c, ok := c_maybe.?; ok {
+			_, val_cur, kerr := xitdb.cursor_read_kv_pair_slots(c)
+			testing.expect_value(t, kerr, nil)
+			v, verr := xitdb.cursor_read_uint(val_cur)
+			testing.expect_value(t, verr, nil)
+			testing.expect_value(t, v, expected)
+		}
+	}
+
+	testing.expect_value(t, xitdb.cursor_iterator_init(it, al_rc.?), nil)
+	expect_next_uint(t, it, 10)
+	testing.expect_value(t, xitdb.cursor_iterator_init(it, it.cursor), nil)
+	expect_next_uint(t, it, 10)
+
+	testing.expect_value(t, xitdb.cursor_iterator_reverse_init(it, al_rc.?), nil)
+	expect_prev_uint(t, it, 30)
+	testing.expect_value(t, xitdb.cursor_iterator_reverse_init(it, it.cursor), nil)
+	expect_prev_uint(t, it, 30)
+
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_key_init(it, sm_rc.?, transmute([]u8)string("b")), nil)
+	expect_next_kv_uint(t, it, 200)
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_key_init(it, it.cursor, transmute([]u8)string("b")), nil)
+	expect_next_kv_uint(t, it, 200)
+
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_index_init(it, sm_rc.?, 1), nil)
+	expect_next_kv_uint(t, it, 200)
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_from_index_init(it, it.cursor, 1), nil)
+	expect_next_kv_uint(t, it, 200)
+
+	testing.expect_value(t, xitdb.cursor_iterator_array_list_from_index_init(it, al_rc.?, 1), nil)
+	expect_next_uint(t, it, 20)
+	testing.expect_value(t, xitdb.cursor_iterator_array_list_from_index_init(it, it.cursor, 1), nil)
+	expect_next_uint(t, it, 20)
+
+	testing.expect_value(t, xitdb.cursor_iterator_linked_array_list_from_index_init(it, ll_rc.?, 1), nil)
+	expect_next_uint(t, it, 2000)
+	testing.expect_value(t, xitdb.cursor_iterator_linked_array_list_from_index_init(it, it.cursor, 1), nil)
+	expect_next_uint(t, it, 2000)
+
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_reverse_from_key_init(it, sm_rc.?, transmute([]u8)string("b")), nil)
+	expect_prev_kv_uint(t, it, 200)
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_reverse_from_key_init(it, it.cursor, transmute([]u8)string("b")), nil)
+	expect_prev_kv_uint(t, it, 200)
+
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_reverse_from_index_init(it, sm_rc.?, 1), nil)
+	expect_prev_kv_uint(t, it, 200)
+	testing.expect_value(t, xitdb.cursor_iterator_sorted_reverse_from_index_init(it, it.cursor, 1), nil)
+	expect_prev_kv_uint(t, it, 200)
+
+	testing.expect_value(t, xitdb.cursor_iterator_array_list_reverse_from_index_init(it, al_rc.?, 1), nil)
+	expect_prev_uint(t, it, 20)
+	testing.expect_value(t, xitdb.cursor_iterator_array_list_reverse_from_index_init(it, it.cursor, 1), nil)
+	expect_prev_uint(t, it, 20)
+
+	testing.expect_value(t, xitdb.cursor_iterator_linked_array_list_reverse_from_index_init(it, ll_rc.?, 1), nil)
+	expect_prev_uint(t, it, 2000)
+	testing.expect_value(t, xitdb.cursor_iterator_linked_array_list_reverse_from_index_init(it, it.cursor, 1), nil)
+	expect_prev_uint(t, it, 2000)
+
+	// Error rollback on scalar re-init zeroes state cleanly
+	testing.expect_value(t, xitdb.cursor_iterator_init(it, scalar_rc.?), xitdb.Xitdb_Error.Unexpected_Tag)
+	testing.expect_value(t, it.size, i64(0))
+	testing.expect_value(t, it.index, i64(0))
+	testing.expect_value(t, it.stack_len, 0)
+	after_err, after_err_code := xitdb.cursor_iterator_next(it)
+	testing.expect_value(t, after_err_code, nil)
+	testing.expect(t, after_err == nil, "Expected nil from zero-rolled-back iterator")
+}
