@@ -29,8 +29,9 @@ Core_Memory :: struct {
 
 // Core_File stores a xitdb database directly on an OS file handle.
 Core_File :: struct {
-	file:  ^os.File,
-	fsync: bool,
+	file:      ^os.File,
+	fsync:     bool,
+	read_only: bool,
 }
 
 // Core_Buffered_File wraps an OS file handle with an in-memory contiguous write window
@@ -130,20 +131,52 @@ core_memory_bytes :: proc(c: ^Core) -> []u8 {
 	return nil
 }
 
-core_file_init :: proc(file: ^os.File, fsync := true) -> Core {
-	return Core_File{file = file, fsync = fsync}
+// Wraps an already-open `^os.File` without acquiring an OS file lock.
+// Pass `read_only = true` for read-only handles so `core_set_length` remains a no-op.
+core_file_init :: proc(file: ^os.File, fsync := true, read_only := false) -> Core {
+	return Core_File{file = file, fsync = fsync, read_only = read_only}
 }
 
 core_memory_from_bytes :: proc(data: []u8, allocator := context.allocator) -> Core {
 	return core_memory_init_from_bytes(data, allocator)
 }
 
-core_file_open :: proc(path: string, flags := os.File_Flags{.Read, .Write, .Create}, fsync := true) -> (c: Core, err: Error) {
-	f := os.open(path, flags, os.Permissions_Default_File) or_return
-	return Core_File{file = f, fsync = fsync}, nil
+@(private)
+_is_writable_flags :: #force_inline proc(flags: os.File_Flags) -> bool {
+	return (.Write in flags) || (.Append in flags)
 }
 
-core_buffered_file_init :: proc(file: ^os.File, buffer_size: i64 = DEFAULT_BUFFER_SIZE, fsync := true, allocator := context.allocator) -> Core {
+@(private, require_results)
+_open_and_lock_file :: proc(path: string, flags: os.File_Flags, lock := true) -> (f: ^os.File, err: Error) {
+	if lock && _is_writable_flags(flags) {
+		// Acquire the exclusive OS lock before applying `.Trunc` so a contending open
+		// never destroys an active writer's file contents.
+		open_flags := flags - {.Trunc}
+		opened := os.open(path, open_flags, os.Permissions_Default_File) or_return
+		if lock_err := _core_try_lock_exclusive(opened); lock_err != nil {
+			_ = os.close(opened)
+			return nil, lock_err
+		}
+		if .Trunc in flags {
+			if trunc_err := os.truncate(opened, 0); trunc_err != nil {
+				_ = os.close(opened)
+				return nil, trunc_err
+			}
+		}
+		return opened, nil
+	}
+	return os.open(path, flags, os.Permissions_Default_File)
+}
+
+@(require_results)
+core_file_open :: proc(path: string, flags := os.File_Flags{.Read, .Write, .Create}, fsync := true, lock := true) -> (c: Core, err: Error) {
+	f := _open_and_lock_file(path, flags, lock) or_return
+	return Core_File{file = f, fsync = fsync, read_only = !_is_writable_flags(flags)}, nil
+}
+
+// Wraps an already-open `^os.File` with a write buffer without acquiring an OS file lock.
+// Pass `read_only = true` for read-only handles so `core_set_length` remains a no-op.
+core_buffered_file_init :: proc(file: ^os.File, buffer_size: i64 = DEFAULT_BUFFER_SIZE, fsync := true, allocator := context.allocator, read_only := false) -> Core {
 	sz := buffer_size if buffer_size > 0 else DEFAULT_BUFFER_SIZE
 	return Core_Buffered_File{
 		memory = Core_Memory{
@@ -154,14 +187,15 @@ core_buffered_file_init :: proc(file: ^os.File, buffer_size: i64 = DEFAULT_BUFFE
 		memory_max_size = sz,
 		memory_pos      = 0,
 		pos             = 0,
-		file            = Core_File{file = file, fsync = fsync},
+		file            = Core_File{file = file, fsync = fsync, read_only = read_only},
 		file_len        = nil,
 	}
 }
 
-core_buffered_file_open :: proc(path: string, buffer_size: i64 = DEFAULT_BUFFER_SIZE, flags := os.File_Flags{.Read, .Write, .Create}, fsync := true, allocator := context.allocator) -> (c: Core, err: Error) {
-	f := os.open(path, flags, os.Permissions_Default_File) or_return
-	return core_buffered_file_init(f, buffer_size, fsync, allocator), nil
+@(require_results)
+core_buffered_file_open :: proc(path: string, buffer_size: i64 = DEFAULT_BUFFER_SIZE, flags := os.File_Flags{.Read, .Write, .Create}, fsync := true, allocator := context.allocator, lock := true) -> (c: Core, err: Error) {
+	f := _open_and_lock_file(path, flags, lock) or_return
+	return core_buffered_file_init(f, buffer_size, fsync, allocator, !_is_writable_flags(flags)), nil
 }
 
 // Creates a copy-on-write overlay over the first `base_size` bytes of `base` (see `Core_Overlay`).
@@ -523,21 +557,46 @@ core_set_length :: proc(c: ^Core, new_len: i64) -> Error {
 		}
 		return nil
 	case Core_File:
-		err := os.truncate(v.file, new_len)
-		if err != nil {
+		if v.read_only {
 			// Read-only file handles ignore setLength just like Zig/Go xitdb.
 			return nil
 		}
+		os.truncate(v.file, new_len) or_return
 		pos := os.seek(v.file, 0, .Current) or_return
 		if pos > new_len {
 			os.seek(v.file, new_len, .Start) or_return
 		}
 		return nil
 	case Core_Buffered_File:
+		if v.file.read_only {
+			return nil
+		}
 		buf_size := i64(len(v.memory.buf))
+		if buf_size > 0 && new_len > v.memory_pos {
+			// If `os.truncate` would extend the on-disk file past dirty buffered bytes,
+			// write the surviving dirty prefix first so readers/crashes never observe zero-fill.
+			disk_len, len_ok := v.file_len.?
+			if !len_ok {
+				disk_len = os.file_size(v.file.file) or_return
+			}
+			if disk_len < new_len {
+				keep := int(min(buf_size, new_len - v.memory_pos))
+				_buffered_write_to_file(&v, v.memory_pos, v.memory.buf[:keep]) or_return
+				os.truncate(v.file.file, new_len) or_return
+				clear(&v.memory.buf)
+				v.memory_pos = new_len
+				v.file_len = new_len
+				if v.pos > new_len {
+					v.pos = new_len
+				}
+				return nil
+			}
+		}
+		os.truncate(v.file.file, new_len) or_return
 		if new_len <= v.memory_pos {
 			clear(&v.memory.buf)
-		} else if new_len < v.memory_pos + buf_size {
+			v.memory_pos = new_len
+		} else if new_len - v.memory_pos < buf_size {
 			new_buf_len := int(new_len - v.memory_pos)
 			if v.memory.vmem_reserved > 0 {
 				raw_arr := (^runtime.Raw_Dynamic_Array)(&v.memory.buf)
@@ -546,8 +605,7 @@ core_set_length :: proc(c: ^Core, new_len: i64) -> Error {
 				resize(&v.memory.buf, new_buf_len)
 			}
 		}
-		v.file_len = nil
-		_ = os.truncate(v.file.file, new_len)
+		v.file_len = new_len
 		if v.pos > new_len {
 			v.pos = new_len
 		}
@@ -683,13 +741,13 @@ core_read_at :: proc(c: ^Core, pos: i64, p: []u8) -> (read_n: int, err: Error) {
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
 		if buf_len > 0 && pos >= v.memory_pos {
-			if pos >= v.memory_pos + buf_len {
-				return 0, io.Error.EOF
+			rel_off := pos - v.memory_pos
+			if rel_off < buf_len {
+				mem_off := int(rel_off)
+				size := min(len(p), int(buf_len) - mem_off)
+				copy(p[:size], v.memory.buf[mem_off:mem_off + size])
+				return size, nil
 			}
-			mem_off := int(pos - v.memory_pos)
-			size := min(len(p), int(buf_len) - mem_off)
-			copy(p[:size], v.memory.buf[mem_off:mem_off + size])
-			return size, nil
 		}
 		max_size := len(p)
 		if buf_len > 0 && pos < v.memory_pos {
@@ -725,10 +783,13 @@ core_read_exact_at :: proc(c: ^Core, pos: i64, p: []u8) -> Error {
 		return nil
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
-		if buf_len > 0 && pos >= v.memory_pos && pos <= v.memory_pos + buf_len && i64(len(p)) <= (v.memory_pos + buf_len) - pos {
-			mem_off := int(pos - v.memory_pos)
-			copy(p, v.memory.buf[mem_off : mem_off + len(p)])
-			return nil
+		if buf_len > 0 && pos >= v.memory_pos {
+			rel_off := pos - v.memory_pos
+			if rel_off < buf_len && i64(len(p)) <= buf_len - rel_off {
+				mem_off := int(rel_off)
+				copy(p, v.memory.buf[mem_off : mem_off + len(p)])
+				return nil
+			}
 		}
 	}
 	total := 0
@@ -774,13 +835,12 @@ core_read_short_at :: proc(c: ^Core, pos: i64, p: []u8) -> (block: []u8, err: Er
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
 		if buf_len > 0 && pos >= v.memory_pos {
-			if pos >= v.memory_pos + buf_len {
-				return p[:0], nil
+			rel_off := pos - v.memory_pos
+			if rel_off < buf_len && i64(len(p)) <= buf_len - rel_off {
+				mem_off := int(rel_off)
+				copy(p, v.memory.buf[mem_off : mem_off + len(p)])
+				return p, nil
 			}
-			mem_off := int(pos - v.memory_pos)
-			avail := min(len(p), int(buf_len) - mem_off)
-			copy(p[:avail], v.memory.buf[mem_off : mem_off + avail])
-			return p[:avail], nil
 		}
 	}
 	total := 0
@@ -819,12 +879,11 @@ core_read_block_at :: #force_inline proc(c: ^Core, pos: i64, buf: []u8) -> (bloc
 	case Core_Buffered_File:
 		buf_len := i64(len(v.memory.buf))
 		if buf_len > 0 && pos >= v.memory_pos {
-			if pos >= v.memory_pos + buf_len {
-				return nil, nil
+			rel_off := pos - v.memory_pos
+			if rel_off < buf_len && i64(len(buf)) <= buf_len - rel_off {
+				mem_off := int(rel_off)
+				return v.memory.buf[mem_off : mem_off + len(buf)], nil
 			}
-			mem_off := int(pos - v.memory_pos)
-			avail := min(len(buf), int(buf_len) - mem_off)
-			return v.memory.buf[mem_off : mem_off + avail], nil
 		}
 	}
 	return core_read_short_at(c, pos, buf)

@@ -114,6 +114,7 @@ Xitdb_Error :: enum {
 	End_Of_Stream,
 	Unexpected_Writer_Position,
 	Write_Failed,
+	File_Locked,
 	Unexpected_EOF,
 	Unreachable,
 }

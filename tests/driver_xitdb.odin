@@ -2735,14 +2735,14 @@ driver_verify_buffered_file_multi_handle_alternating_commits :: proc(ctx: ^Suite
 	defer _ = os.remove(shared_path)
 
 	// Open two independent `Core_Buffered_File` handles on the same OS file (simulating two processes under a file lock)
-	c1, err1 := xitdb.core_buffered_file_open(shared_path, 4096, {.Read, .Write, .Create, .Trunc})
+	c1, err1 := xitdb.core_buffered_file_open(shared_path, 4096, {.Read, .Write, .Create, .Trunc}, lock = false)
 	testing.expect_value(ctx.t, err1, nil)
 	defer _ = xitdb.core_destroy(&c1, true)
 
 	db1, init1 := xitdb.database_init(&c1, xitdb.sha1_hasher())
 	testing.expect_value(ctx.t, init1, nil)
 
-	c2, err2 := xitdb.core_buffered_file_open(shared_path, 4096, {.Read, .Write})
+	c2, err2 := xitdb.core_buffered_file_open(shared_path, 4096, {.Read, .Write}, lock = false)
 	testing.expect_value(ctx.t, err2, nil)
 	defer _ = xitdb.core_destroy(&c2, true)
 
