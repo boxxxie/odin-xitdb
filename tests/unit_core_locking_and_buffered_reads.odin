@@ -282,3 +282,177 @@ test_buffered_file_set_length_flushes_before_extending_on_disk :: proc(t: ^testi
 	testing.expect_value(t, uerr, nil)
 	testing.expect_value(t, xitdb.core_destroy(&unlocked, close_file = true), nil)
 }
+
+@(test)
+test_buffered_file_set_length_shrink_and_extend_branches :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	path := test_temp_path(t, "set_len_branches.bin")
+	_ = os.remove(path)
+	defer _ = os.remove(path)
+
+	c, open_err := xitdb.core_buffered_file_open(path, 4096, {.Read, .Write, .Create, .Trunc}, false)
+	testing.expect_value(t, open_err, nil)
+	defer xitdb.core_destroy(&c, close_file = true)
+
+	// Seed 200 bytes on disk, then dirty [100, 140)
+	base: [200]u8
+	for i in 0 ..< len(base) {
+		base[i] = u8(0x20 + (i & 0x3f))
+	}
+	testing.expect_value(t, xitdb.core_seek_to(&c, 0), nil)
+	testing.expect_value(t, xitdb.core_write_all(&c, base[:]), nil)
+	testing.expect_value(t, xitdb.core_flush(&c), nil)
+
+	dirty: [40]u8
+	for i in 0 ..< len(dirty) {
+		dirty[i] = u8(0xC0 + (i & 0x1f))
+	}
+	testing.expect_value(t, xitdb.core_seek_to(&c, 100), nil)
+	testing.expect_value(t, xitdb.core_write_all(&c, dirty[:]), nil)
+
+	// 1. Shrink into middle of dirty buffer (memory_pos < new_len < memory_pos + buf_size, disk_len >= new_len)
+	testing.expect_value(t, xitdb.core_set_length(&c, 120), nil)
+	cur_len, lerr1 := xitdb.core_length(&c)
+	testing.expect_value(t, lerr1, nil)
+	testing.expect_value(t, cur_len, i64(120))
+
+	got_mid: [20]u8
+	testing.expect_value(t, xitdb.core_read_exact_at(&c, 100, got_mid[:]), nil)
+	testing.expect_value(t, string(got_mid[:]), string(dirty[:20]))
+
+	eof_buf: [4]u8
+	eof_n, eof_err := xitdb.core_read_at(&c, 120, eof_buf[:])
+	testing.expect_value(t, eof_err, io.Error.EOF)
+	testing.expect_value(t, eof_n, 0)
+
+	// 2. Shrink below memory_pos (new_len <= memory_pos) clears dirty buffer
+	testing.expect_value(t, xitdb.core_set_length(&c, 80), nil)
+	cur_len2, lerr2 := xitdb.core_length(&c)
+	testing.expect_value(t, lerr2, nil)
+	testing.expect_value(t, cur_len2, i64(80))
+
+	got_head: [80]u8
+	testing.expect_value(t, xitdb.core_read_exact_at(&c, 0, got_head[:]), nil)
+	testing.expect_value(t, string(got_head[:]), string(base[:80]))
+
+	// 3. Extend past dirty buffer (new_len > memory_pos + buf_size) flushes dirty prefix and zero-fills tail
+	ext_dirty: [20]u8
+	for i in 0 ..< len(ext_dirty) {
+		ext_dirty[i] = u8(0xE0 + (i & 0x0f))
+	}
+	testing.expect_value(t, xitdb.core_seek_to(&c, 80), nil)
+	testing.expect_value(t, xitdb.core_write_all(&c, ext_dirty[:]), nil)
+	testing.expect_value(t, xitdb.core_set_length(&c, 130), nil)
+
+	ro, ro_err := xitdb.core_file_open(path, {.Read}, false)
+	testing.expect_value(t, ro_err, nil)
+	defer _ = xitdb.core_destroy(&ro, close_file = true)
+
+	disk_len, dlerr := xitdb.core_length(&ro)
+	testing.expect_value(t, dlerr, nil)
+	testing.expect_value(t, disk_len, i64(130))
+
+	got_ext: [50]u8
+	testing.expect_value(t, xitdb.core_read_exact_at(&ro, 80, got_ext[:]), nil)
+	testing.expect_value(t, string(got_ext[:20]), string(ext_dirty[:]))
+	zeros: [30]u8
+	testing.expect_value(t, string(got_ext[20:]), string(zeros[:]))
+}
+
+@(test)
+test_buffered_file_read_block_at_spanning_and_eof :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	path := test_temp_path(t, "read_block_span_eof.bin")
+	_ = os.remove(path)
+	defer _ = os.remove(path)
+
+	c, open_err := xitdb.core_buffered_file_open(path, 4096, {.Read, .Write, .Create, .Trunc}, false)
+	testing.expect_value(t, open_err, nil)
+	defer xitdb.core_destroy(&c, close_file = true)
+
+	initial: [200]u8
+	for i in 0 ..< len(initial) {
+		initial[i] = u8((i * 5 + 1) & 0xff)
+	}
+	testing.expect_value(t, xitdb.core_seek_to(&c, 0), nil)
+	testing.expect_value(t, xitdb.core_write_all(&c, initial[:]), nil)
+	testing.expect_value(t, xitdb.core_flush(&c), nil)
+
+	patch := [16]u8{0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00, 0xEE, 0xFF}
+	expected := initial
+	copy(expected[100:116], patch[:])
+
+	testing.expect_value(t, xitdb.core_seek_to(&c, 100), nil)
+	testing.expect_value(t, xitdb.core_write_all(&c, patch[:]), nil)
+
+	// Spanning from inside dirty buffer [110, 116) into on-disk bytes [116, 130)
+	buf: [20]u8
+	span_blk, serr := xitdb.core_read_block_at(&c, 110, buf[:])
+	testing.expect_value(t, serr, nil)
+	testing.expect_value(t, len(span_blk), 20)
+	testing.expect_value(t, string(span_blk), string(expected[110:130]))
+
+	// Partial read at EOF [190, 200)
+	tail_blk, terr := xitdb.core_read_block_at(&c, 190, buf[:])
+	testing.expect_value(t, terr, nil)
+	testing.expect_value(t, len(tail_blk), 10)
+	testing.expect_value(t, string(tail_blk), string(expected[190:200]))
+
+	// Read exactly at EOF returns empty slice with nil error
+	eof_blk, eerr := xitdb.core_read_block_at(&c, 200, buf[:])
+	testing.expect_value(t, eerr, nil)
+	testing.expect_value(t, len(eof_blk), 0)
+}
+
+@(test)
+test_file_open_write_append_locks_and_readonly_init :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+
+	path := test_temp_path(t, "write_append_ro_init.bin")
+	_ = os.remove(path)
+	defer _ = os.remove(path)
+
+	// 1. Write-only open ({.Write, .Create}) acquires exclusive lock
+	wo, wo_err := xitdb.core_file_open(path, {.Write, .Create, .Trunc}, false)
+	testing.expect_value(t, wo_err, nil)
+	testing.expect_value(t, xitdb.core_write_all(&wo, transmute([]u8)string("hello")), nil)
+
+	contend1, c1_err := xitdb.core_file_open(path, {.Write}, false)
+	testing.expect_value(t, c1_err, xitdb.Xitdb_Error.File_Locked)
+	if c1_err == nil {
+		_ = xitdb.core_destroy(&contend1, close_file = true)
+	}
+	testing.expect_value(t, xitdb.core_destroy(&wo, close_file = true), nil)
+
+	// 2. Append open ({.Read, .Append}) acquires exclusive lock
+	ap, ap_err := xitdb.core_file_open(path, {.Read, .Append}, false)
+	testing.expect_value(t, ap_err, nil)
+
+	contend2, c2_err := xitdb.core_file_open(path, {.Read, .Write}, false)
+	testing.expect_value(t, c2_err, xitdb.Xitdb_Error.File_Locked)
+	if c2_err == nil {
+		_ = xitdb.core_destroy(&contend2, close_file = true)
+	}
+	testing.expect_value(t, xitdb.core_destroy(&ap, close_file = true), nil)
+
+	// 3. core_file_init / core_buffered_file_init with read_only = true ignore core_set_length
+	f1, f1_err := os.open(path, {.Read})
+	testing.expect_value(t, f1_err, nil)
+	ro_raw := xitdb.core_file_init(f1, fsync = false, read_only = true)
+	testing.expect_value(t, xitdb.core_set_length(&ro_raw, 0), nil)
+	len1, l1_err := xitdb.core_length(&ro_raw)
+	testing.expect_value(t, l1_err, nil)
+	testing.expect_value(t, len1, i64(5))
+	testing.expect_value(t, xitdb.core_destroy(&ro_raw, close_file = true), nil)
+
+	f2, f2_err := os.open(path, {.Read})
+	testing.expect_value(t, f2_err, nil)
+	ro_buf := xitdb.core_buffered_file_init(f2, 4096, fsync = false, read_only = true)
+	testing.expect_value(t, xitdb.core_set_length(&ro_buf, 0), nil)
+	len2, l2_err := xitdb.core_length(&ro_buf)
+	testing.expect_value(t, l2_err, nil)
+	testing.expect_value(t, len2, i64(5))
+	testing.expect_value(t, xitdb.core_destroy(&ro_buf, close_file = true), nil)
+}
