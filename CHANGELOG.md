@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-11-26
+
+### Fixed
+
+- **Cross-Platform Exclusive File Locking on Writable Opens (`xitdb/core.odin`, `xitdb/core_lock_linux.odin`, `xitdb/core_lock_bsd.odin`, `xitdb/core_lock_windows.odin`, `xitdb/core_lock_other.odin`, `xitdb/types.odin`):**
+  - Acquire a non-blocking exclusive OS lock before applying `.Trunc` in `core_file_open` / `core_buffered_file_open` (`lock = true` by default) so contending writers fail with `Xitdb_Error.File_Locked` without truncating an active writer's database, while concurrent read-only handles continue to coexist.
+  - Implemented `flock(LOCK_EX | LOCK_NB)` for Linux and Darwin/BSDs (`darwin`, `freebsd`, `openbsd`, `netbsd`), `LockFileEx` on a high-offset sentinel byte for Windows, and fail-closed `io.Error.Unsupported` on unsupported targets.
+- **Buffered File Mid-File Positional Reads & Truncate Flush (`xitdb/core.odin`):**
+  - Fixed `core_read_at`, `core_read_exact_at`, `core_read_short_at`, and `core_read_block_at` on `Core_Buffered_File` when reading past or spanning the dirty write buffer window, and flushed any dirty prefix before truncating/extending in `core_set_length` while preserving the buffer if truncate fails.
+
 ## [2.2.1] - 2026-11-25
 
 ### Fixed
